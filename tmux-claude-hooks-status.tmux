@@ -74,6 +74,9 @@ if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ];
     tmux set-option -g @claude_hooks_reload_registered "1"
 fi
 
+# --- 自动注册 hooks（幂等，每次插件加载时确保 hooks 存在）---
+"${CURRENT_DIR}/scripts/install-hooks.sh" 2>/dev/null || true
+
 # --- 快捷键绑定 ---
 # prefix + C-h: 安装 hooks 到 ~/.claude/settings.json
 tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-hooks.sh && tmux display 'Claude hooks installed'"
