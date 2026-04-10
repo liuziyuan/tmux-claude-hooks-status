@@ -3,7 +3,8 @@
 # 由 tmux MouseDown1StatusDefault 绑定调用，$1 = #{mouse_status_range}（pane_id，如 %2）
 
 PANE_ID="$1"
-[ -z "$PANE_ID" ] && exit 0
+# 只处理 tmux pane ID（%N 格式），其余点击直接忽略
+[[ "$PANE_ID" =~ ^%[0-9]+$ ]] || exit 0
 
 # 通过 pane_id 找到所属 session 和 window
 read -r SESSION WINDOW <<< "$(tmux list-panes -a \

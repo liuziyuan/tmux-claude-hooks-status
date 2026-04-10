@@ -51,7 +51,9 @@ fi
 tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{T:@claude_all_status}#[default],}" 2>/dev/null || true
 
 # 鼠标点击状态栏跳转到对应 pane（需要: set -g mouse on）
-tmux bind-key -T root MouseDown1StatusDefault \
+# #[align=right] 内容触发 MouseDown1StatusRight；
+# handler 内检查 % 前缀过滤掉非 pane-id 的点击，不干扰其他绑定
+tmux bind-key -T root MouseDown1StatusRight \
     run-shell "${CURRENT_DIR}/scripts/status-click-handler.sh '#{mouse_status_range}'" 2>/dev/null || true
 
 if [ "$MODE" = "powerline" ]; then
@@ -63,6 +65,13 @@ else
     # Native 模式：第 1 行只显示时间，无 #(script) 调用
     tmux set-option -g status-right-length 250 2>/dev/null || true
     tmux set-option -g status-right "#[fg=#6272A4]%Y-%m-%d #[fg=#BD93F9]%H:%M" 2>/dev/null || true
+fi
+
+# --- Reload 保护：覆盖 prefix+r reload 绑定，source-file 后追加本插件初始化 ---
+# 用哨兵变量防止重复覆盖（tmux server 生命周期内只覆盖一次）
+if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ]; then
+    tmux bind-key r source-file /Users/liuziyuan/.tmux.conf \; run-shell "'${CURRENT_DIR}/tmux-claude-hooks-status.tmux'" \; display-message "配置已重载"
+    tmux set-option -g @claude_hooks_reload_registered "1"
 fi
 
 # --- 快捷键绑定 ---
