@@ -1,0 +1,19 @@
+#!/bin/bash
+# status-right.sh: Native 模式下的 tmux status-right 渲染
+# 显示 Claude Code 状态 + 系统时间
+
+STATUS_COLOR=$(tmux show-option -gv @claude_hooks_status_color 2>/dev/null || echo "#F1FA8C")
+
+# 读取 Claude 聚合状态
+ALL_STATUS=$(tmux show-option -gv @claude_all_status 2>/dev/null || true)
+
+OUTPUT=""
+
+if [ -n "$ALL_STATUS" ]; then
+    OUTPUT="#[fg=${STATUS_COLOR}]${ALL_STATUS}#[default]"
+fi
+
+# 追加时间
+OUTPUT="${OUTPUT} #[fg=#6272A4]%Y-%m-%d #[fg=#BD93F9]%H:%M"
+
+echo "$OUTPUT"
