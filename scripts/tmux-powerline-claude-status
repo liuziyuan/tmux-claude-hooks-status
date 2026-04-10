@@ -23,7 +23,6 @@ WATCHER_PID_FILE="/tmp/claude-watcher-${TMUX_PANE//[^a-zA-Z0-9]/_}.pid"
 start_watcher() {
     if [ -z "$TMUX_PANE" ]; then return; fi
     (
-        echo $$ > "$WATCHER_PID_FILE"
         prev_title=""
         stable_count=0
         while true; do
@@ -33,7 +32,7 @@ start_watcher() {
                 stable_count=$((stable_count + 1))
                 # title 连续 3 秒不变 → Claude 已空闲
                 if [ "$stable_count" -ge 3 ]; then
-                    tmux set-option -pt "$TMUX_PANE" @claude_pane_status "✓ 空闲" 2>/dev/null
+                    tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
                     ALL=""
                     current_session=""
                     while IFS='|' read -r session_name win_idx pane_idx pane_status; do
@@ -55,6 +54,7 @@ start_watcher() {
             fi
         done
     ) &
+    echo $! > "$WATCHER_PID_FILE"
     disown
 }
 
@@ -72,45 +72,45 @@ case "$EVENT" in
     MSG=$(echo "$INPUT" | jq -r '.message // ""' 2>/dev/null)
     case "$MSG" in
       *"waiting for your input"*)
-        STATUS="✓ 空闲"
+        STATUS="?"
         ;;
       *"permission"*|*"Permission"*)
-        STATUS="🔒 等待授权"
+        STATUS="!"
         ;;
       *)
-        STATUS="💬 $(echo "$MSG" | cut -c1-40)"
+        STATUS="?"
         ;;
     esac
     ;;
   PermissionRequest)
-    STATUS="🔒 等待授权"
+    STATUS="!"
     ;;
   PreToolUse)
-    STATUS="⠿ 处理中"
+    STATUS="..."
     kill_watcher
     ;;
   PostToolUse|PostToolUseFailure)
-    STATUS="⠿ 处理中"
+    STATUS="..."
     kill_watcher
     start_watcher
     ;;
   UserPromptSubmit)
-    STATUS="⠿ 处理中"
+    STATUS="..."
     kill_watcher
     start_watcher
     ;;
   Stop|StopFailure)
-    STATUS="✓ 空闲"
+    STATUS="✓"
     kill_watcher
     # fallback：如果 TMUX_PANE 未解析，清除所有残留的处理中状态
     if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
         while IFS='|' read -r pane_id pane_status; do
-            [ "$pane_status" = "⠿ 处理中" ] && tmux set-option -pt "$pane_id" @claude_pane_status "✓ 空闲" 2>/dev/null
+            [ "$pane_status" = "..." ] && tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null
         done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
     fi
     ;;
   SessionStart)
-    STATUS="✓ 空闲"
+    STATUS="-"
     ;;
   SessionEnd)
     STATUS=""
