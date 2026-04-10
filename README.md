@@ -7,10 +7,10 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 To install automatically with Claude Code, run:
 
 ```
-ai AI_INSTALL.md
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_INSTALL.md
 ```
 
-This will guide you through the installation step by step. See [AI_INSTALL.md](AI_INSTALL.md) for details.
+This will guide you through the installation step by step.
 
 ## Manual Installation
 

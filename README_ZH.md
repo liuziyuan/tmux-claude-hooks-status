@@ -9,10 +9,10 @@
 使用 Claude Code 自动安装，运行：
 
 ```
-ai AI_INSTALL.md
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_INSTALL.md
 ```
 
-Claude Code 将逐步引导你完成安装。详见 [AI_INSTALL.md](AI_INSTALL.md)。
+Claude Code 将逐步引导你完成安装。
 
 ## 手动安装
 
