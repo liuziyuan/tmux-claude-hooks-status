@@ -25,7 +25,13 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 
 ## Development Rules
 
-**Dual-mode sync requirement**: Any change to status rendering logic, icons, colors, or formatting must be applied to both `scripts/tmux-powerline-claude-status` and `scripts/tmux-native-claude-status`. Do not modify one without updating the other.
+> **WARNING — Dual-mode sync requirement (MANDATORY)**
+>
+> Any change to status rendering logic, icons, colors, or formatting must be applied to both `scripts/tmux-powerline-claude-status` and `scripts/tmux-native-claude-status`.
+>
+> - Before modifying either file, you MUST read both files first.
+> - After modifying one, you MUST immediately check the other for parallel logic that needs the same change. Even if the other file only passes through a variable, you must explicitly verify and confirm it doesn't need changes.
+> - Do NOT commit until both files have been reviewed.
 
 ## Key Design Decisions
 

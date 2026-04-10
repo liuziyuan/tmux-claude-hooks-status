@@ -4,8 +4,18 @@
 
 STATUS_COLOR=$(tmux show-option -gv @claude_hooks_status_color 2>/dev/null || echo "#F1FA8C")
 
-# 读取 Claude 聚合状态
-ALL_STATUS=$(tmux show-option -gv @claude_all_status 2>/dev/null || true)
+# 按 session 分组聚合 Claude 状态
+ALL_STATUS=""
+current_session=""
+while IFS='|' read -r session_name win_idx pane_idx pane_status; do
+    [ -n "$pane_status" ] || continue
+    if [ "$session_name" != "$current_session" ]; then
+        ALL_STATUS="${ALL_STATUS:+$ALL_STATUS  }[${session_name}] ${win_idx}.${pane_idx}:${pane_status}"
+        current_session="$session_name"
+    else
+        ALL_STATUS="${ALL_STATUS} ${win_idx}.${pane_idx}:${pane_status}"
+    fi
+done < <(tmux list-panes -a -F "#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
 
 OUTPUT=""
 
