@@ -72,7 +72,7 @@ case "$EVENT" in
     MSG=$(echo "$INPUT" | jq -r '.message // ""' 2>/dev/null)
     case "$MSG" in
       *"waiting for your input"*)
-        STATUS="?"
+        STATUS="-"
         ;;
       *"permission"*|*"Permission"*)
         STATUS="!"
@@ -86,7 +86,12 @@ case "$EVENT" in
     STATUS="!"
     ;;
   PreToolUse)
-    STATUS="..."
+    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
+    if [ "$TOOL" = "AskUserQuestion" ]; then
+        STATUS="?"
+    else
+        STATUS="..."
+    fi
     kill_watcher
     ;;
   PostToolUse|PostToolUseFailure)
