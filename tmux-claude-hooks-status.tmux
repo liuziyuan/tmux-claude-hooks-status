@@ -22,23 +22,43 @@ tmux set-option -g pane-border-style "fg=#6272A4" 2>/dev/null || true
 # --- 模式检测 ---
 MODE=$(tmux show-option -gv @claude_hooks_mode 2>/dev/null || true)
 if [ -z "$MODE" ]; then
-    if tmux show-option -g status-right 2>/dev/null | grep -q "powerline"; then
+    if [ -x ~/.tmux/plugins/tmux-powerline/powerline.sh ] || tmux show-option -g status-right 2>/dev/null | grep -q "powerline"; then
         MODE="powerline"
     else
         MODE="native"
     fi
 fi
 
-if [ "$MODE" = "powerline" ]; then
-    # Powerline 模式：在 powerline 之前插入 Claude 状态
-    # 需要在 TPM/powerline 初始化之后才能正确读取 powerline 路径
-    # 使用 delayed source 确保 powerline 已设置
-    tmux set-option -g status-right-length 120 2>/dev/null || true
-    tmux set-option -g status-right "#{?#{@claude_all_status},#{@claude_all_status} ,}#(ls ~/.tmux/plugins/tmux-powerline/powerline.sh 2>/dev/null && ~/.tmux/plugins/tmux-powerline/powerline.sh right || echo '')" 2>/dev/null || true
+# --- 多行状态栏：动态追加 Claude 状态行 ---
+# 读取当前行数（其他插件已设置好的），追加到最后一行的下一行
+# 幂等检测：若最后一行已含 @claude_all_status 签名，则为我们上次占用的行，直接复用，
+# 不再追加——这样手动重载脚本不会累计增加行数
+_cur_status=$(tmux show-option -gv status 2>/dev/null || echo "on")
+case "$_cur_status" in
+    on)     _cur_rows=1 ;;
+    off)    _cur_rows=0 ;;
+    [0-9]*) _cur_rows=$((_cur_status + 0)) ;;
+    *)      _cur_rows=1 ;;
+esac
+_last_row=$((_cur_rows - 1))
+_last_fmt=$(tmux show-option -gv "status-format[${_last_row}]" 2>/dev/null || true)
+if echo "$_last_fmt" | grep -q "@claude_all_status"; then
+    CLAUDE_ROW=$_last_row
 else
-    # Native 模式：独立 status-right
-    tmux set-option -g status-right-length 120 2>/dev/null || true
-    tmux set-option -g status-right "#(${CURRENT_DIR}/scripts/tmux-native-claude-status)" 2>/dev/null || true
+    CLAUDE_ROW=$_cur_rows
+    tmux set-option -g status $((_cur_rows + 1)) 2>/dev/null || true
+fi
+tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{@claude_all_status}#[default],}" 2>/dev/null || true
+
+if [ "$MODE" = "powerline" ]; then
+    # Powerline 模式：不动 status-right，让 powerline 完全管理第 1 行
+    # 原先的 #(ls ... && powerline.sh right || true) 包装导致闪烁，已废弃：
+    # tmux set-option -g status-right "#(ls ~/.tmux/plugins/tmux-powerline/powerline.sh 2>/dev/null && ~/.tmux/plugins/tmux-powerline/powerline.sh right || true)"
+    true
+else
+    # Native 模式：第 1 行只显示时间，无 #(script) 调用
+    tmux set-option -g status-right-length 250 2>/dev/null || true
+    tmux set-option -g status-right "#[fg=#6272A4]%Y-%m-%d #[fg=#BD93F9]%H:%M" 2>/dev/null || true
 fi
 
 # --- 快捷键绑定 ---

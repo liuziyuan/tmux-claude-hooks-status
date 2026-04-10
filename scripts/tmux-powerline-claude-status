@@ -102,6 +102,12 @@ case "$EVENT" in
   Stop|StopFailure)
     STATUS="✓ 空闲"
     kill_watcher
+    # fallback：如果 TMUX_PANE 未解析，清除所有残留的处理中状态
+    if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
+        while IFS='|' read -r pane_id pane_status; do
+            [ "$pane_status" = "⠿ 处理中" ] && tmux set-option -pt "$pane_id" @claude_pane_status "✓ 空闲" 2>/dev/null
+        done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+    fi
     ;;
   SessionStart)
     STATUS="✓ 空闲"

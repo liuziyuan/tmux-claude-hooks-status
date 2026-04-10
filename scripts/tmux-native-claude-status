@@ -1,10 +1,10 @@
 #!/bin/bash
-# status-right.sh: Native 模式下的 tmux status-right 渲染
-# 显示 Claude Code 状态 + 系统时间
+# status-right.sh: Native 模式下的 Claude Code 状态渲染
+# Claude 状态在第 2 行（status-format[1]）显示，此脚本仅输出 Claude 状态文本
 
 STATUS_COLOR=$(tmux show-option -gv @claude_hooks_status_color 2>/dev/null || echo "#F1FA8C")
 
-# 按 session 分组聚合 Claude 状态
+# 聚合 Claude 状态
 ALL_STATUS=""
 current_session=""
 while IFS='|' read -r session_name win_idx pane_idx pane_status; do
@@ -17,13 +17,6 @@ while IFS='|' read -r session_name win_idx pane_idx pane_status; do
     fi
 done < <(tmux list-panes -a -F "#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
 
-OUTPUT=""
-
 if [ -n "$ALL_STATUS" ]; then
-    OUTPUT="#[fg=${STATUS_COLOR}]${ALL_STATUS}#[default]"
+    echo "#[fg=${STATUS_COLOR}]${ALL_STATUS}#[default]"
 fi
-
-# 追加时间
-OUTPUT="${OUTPUT} #[fg=#6272A4]%Y-%m-%d #[fg=#BD93F9]%H:%M"
-
-echo "$OUTPUT"
