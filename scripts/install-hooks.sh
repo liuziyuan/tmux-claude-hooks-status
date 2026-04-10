@@ -43,12 +43,12 @@ fi
 ACTION="${1:-install}"
 
 if [ "$ACTION" = "uninstall" ]; then
-    # 卸载：移除所有指向本插件的 hooks
+    # 卸载：移除所有指向本插件的 hooks（匹配 "script event" 或旧版无参数格式）
     for EVENT in "${EVENTS[@]}"; do
         UPDATED=$(jq --arg event "$EVENT" --arg hook_script "$HOOK_SCRIPT" '
             .hooks[$event] = [
                 .hooks[$event][]?
-                | .hooks = [.hooks[] | select(.command != $hook_script)]
+                | .hooks = [.hooks[] | select(.command | startswith($hook_script) | not)]
             ] | .hooks[$event] = [.hooks[$event][] | select(.hooks | length > 0)]
         ' "$SETTINGS_FILE")
         echo "$UPDATED" > "$SETTINGS_FILE"
@@ -67,9 +67,11 @@ for EVENT in "${EVENTS[@]}"; do
         *)                 ASYNC="true" ;;
     esac
 
+    HOOK_COMMAND="$HOOK_SCRIPT $EVENT"
+
     # 检查是否已存在（避免重复添加）
-    EXISTS=$(jq --arg event "$EVENT" --arg hook_script "$HOOK_SCRIPT" '
-        [.hooks[$event][]?.hooks[]?.command // empty] | map(select(. == $hook_script)) | length
+    EXISTS=$(jq --arg event "$EVENT" --arg hook_command "$HOOK_COMMAND" '
+        [.hooks[$event][]?.hooks[]?.command // empty] | map(select(. == $hook_command)) | length
     ' "$SETTINGS_FILE")
 
     if [ "$EXISTS" != "0" ]; then
@@ -77,10 +79,10 @@ for EVENT in "${EVENTS[@]}"; do
     fi
 
     UPDATED=$(jq --arg event "$EVENT" \
-        --arg hook_script "$HOOK_SCRIPT" \
+        --arg hook_command "$HOOK_COMMAND" \
         --argjson async "$ASYNC" '
         .hooks[$event] = (.hooks[$event] // []) + [{
-            "hooks": [{"async": $async, "command": $hook_script, "type": "command"}],
+            "hooks": [{"async": $async, "command": $hook_command, "type": "command"}],
             "matcher": ""
         }]
     ' "$SETTINGS_FILE")
