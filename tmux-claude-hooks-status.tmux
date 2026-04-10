@@ -48,7 +48,11 @@ else
     CLAUDE_ROW=$_cur_rows
     tmux set-option -g status $((_cur_rows + 1)) 2>/dev/null || true
 fi
-tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{@claude_all_status}#[default],}" 2>/dev/null || true
+tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{T:@claude_all_status}#[default],}" 2>/dev/null || true
+
+# 鼠标点击状态栏跳转到对应 pane（需要: set -g mouse on）
+tmux bind-key -T root MouseDown1StatusDefault \
+    run-shell "${CURRENT_DIR}/scripts/status-click-handler.sh '#{mouse_status_range}'" 2>/dev/null || true
 
 if [ "$MODE" = "powerline" ]; then
     # Powerline 模式：不动 status-right，让 powerline 完全管理第 1 行
