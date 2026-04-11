@@ -8,11 +8,11 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 
 ## Architecture
 
-**TPM Plugin** (`tmux-claude-hooks-status.tmux`) — entry point. Runs at tmux startup. Detects native vs powerline mode, configures pane-border-format with Claude status, binds keyboard shortcuts (`prefix+C-h` install, `prefix+C-u` uninstall).
+**TPM Plugin** (`tmux-claude-hooks-status.tmux`) — entry point. Runs at tmux startup. Configures pane-border-format with Claude status, binds keyboard shortcuts (`prefix+C-h` install, `prefix+C-u` uninstall).
 
 **Hook Script** (`scripts/tmux-powerline-claude-status`) — the core. Called by Claude Code hooks on each event. Resolves `TMUX_PANE` via process tree walk (hooks don't inherit it), writes per-pane status (`@claude_pane_status`) and aggregated status (`@claude_all_status`) to tmux user options. Spawns a background watcher process that detects idle state when pane title stops changing for 3 seconds.
 
-**Native Renderer** (`scripts/tmux-native-claude-status`) — reads `@claude_all_status` and renders status-right with Claude status + time. Only used in native mode.
+**Status Renderer** (`scripts/tmux-native-claude-status`) — reads `@claude_all_status` and renders status-right with Claude status + time.
 
 **Hook Installer** (`scripts/install-hooks.sh`) — idempotently registers/unregisters Claude Code hooks in `~/.claude/settings.json` for 10 event types. Uses `jq` for JSON manipulation.
 
@@ -25,19 +25,12 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 
 ## Development Rules
 
-> **WARNING — Dual-mode sync requirement (MANDATORY)**
->
-> Any change to status rendering logic, icons, colors, or formatting must be applied to both `scripts/tmux-powerline-claude-status` and `scripts/tmux-native-claude-status`.
->
-> - Before modifying either file, you MUST read both files first.
-> - After modifying one, you MUST immediately check the other for parallel logic that needs the same change. Even if the other file only passes through a variable, you must explicitly verify and confirm it doesn't need changes.
-> - Do NOT commit until both files have been reviewed.
+No special cross-file sync requirements. Powerline support has been removed — only native tmux mode is supported now.
 
 ## Key Design Decisions
 
 - **Pane resolution**: Hook subprocesses don't inherit `$TMUX_PANE`, so the script walks the process tree (`ps -o ppid`) to match against `tmux list-panes` output.
 - **Watcher process**: For events that indicate activity (PostToolUse, UserPromptSubmit), a background watcher monitors pane title stability. After 3 seconds of no title change, it sets status to idle. PID file at `/tmp/claude-watcher-${TMUX_PANE}.pid`.
-- **Dual mode**: Auto-detects powerline by checking if `status-right` contains "powerline". Can be forced via `@claude_hooks_mode` tmux option.
 
 ## Customization Options (tmux options)
 
@@ -47,7 +40,6 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 | `@claude_hooks_idle_icon` | `✓` | Idle indicator |
 | `@claude_hooks_busy_icon` | `⠿` | Processing indicator |
 | `@claude_hooks_auth_icon` | `🔒` | Authorization indicator |
-| `@claude_hooks_mode` | auto | Force `native` or `powerline` mode |
 
 ## Dependencies
 

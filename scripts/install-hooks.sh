@@ -6,7 +6,7 @@ set -o errexit
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOK_SCRIPT="${SCRIPT_DIR}/tmux-powerline-claude-status"
+HOOK_SCRIPT="${SCRIPT_DIR}/tmux-claude-status"
 SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 # 需要注册的事件列表

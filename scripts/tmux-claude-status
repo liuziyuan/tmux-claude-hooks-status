@@ -6,6 +6,40 @@
 EVENT="$1"
 INPUT=$(cat)
 
+# 根据状态符号映射颜色
+status_color() {
+    case "$1" in
+        ✓)   echo "#50FA7B" ;;   # 绿 - 空闲/完成
+        -)   echo "#6272A4" ;;   # 灰 - 等待输入
+        ...)  echo "#F1FA8C" ;;  # 黄 - 处理中
+        !)   echo "#FF5555" ;;   # 红 - 等待授权
+        ?)   echo "#8BE9FD" ;;   # 蓝 - 提问
+        *)   echo "#F1FA8C" ;;   # 默认黄
+    esac
+}
+
+# 构建聚合状态：按 session/window 分组，按状态着色
+build_all_status() {
+    ALL=""
+    cur_sess=""
+    cur_win=""
+    while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
+        [ -n "$pane_status" ] || continue
+        color=$(status_color "$pane_status")
+        seg="#[fg=${color}]#[range=user,${pane_id}]${pane_status}#[norange]#[default]"
+        if [ "$session_name" != "$cur_sess" ]; then
+            ALL="${ALL:+$ALL  }[${session_name}] ${win_idx}:${seg}"
+            cur_sess="$session_name"
+            cur_win="$win_idx"
+        elif [ "$win_idx" != "$cur_win" ]; then
+            ALL="${ALL} #[fg=#6272A4]│#[default] ${win_idx}:${seg}"
+            cur_win="$win_idx"
+        else
+            ALL="${ALL}·${seg}"
+        fi
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
+}
+
 # Claude Code 的 hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
 if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
     check_pid=$$
@@ -33,17 +67,7 @@ start_watcher() {
                 # title 连续 3 秒不变 → Claude 已空闲
                 if [ "$stable_count" -ge 3 ]; then
                     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
-                    ALL=""
-                    current_session=""
-                    while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
-                        [ -n "$pane_status" ] || continue
-                        if [ "$session_name" != "$current_session" ]; then
-                            ALL="${ALL:+$ALL  }[${session_name}] #[range=user,${pane_id}]${win_idx}.${pane_idx}:${pane_status}#[norange]"
-                            current_session="$session_name"
-                        else
-                            ALL="${ALL} #[range=user,${pane_id}]${win_idx}.${pane_idx}:${pane_status}#[norange]"
-                        fi
-                    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
+                    build_all_status
                     tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
                     rm -f "$WATCHER_PID_FILE"
                     exit 0
@@ -138,16 +162,6 @@ if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
 
     # 重建聚合状态：扫描所有 pane，收集非空状态写入全局变量供状态栏使用
-    ALL=""
-    current_session=""
-    while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
-        [ -n "$pane_status" ] || continue
-        if [ "$session_name" != "$current_session" ]; then
-            ALL="${ALL:+$ALL  }[${session_name}] #[range=user,${pane_id}]${win_idx}.${pane_idx}:${pane_status}#[norange]"
-            current_session="$session_name"
-        else
-            ALL="${ALL} #[range=user,${pane_id}]${win_idx}.${pane_idx}:${pane_status}#[norange]"
-        fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
+    build_all_status
     tmux set-option -g @claude_all_status "$ALL" 2>/dev/null || true
 fi

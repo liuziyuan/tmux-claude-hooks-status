@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tmux-claude-hooks-status: Claude Code hooks status for tmux
-# TPM entry point — auto-detects native/powerline mode
+# TPM entry point
 
 set -o errexit
 set -o pipefail
@@ -18,16 +18,6 @@ tmux set-option -g pane-border-status top 2>/dev/null || true
 tmux set-option -g pane-border-format " #[fg=#BD93F9]#P#[default]#{?#{@claude_pane_status}, #[fg=${STATUS_COLOR}]#{@claude_pane_status}#[default],} #{pane_title} " 2>/dev/null || true
 tmux set-option -g pane-active-border-style "fg=#BD93F9" 2>/dev/null || true
 tmux set-option -g pane-border-style "fg=#6272A4" 2>/dev/null || true
-
-# --- 模式检测 ---
-MODE=$(tmux show-option -gv @claude_hooks_mode 2>/dev/null || true)
-if [ -z "$MODE" ]; then
-    if [ -x ~/.tmux/plugins/tmux-powerline/powerline.sh ] || tmux show-option -g status-right 2>/dev/null | grep -q "powerline"; then
-        MODE="powerline"
-    else
-        MODE="native"
-    fi
-fi
 
 # --- 多行状态栏：动态追加 Claude 状态行 ---
 # 读取当前行数（其他插件已设置好的），追加到最后一行的下一行
@@ -48,7 +38,7 @@ else
     CLAUDE_ROW=$_cur_rows
     tmux set-option -g status $((_cur_rows + 1)) 2>/dev/null || true
 fi
-tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{T:@claude_all_status}#[default],}" 2>/dev/null || true
+tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@claude_all_status},#{T:@claude_all_status},}" 2>/dev/null || true
 
 # 鼠标点击状态栏跳转到对应 pane（需要: set -g mouse on）
 # #[align=right] 内容触发 MouseDown1StatusRight；
