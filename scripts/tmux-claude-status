@@ -18,24 +18,19 @@ status_color() {
     esac
 }
 
-# 构建聚合状态：按 session/window 分组，按状态着色
+# 构建聚合状态：每个 pane 独立显示 [session] win.pane: status
 build_all_status() {
     ALL=""
     cur_sess=""
-    cur_win=""
     while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
         [ -n "$pane_status" ] || continue
         color=$(status_color "$pane_status")
         seg="#[fg=${color}]#[range=user,${pane_id}]${pane_status}#[norange]#[default]"
         if [ "$session_name" != "$cur_sess" ]; then
-            ALL="${ALL:+$ALL  }[${session_name}] ${win_idx}:${seg}"
+            ALL="${ALL:+$ALL  }[${session_name}] ${win_idx}.${pane_idx}: ${seg}"
             cur_sess="$session_name"
-            cur_win="$win_idx"
-        elif [ "$win_idx" != "$cur_win" ]; then
-            ALL="${ALL} #[fg=#6272A4]│#[default] ${win_idx}:${seg}"
-            cur_win="$win_idx"
         else
-            ALL="${ALL}·${seg}"
+            ALL="${ALL} #[fg=#6272A4]│#[default] ${win_idx}.${pane_idx}: ${seg}"
         fi
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
 }
@@ -101,7 +96,6 @@ case "$EVENT" in
       *"permission"*|*"Permission"*)
         STATUS="!"
         kill_watcher
-        start_watcher
         ;;
       *)
         exit 0
@@ -111,7 +105,6 @@ case "$EVENT" in
   PermissionRequest)
     STATUS="!"
     kill_watcher
-    start_watcher
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
