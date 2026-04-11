@@ -69,13 +69,20 @@ fi
 
 # --- Reload 保护：覆盖 prefix+r reload 绑定，source-file 后追加本插件初始化 ---
 # 用哨兵变量防止重复覆盖（tmux server 生命周期内只覆盖一次）
+# 注意：不能在 shell CLI 中用 \; 分隔多条 tmux 命令传给 bind-key，
+# 因为 tmux CLI 会将 \; 作为命令分隔符立即执行后续命令（而不是绑定到按键）。
+# 解决方案：写入临时 tmux config 文件再 source，确保 \; 被 tmux config parser 正确处理。
 if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ]; then
-    tmux bind-key r source-file /Users/liuziyuan/.tmux.conf \; run-shell "'${CURRENT_DIR}/tmux-claude-hooks-status.tmux'" \; display-message "配置已重载"
+    _bind_tmpfile=$(mktemp /tmp/tmux-claude-bind-XXXXXX.conf)
+    printf "bind-key r source-file ~/.tmux.conf \\; run-shell '%s' \\; display-message '配置已重载'\n" \
+        "${CURRENT_DIR}/tmux-claude-hooks-status.tmux" > "$_bind_tmpfile"
+    tmux source-file "$_bind_tmpfile" 2>/dev/null || true
+    rm -f "$_bind_tmpfile"
     tmux set-option -g @claude_hooks_reload_registered "1"
 fi
 
 # --- 自动注册 hooks（幂等，每次插件加载时确保 hooks 存在）---
-"${CURRENT_DIR}/scripts/install-hooks.sh" 2>/dev/null || true
+"${CURRENT_DIR}/scripts/install-hooks.sh" >/dev/null 2>&1 || true
 
 # --- 快捷键绑定 ---
 # prefix + C-h: 安装 hooks 到 ~/.claude/settings.json

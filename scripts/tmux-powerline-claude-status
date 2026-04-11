@@ -76,6 +76,8 @@ case "$EVENT" in
         ;;
       *"permission"*|*"Permission"*)
         STATUS="!"
+        kill_watcher
+        start_watcher
         ;;
       *)
         exit 0
@@ -84,6 +86,8 @@ case "$EVENT" in
     ;;
   PermissionRequest)
     STATUS="!"
+    kill_watcher
+    start_watcher
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
