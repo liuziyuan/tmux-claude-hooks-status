@@ -8,7 +8,7 @@ This file is a step-by-step installation guide designed for AI agents to execute
 
 ## Step 0: Check Dependencies
 
-Check if tmux, jq, and git are installed. Missing dependencies will be installed in Step 2.
+Check if tmux, jq, and git are installed. Missing dependencies will be installed in Step 1.
 
 ```bash
 ERRORS=0
@@ -49,27 +49,7 @@ fi
 
 ---
 
-## Step 1: Choose Mode
-
-**AI should ask the user:**
-
-> Which mode do you want to use?
->
-> - **powerline** — Requires the tmux-powerline plugin. Claude status is displayed before powerline segments in status-right. Best for users already using tmux-powerline.
-> - **native** — Standalone mode. Claude status + system clock. No powerline dependency. Best for minimal configs.
-
-**AI sets the variable based on user's answer:**
-
-```bash
-# Set mode based on user choice (powerline or native)
-CLAUDE_MODE="powerline"  # or "native", modify based on user answer
-
-echo "Selected mode: $CLAUDE_MODE"
-```
-
----
-
-## Step 2: Install Missing Dependencies
+## Step 1: Install Missing Dependencies
 
 Install missing dependencies via Homebrew. `brew install` is idempotent when already installed.
 
@@ -90,7 +70,7 @@ fi
 
 ---
 
-## Step 3: Install TPM (Tmux Plugin Manager)
+## Step 2: Install TPM (Tmux Plugin Manager)
 
 Clone TPM to `~/.tmux/plugins/tpm` if not already installed.
 
@@ -109,29 +89,7 @@ fi
 
 ---
 
-## Step 4: Install tmux-powerline (powerline mode only)
-
-If powerline mode is selected and tmux-powerline is not installed, clone it to `~/.tmux/plugins/tmux-powerline`.
-
-```bash
-POWERLINE_DIR="$HOME/.tmux/plugins/tmux-powerline"
-
-if [ "$CLAUDE_MODE" != "powerline" ]; then
-    echo "Native mode, skipping tmux-powerline."
-else
-    if [ -d "$POWERLINE_DIR" ]; then
-        echo "[OK] tmux-powerline already installed at $POWERLINE_DIR"
-    else
-        echo "Installing tmux-powerline..."
-        git clone https://github.com/erikw/tmux-powerline "$POWERLINE_DIR"
-        echo "[OK] tmux-powerline installation complete"
-    fi
-fi
-```
-
----
-
-## Step 5: Install tmux-claude-hooks-status Plugin
+## Step 3: Install tmux-claude-hooks-status Plugin
 
 Clone the plugin into the TPM plugins directory.
 
@@ -153,11 +111,11 @@ fi
 
 ---
 
-## Step 6: Configure .tmux.conf
+## Step 4: Configure .tmux.conf
 
 Safely modify `.tmux.conf`: add plugin declarations and status bar config. Each operation checks for existing entries before modifying.
 
-### 6a: Backup Current Config
+### 4a: Backup Current Config
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
@@ -180,7 +138,7 @@ TMUX_CONF_EOF
 fi
 ```
 
-### 6b: Add Plugin Declarations
+### 4b: Add Plugin Declarations
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
@@ -203,26 +161,9 @@ set -g @plugin 'tmux-claude-hooks-status'
         echo "[OK] Appended plugin declaration"
     fi
 fi
-
-# Powerline mode: ensure tmux-powerline plugin is also declared
-if [ "$CLAUDE_MODE" = "powerline" ]; then
-    if grep -q "erikw/tmux-powerline" "$TMUX_CONF"; then
-        echo "[OK] tmux-powerline plugin declaration already exists"
-    else
-        if grep -q "set -g @plugin 'tmux-plugins/tpm'" "$TMUX_CONF"; then
-            sed -i '' "/set -g @plugin 'tmux-plugins\/tpm'/i\\
-set -g @plugin 'erikw/tmux-powerline'
-" "$TMUX_CONF"
-            echo "[OK] Added tmux-powerline plugin declaration"
-        else
-            echo "set -g @plugin 'erikw/tmux-powerline'" >> "$TMUX_CONF"
-            echo "[OK] Appended tmux-powerline plugin declaration"
-        fi
-    fi
-fi
 ```
 
-### 6c: Add TPM Init (if missing)
+### 4c: Add TPM Init (if missing)
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
@@ -239,35 +180,12 @@ else
 fi
 ```
 
-### 6d: Add Status Bar Config (must be after TPM init)
+### 4d: Add Pane Border Config (must be after TPM init)
+
+**Note**: The plugin does NOT modify `status-right`. Claude status is displayed on a separate row via multi-line `status-format`. The user's existing `status-right` is preserved as-is.
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
-
-if [ "$CLAUDE_MODE" = "powerline" ]; then
-    # Powerline mode: status-right shows Claude status + powerline
-    if grep -q "@claude_all_status" "$TMUX_CONF"; then
-        echo "[OK] Claude status-right config already exists"
-    else
-        # Append after TPM init
-        echo "" >> "$TMUX_CONF"
-        echo "# Claude Code status bar (must be after TPM init)" >> "$TMUX_CONF"
-        echo 'set -g status-right "#{?#{@claude_all_status},#{@claude_all_status} ,}#(~/.tmux/plugins/tmux-powerline/powerline.sh right)"' >> "$TMUX_CONF"
-        echo "set -g status-right-length 120" >> "$TMUX_CONF"
-        echo "[OK] Added powerline mode status-right"
-    fi
-else
-    # Native mode: force mode setting
-    if grep -q "@claude_hooks_mode" "$TMUX_CONF"; then
-        echo "[OK] Claude mode config already exists"
-    else
-        echo "" >> "$TMUX_CONF"
-        echo "# Claude hooks: use native mode" >> "$TMUX_CONF"
-        echo 'set -g @claude_hooks_mode "native"' >> "$TMUX_CONF"
-        echo "set -g status-right-length 120" >> "$TMUX_CONF"
-        echo "[OK] Added native mode config"
-    fi
-fi
 
 # Ensure pane-border config exists
 if grep -q "pane-border-status" "$TMUX_CONF"; then
@@ -285,7 +203,7 @@ fi
 
 ---
 
-## Step 7: Register Claude Code Hooks
+## Step 5: Register Claude Code Hooks
 
 Run the plugin's `install-hooks.sh` to register hooks in `~/.claude/settings.json`. The script is idempotent.
 
@@ -302,9 +220,9 @@ fi
 
 ---
 
-## Step 8: Reload tmux and Verify
+## Step 6: Reload tmux and Verify
 
-### 8a: Reload Config
+### 6a: Reload Config
 
 ```bash
 # Reload tmux config
@@ -321,7 +239,7 @@ else
 fi
 ```
 
-### 8b: Verify Installation
+### 6b: Verify Installation
 
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"

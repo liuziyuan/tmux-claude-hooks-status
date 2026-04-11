@@ -48,7 +48,7 @@ else
     CLAUDE_ROW=$_cur_rows
     tmux set-option -g status $((_cur_rows + 1)) 2>/dev/null || true
 fi
-tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{T:@claude_all_status}#[default],}" 2>/dev/null || true
+tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@claude_all_status},#[fg=${STATUS_COLOR}]#{T:@claude_all_status}#[default],}" 2>/dev/null || true
 
 # 鼠标点击状态栏跳转到对应 pane（需要: set -g mouse on）
 # #[align=right] 内容触发 MouseDown1StatusRight；
@@ -56,16 +56,8 @@ tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=right]#{?#{@claude_al
 tmux bind-key -T root MouseDown1StatusRight \
     run-shell "${CURRENT_DIR}/scripts/status-click-handler.sh '#{mouse_status_range}'" 2>/dev/null || true
 
-if [ "$MODE" = "powerline" ]; then
-    # Powerline 模式：不动 status-right，让 powerline 完全管理第 1 行
-    # 原先的 #(ls ... && powerline.sh right || true) 包装导致闪烁，已废弃：
-    # tmux set-option -g status-right "#(ls ~/.tmux/plugins/tmux-powerline/powerline.sh 2>/dev/null && ~/.tmux/plugins/tmux-powerline/powerline.sh right || true)"
-    true
-else
-    # Native 模式：第 1 行只显示时间，无 #(script) 调用
-    tmux set-option -g status-right-length 250 2>/dev/null || true
-    tmux set-option -g status-right "#[fg=#6272A4]%Y-%m-%d #[fg=#BD93F9]%H:%M" 2>/dev/null || true
-fi
+# 不动 status-right，让用户自行管理第 1 行内容
+# Claude 状态通过多行 status-format 的独立行显示，不修改 status-right
 
 # --- Reload 保护：覆盖 prefix+r reload 绑定，source-file 后追加本插件初始化 ---
 # 用哨兵变量防止重复覆盖（tmux server 生命周期内只覆盖一次）
