@@ -12,16 +12,16 @@ STATUS_COLOR="#F1FA8C"
 build_all_status() {
     ALL=""
     cur_sess=""
-    while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status _attached; do
         [ -n "$pane_status" ] || continue
         seg="#[fg=${STATUS_COLOR}]${pane_status}#[fg=default]"
         if [ "$session_name" != "$cur_sess" ]; then
-            ALL="${ALL:+$ALL  }[${session_name}] ${win_idx}.${pane_idx}: ${seg}"
+            ALL="${ALL:+$ALL #[fg=#6272A4]│#[fg=default] }[${session_name}] ${win_idx}.${pane_idx}: ${seg}"
             cur_sess="$session_name"
         else
-            ALL="${ALL} #[fg=#6272A4]│#[fg=default] ${win_idx}.${pane_idx}: ${seg}"
+            ALL="${ALL}  ${win_idx}.${pane_idx}: ${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}" 2>/dev/null | awk -F'|' '$6==1')
 }
 
 # Claude Code 的 hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
