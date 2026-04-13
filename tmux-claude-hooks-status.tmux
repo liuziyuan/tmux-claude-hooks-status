@@ -60,6 +60,12 @@ fi
 # --- 自动注册 hooks（幂等，每次插件加载时确保 hooks 存在）---
 "${CURRENT_DIR}/scripts/install-hooks.sh" >/dev/null 2>&1 || true
 
+# --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
+# session-closed: session 被销毁时清除残留条目
+# client-detached: client 断开连接时排除已变为 detached 的 session
+tmux set-hook -g session-closed "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+tmux set-hook -g client-detached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+
 # --- 快捷键绑定 ---
 # prefix + C-h: 安装 hooks 到 ~/.claude/settings.json
 tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-hooks.sh && tmux display 'Claude hooks installed'"

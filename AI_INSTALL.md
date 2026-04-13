@@ -91,18 +91,43 @@ fi
 
 ## Step 3: Install tmux-claude-hooks-status Plugin
 
-Clone the plugin into the TPM plugins directory.
+有两种安装方式：
+
+### 方式 A：符号链接（推荐，适合本地开发）
+
+如果已经有项目源码仓库，直接符号链接到 TPM 目录。这样修改源码后只需 `prefix + r` 重载即可生效，无需手动复制。
+
+```bash
+PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
+SOURCE_DIR="$HOME/work/home/tmux-claude-hooks-status"  # 替换为实际路径
+
+if [ -L "$PLUGIN_DIR" ]; then
+    echo "[OK] Plugin symlink already exists -> $(readlink "$PLUGIN_DIR")"
+elif [ -d "$PLUGIN_DIR" ]; then
+    echo "Replacing existing plugin directory with symlink..."
+    rm -rf "$PLUGIN_DIR"
+    ln -s "$SOURCE_DIR" "$PLUGIN_DIR"
+    echo "[OK] Symlink created: $PLUGIN_DIR -> $SOURCE_DIR"
+else
+    ln -s "$SOURCE_DIR" "$PLUGIN_DIR"
+    echo "[OK] Symlink created: $PLUGIN_DIR -> $SOURCE_DIR"
+fi
+```
+
+### 方式 B：Git 克隆（适合生产安装）
+
+从 GitHub 克隆到 TPM 目录。
 
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
 PLUGIN_REPO="git@github.com:liuziyuan/tmux-claude-hooks-status.git"
 
-if [ -d "$PLUGIN_DIR" ]; then
+if [ -d "$PLUGIN_DIR" ] && [ ! -L "$PLUGIN_DIR" ]; then
     echo "[OK] Plugin already installed at $PLUGIN_DIR"
-    if [ -L "$PLUGIN_DIR" ]; then
-        echo "  (symlink -> $(readlink "$PLUGIN_DIR"))"
-    fi
 else
+    if [ -L "$PLUGIN_DIR" ]; then
+        rm "$PLUGIN_DIR"
+    fi
     echo "Cloning tmux-claude-hooks-status..."
     git clone "$PLUGIN_REPO" "$PLUGIN_DIR"
     echo "[OK] Plugin cloned"
@@ -266,7 +291,7 @@ else
 fi
 
 # 3. Hook script
-if [ -f "$PLUGIN_DIR/scripts/tmux-powerline-claude-status" ]; then
+if [ -f "$PLUGIN_DIR/scripts/tmux-claude-status" ]; then
     echo "[OK] Hook script exists"
 else
     echo "[FAIL] Hook script missing"
@@ -279,7 +304,7 @@ if [ -f "$SETTINGS_FILE" ] && command -v python3 &>/dev/null; then
 import json
 with open('$SETTINGS_FILE', 'r') as f:
     data = json.loads(f.read(), strict=False)
-target = '$PLUGIN_DIR/scripts/tmux-powerline-claude-status'
+target = '$PLUGIN_DIR/scripts/tmux-claude-status'
 count = sum(1 for groups in data.get('hooks', {}).values() for g in groups for h in g.get('hooks', []) if h.get('command') == target)
 print(count)
 ")
@@ -303,7 +328,7 @@ fi
 
 # 6. Live tmux test
 if tmux info &>/dev/null; then
-    echo '{}' | bash "$PLUGIN_DIR/scripts/tmux-powerline-claude-status" SessionStart 2>/dev/null
+    echo '{}' | bash "$PLUGIN_DIR/scripts/tmux-claude-status" SessionStart 2>/dev/null
     STATUS=$(tmux show-option -g @claude_all_status 2>/dev/null)
     if [ -n "$STATUS" ]; then
         echo "[OK] Live tmux status: $STATUS"
