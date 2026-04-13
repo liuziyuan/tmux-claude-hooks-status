@@ -8,7 +8,7 @@ A tmux plugin that displays Claude Code status in the tmux status bar and pane b
 
 ## Architecture
 
-**TPM Plugin** (`tmux-claude-hooks-status.tmux`) — entry point. Runs at tmux startup. Configures pane-border-format with Claude status, binds keyboard shortcuts (`prefix+C-h` install, `prefix+C-u` uninstall).
+**TPM Plugin** (`tmux-claude-hooks-status.tmux`) — entry point. Runs at tmux startup. Configures pane-border-format (pane index + pane title), binds keyboard shortcuts (`prefix+C-h` install, `prefix+C-u` uninstall).
 
 **Hook Script** (`scripts/tmux-powerline-claude-status`) — the core. Called by Claude Code hooks on each event. Resolves `TMUX_PANE` via process tree walk (hooks don't inherit it), writes per-pane status (`@claude_pane_status`) and aggregated status (`@claude_all_status`) to tmux user options. Spawns a background watcher process that detects idle state when pane title stops changing for 3 seconds.
 

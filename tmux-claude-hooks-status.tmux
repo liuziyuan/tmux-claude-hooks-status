@@ -40,12 +40,6 @@ else
 fi
 tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@claude_all_status},#{T:@claude_all_status},}" 2>/dev/null || true
 
-# 鼠标点击状态栏跳转到对应 pane（需要: set -g mouse on）
-# #[align=right] 内容触发 MouseDown1StatusRight；
-# handler 内检查 % 前缀过滤掉非 pane-id 的点击，不干扰其他绑定
-tmux bind-key -T root MouseDown1StatusRight \
-    run-shell "${CURRENT_DIR}/scripts/status-click-handler.sh '#{mouse_status_range}'" 2>/dev/null || true
-
 # 不动 status-right，让用户自行管理第 1 行内容
 # Claude 状态通过多行 status-format 的独立行显示，不修改 status-right
 

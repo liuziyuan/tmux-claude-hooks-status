@@ -194,7 +194,7 @@ else
     echo "" >> "$TMUX_CONF"
     echo "# Pane border display" >> "$TMUX_CONF"
     echo 'set -g pane-border-status top' >> "$TMUX_CONF"
-    echo 'set -g pane-border-format " #[fg=#BD93F9]#P#[default]#{?#{@claude_pane_status}, #[fg=#F1FA8C]#{@claude_pane_status}#[default],} #{pane_title} "' >> "$TMUX_CONF"
+    echo 'set -g pane-border-format " #[fg=#BD93F9]#P#[default] #{pane_title} "' >> "$TMUX_CONF"
     echo 'set -g pane-active-border-style "fg=#BD93F9"' >> "$TMUX_CONF"
     echo 'set -g pane-border-style "fg=#6272A4"' >> "$TMUX_CONF"
     echo "[OK] Added pane-border config"

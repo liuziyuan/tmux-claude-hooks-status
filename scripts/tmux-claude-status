@@ -6,17 +6,7 @@
 EVENT="$1"
 INPUT=$(cat)
 
-# 根据状态符号映射颜色
-status_color() {
-    case "$1" in
-        ✓)   echo "#50FA7B" ;;   # 绿 - 空闲/完成
-        -)   echo "#6272A4" ;;   # 灰 - 等待输入
-        ...)  echo "#F1FA8C" ;;  # 黄 - 处理中
-        !)   echo "#FF5555" ;;   # 红 - 等待授权
-        ?)   echo "#8BE9FD" ;;   # 蓝 - 提问
-        *)   echo "#F1FA8C" ;;   # 默认黄
-    esac
-}
+STATUS_COLOR="#F1FA8C"
 
 # 构建聚合状态：每个 pane 独立显示 [session] win.pane: status
 build_all_status() {
@@ -24,13 +14,12 @@ build_all_status() {
     cur_sess=""
     while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status; do
         [ -n "$pane_status" ] || continue
-        color=$(status_color "$pane_status")
-        seg="#[fg=${color}]#[range=user,${pane_id}]${pane_status}#[norange]#[default]"
+        seg="#[fg=${STATUS_COLOR}]${pane_status}#[fg=default]"
         if [ "$session_name" != "$cur_sess" ]; then
             ALL="${ALL:+$ALL  }[${session_name}] ${win_idx}.${pane_idx}: ${seg}"
             cur_sess="$session_name"
         else
-            ALL="${ALL} #[fg=#6272A4]│#[default] ${win_idx}.${pane_idx}: ${seg}"
+            ALL="${ALL} #[fg=#6272A4]│#[fg=default] ${win_idx}.${pane_idx}: ${seg}"
         fi
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}" 2>/dev/null)
 }

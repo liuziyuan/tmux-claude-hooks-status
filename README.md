@@ -50,7 +50,7 @@ set -g status-right-length 120
 
 # Pane border display
 set -g pane-border-status top
-set -g pane-border-format " #[fg=#BD93F9]#P#[default]#{?#{@claude_pane_status}, #[fg=#F1FA8C]#{@claude_pane_status}#[default],} #{pane_title} "
+set -g pane-border-format " #[fg=#BD93F9]#P#[default] #{pane_title} "
 set -g pane-active-border-style "fg=#BD93F9"
 set -g pane-border-style "fg=#6272A4"
 ```
