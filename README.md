@@ -1,5 +1,7 @@
 # tmux-claude-hooks-status
 
+[中文](README_ZH.md)
+
 A tmux plugin that displays Claude Code status in the tmux status bar. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line.
 
 ## Quick Start (Auto Install)
