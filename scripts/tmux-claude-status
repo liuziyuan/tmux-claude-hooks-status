@@ -7,6 +7,7 @@ EVENT="$1"
 INPUT=$(cat)
 
 STATUS_COLOR="#F1FA8C"
+BLINK_STATE=0
 
 # 构建聚合状态：每个 pane 独立显示 [session] win.pane: status
 build_all_status() {
@@ -14,12 +15,26 @@ build_all_status() {
     cur_sess=""
     while IFS='|' read -r pane_id session_name win_idx pane_idx pane_status _attached; do
         [ -n "$pane_status" ] || continue
-        seg="#[fg=${STATUS_COLOR}]${pane_status}#[fg=default]"
+        session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
+        panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
+        if [ "$pane_status" = "!" ]; then
+            status_block="#[bg=#FF5555,fg=#F8F8F2] ${pane_status} #[bg=default,fg=default]"
+        elif [ "$pane_status" = ">" ]; then
+            # BLINK_STATE=0 可见，1 隐形（fg 同 bg）
+            if [ "${BLINK_STATE:-0}" -eq 0 ]; then
+                status_block="#[bg=${STATUS_COLOR},fg=#282A36] > #[bg=default,fg=default]"
+            else
+                status_block="#[bg=${STATUS_COLOR},fg=${STATUS_COLOR}] > #[bg=default,fg=default]"
+            fi
+        else
+            status_block="#[bg=${STATUS_COLOR},fg=#282A36] ${pane_status} #[bg=default,fg=default]"
+        fi
+        seg="${panel_block}${status_block}"
         if [ "$session_name" != "$cur_sess" ]; then
-            ALL="${ALL:+$ALL #[fg=#6272A4]│#[fg=default] }[${session_name}] ${win_idx}.${pane_idx}: ${seg}"
+            ALL="${ALL:+$ALL  }${session_block}${seg}"
             cur_sess="$session_name"
         else
-            ALL="${ALL}  ${win_idx}.${pane_idx}: ${seg}"
+            ALL="${ALL}${seg}"
         fi
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}" 2>/dev/null | awk -F'|' '$6==1')
 }
@@ -43,8 +58,10 @@ start_watcher() {
     (
         prev_title=""
         stable_count=0
+        blink=0
         while true; do
             sleep 1
+            blink=$(( (blink + 1) % 2 ))
             current_title=$(tmux display -pt "$TMUX_PANE" "#{pane_title}" 2>/dev/null)
             if [ "$current_title" = "$prev_title" ]; then
                 stable_count=$((stable_count + 1))
@@ -57,8 +74,10 @@ start_watcher() {
                         continue
                     fi
                     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
+                    BLINK_STATE=0
                     build_all_status
                     tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
+                    tmux refresh-client -S 2>/dev/null || true
                     rm -f "$WATCHER_PID_FILE"
                     exit 0
                 fi
@@ -66,6 +85,11 @@ start_watcher() {
                 stable_count=0
                 prev_title="$current_title"
             fi
+            # 每秒切换闪烁状态并刷新状态栏
+            BLINK_STATE=$blink
+            build_all_status
+            tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
+            tmux refresh-client -S 2>/dev/null || true
         done
     ) &
     echo $! > "$WATCHER_PID_FILE"
@@ -81,6 +105,35 @@ kill_watcher() {
     fi
 }
 
+# 权限请求 watcher：监控 pane 内 claude 进程是否退出，退出后重置 ! 为 -
+# 事件驱动（非定时器）：每秒检查 pane 子进程是否消失，立即响应 ESC/进程退出
+start_permission_watcher() {
+    if [ -z "$TMUX_PANE" ]; then return; fi
+    local pane_pid
+    pane_pid=$(tmux display-message -pt "$TMUX_PANE" -p "#{pane_pid}" 2>/dev/null)
+    [ -n "$pane_pid" ] || return
+    (
+        while true; do
+            sleep 1
+            # 若状态已不是 !（被其他 hook 更新），退出
+            cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
+            [ "$cur_status" = "!" ] || exit 0
+            # 检查 pane shell 是否还有子进程（claude 是否仍在运行）
+            if ! pgrep -P "$pane_pid" >/dev/null 2>&1; then
+                # claude 已退出（ESC 或其他原因），重置 ! 为 -
+                tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
+                build_all_status
+                tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
+                tmux refresh-client -S 2>/dev/null || true
+                rm -f "$WATCHER_PID_FILE"
+                exit 0
+            fi
+        done
+    ) &
+    echo $! > "$WATCHER_PID_FILE"
+    disown
+}
+
 case "$EVENT" in
   Notification)
     MSG=$(echo "$INPUT" | jq -r '.message // ""' 2>/dev/null)
@@ -91,6 +144,7 @@ case "$EVENT" in
       *"permission"*|*"Permission"*)
         STATUS="!"
         kill_watcher
+        start_permission_watcher
         ;;
       *)
         exit 0
@@ -100,34 +154,50 @@ case "$EVENT" in
   PermissionRequest)
     STATUS="!"
     kill_watcher
+    start_permission_watcher
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     if [ "$TOOL" = "AskUserQuestion" ]; then
         STATUS="?"
     else
-        STATUS="..."
+        STATUS=">"
     fi
     kill_watcher
     ;;
   PostToolUse|PostToolUseFailure)
-    STATUS="..."
+    STATUS=">"
     kill_watcher
     start_watcher
     ;;
   UserPromptSubmit)
-    STATUS="..."
+    STATUS=">"
     kill_watcher
     start_watcher
     ;;
   Stop|StopFailure)
-    STATUS="✓"
     kill_watcher
+    # 检查当前状态：! 表示权限被拒绝后结束，回到 - 空闲；其余情况显示 ✓ 完成
+    if [ -n "$TMUX_PANE" ]; then
+        cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
+        if [ "$cur_status" = "!" ]; then
+            STATUS="-"
+        else
+            STATUS="✓"
+        fi
+    else
+        STATUS="✓"
+    fi
     # fallback：如果 TMUX_PANE 未解析，清除所有残留的处理中状态
     if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
         while IFS='|' read -r pane_id pane_status; do
-            [ "$pane_status" = "..." ] && tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null
+            case "$pane_status" in
+                ">") tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null ;;
+                "!") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
+            esac
         done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+        build_all_status
+        tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
     fi
     ;;
   SessionStart)
