@@ -47,7 +47,14 @@ tmux-claude-status script
 
 Watcher Process (if permission request)
     ├─ Every 1s: check if Claude process still running
+    ├─ If ! overwritten by racing PostToolUse → re-assert ! (within 3s window)
     └─ If exited & status still '!': reset to '-' + rebuild
+
+Race Protection (timestamp-based)
+    ├─ _set_protection: record timestamp when ! or ? is set
+    ├─ _is_protected: check if timestamp is within 3s window
+    ├─ PostToolUse: skip if current status is !/? AND _is_protected
+    └─ Watcher: re-assert ! if overwritten by > within protection window
 
 tmux session/client lifecycle hooks
     (session-closed, client-detached, client-attached)
@@ -134,7 +141,9 @@ set -g @claude_hooks_auth_icon '⚠'
 - **Attached-only display**: `build_all_status()` filters `session_attached==1` to exclude detached sessions from aggregated view
 - **Process tree resolution**: Since hook subprocesses don't inherit `TMUX_PANE`, walk process parents (`ps -o ppid`) to find the pane PID
 - **Watcher as separate process**: Permission state monitoring uses background process + PID file (`/tmp/claude-watcher-${TMUX_PANE}.pid`) with generation ID to prevent race conditions
+- **Timestamp-based race protection**: When `!` or `?` is set, a 3-second protection window is recorded (`/tmp/claude-protect-${TMUX_PANE}`). Async `PostToolUse` events from previous tools are blocked during this window. The watcher also re-asserts `!` if a racing event overwrites it
 - **Idempotent initialization**: Plugin can be reloaded via `prefix+r` without side effects (checks if line already occupied, register hooks only if missing)
+- **Stale hook cleanup**: `install-hooks.sh` removes dead hooks (non-existent script paths) and duplicate plugin-path hooks before installing
 - **Multi-line status**: Claude status occupies independent `status-format[N]` line, preserving user's `status-right` configuration
 
 ## Customization Options

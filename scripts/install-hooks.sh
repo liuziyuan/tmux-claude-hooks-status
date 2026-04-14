@@ -57,6 +57,37 @@ if [ "$ACTION" = "uninstall" ]; then
     exit 0
 fi
 
+# 清理残留的无效 hooks：不存在的脚本路径、plugin 路径重复
+_cleanup_stale_hooks() {
+    local changed=false
+    for EVENT in "${EVENTS[@]}"; do
+        local before
+        before=$(jq --arg event "$EVENT" '.hooks[$event] // [] | length' "$SETTINGS_FILE")
+        UPDATED=$(jq --arg event "$EVENT" --arg dev_script "$HOOK_SCRIPT" '
+            .hooks[$event] = [
+                .hooks[$event][]?
+                | .hooks = [
+                    .hooks[]
+                    | select(.command | contains("tmux-powerline-claude-status") | not)
+                    | select(
+                        (.command | contains("tmux-claude-status") | not)
+                        or (.command | startswith($dev_script))
+                    )
+                ]
+            ] | .hooks[$event] = [.hooks[$event][] | select(.hooks | length > 0)]
+        ' "$SETTINGS_FILE")
+        echo "$UPDATED" > "$SETTINGS_FILE"
+        local after
+        after=$(jq --arg event "$EVENT" '.hooks[$event] // [] | length' "$SETTINGS_FILE")
+        [ "$before" != "$after" ] && changed=true
+    done
+    if [ "$changed" = true ]; then
+        echo "Cleaned up stale hooks from $SETTINGS_FILE"
+    fi
+}
+
+_cleanup_stale_hooks
+
 # 安装：为每个事件添加 hook（幂等，不重复添加）
 for EVENT in "${EVENTS[@]}"; do
     # 判断该事件是否需要 async

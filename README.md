@@ -1,6 +1,8 @@
 # tmux-claude-hooks-status
 
-A tmux plugin that displays Claude Code status in the tmux status bar and pane borders. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization, notifications) per pane.
+[中文](README_ZH.md)
+
+A tmux plugin that displays Claude Code status in the tmux status bar. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line.
 
 ## Quick Start (Auto Install)
 
@@ -11,6 +13,16 @@ ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_
 ```
 
 This will guide you through the installation step by step.
+
+## Quick Uninstall (AI Auto Uninstall)
+
+To uninstall automatically with Claude Code, run:
+
+```
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```
+
+This will remove all plugin configuration, hooks, and temporary files step by step. The plugin directory itself is preserved.
 
 ## Manual Installation
 
@@ -37,23 +49,17 @@ Add the following to `~/.tmux.conf`:
 
 ```tmux
 # --- Plugins ---
-set -g @plugin 'erikw/tmux-powerline'
 set -g @plugin 'tmux-claude-hooks-status'
 
 # TPM init (must be at the end)
 set -g @plugin 'tmux-plugins/tpm'
 run '~/.tmux/plugins/tpm/tpm'
-
-# Claude Code status bar (must be after TPM init)
-set -g status-right "#{?#{@claude_all_status},#{@claude_all_status} ,}#(~/.tmux/plugins/tmux-powerline/powerline.sh right)"
-set -g status-right-length 120
-
-# Pane border display
-set -g pane-border-status top
-set -g pane-border-format " #[fg=#BD93F9]#P#[default] #{pane_title} "
-set -g pane-active-border-style "fg=#BD93F9"
-set -g pane-border-style "fg=#6272A4"
 ```
+
+The plugin automatically:
+- Adds a dedicated line in the multi-line status-format for Claude status
+- Configures pane border display (pane index + title)
+- Does not modify your existing `status-right` setting
 
 ### 4. Install Plugins
 
@@ -93,30 +99,18 @@ prefix + C-u
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-hooks.sh
 ```
 
-## Plugin Features
+## Status Symbols and Events
 
-| Event | Pane Border Display |
-|-------|-------------------|
-| `SessionStart` / `Stop` / `StopFailure` | `✓ Idle` |
-| `UserPromptSubmit` / `PostToolUse` | `⠿ Processing` |
-| `PermissionRequest` | `🔒 Awaiting Auth` |
-| `Notification` | `💬 <first 40 chars>` |
-| `SessionEnd` | (cleared) |
+| Event | Status | Color | Meaning |
+|-------|--------|-------|---------|
+| `SessionStart` | `-` | Yellow | Session idle |
+| `PreToolUse` / `PostToolUse` | `>` | Yellow | Processing |
+| `PreToolUse` (AskUserQuestion) | `?` | Yellow | Awaiting user input |
+| `PermissionRequest` | `!` | Red | Waiting for authorization |
+| `Stop` / `StopFailure` | `✓` or `-` | Yellow | Completed or back to idle |
+| `SessionEnd` | (empty) | — | Session ended |
 
-## Dual Mode Support
-
-The plugin auto-detects the running mode:
-
-- **Powerline mode**: When tmux-powerline is detected, Claude status is prepended before powerline segments in status-right.
-- **Native mode**: Without powerline, status-right is rendered independently (Claude status + clock).
-
-Force a specific mode:
-
-```bash
-# In .tmux.conf
-set -g @claude_hooks_mode "native"     # Force native mode
-set -g @claude_hooks_mode "powerline"  # Force powerline mode
-```
+Notification events are handled internally — specific messages (permission-related, cancelled, etc.) are dispatched to the appropriate status rather than displayed directly.
 
 ## Customization Options
 
@@ -126,18 +120,18 @@ set -g @claude_hooks_mode "powerline"  # Force powerline mode
 | `@claude_hooks_idle_icon` | `✓` | Idle indicator |
 | `@claude_hooks_busy_icon` | `⠿` | Processing indicator |
 | `@claude_hooks_auth_icon` | `🔒` | Authorization indicator |
-| `@claude_hooks_mode` | `auto` | Force `native` or `powerline` mode |
 
 ## Dependencies
 
-- tmux >= 3.1
+- tmux >= 3.1 (user options, pane-border-status, set-hook, multi-line status-format)
 - jq (for hook installation)
+- bash >= 4.0
 
 ## Verification
 
 ```bash
 # 1. Trigger a hook manually
-echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-powerline-claude-status SessionStart
+echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
 tmux show-option -g @claude_all_status
 
 # 2. Check pane status

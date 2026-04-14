@@ -1,6 +1,6 @@
 # tmux-claude-hooks-status
 
-一个 tmux 插件，在 tmux 状态栏和 pane 边框中显示 Claude Code 的实时状态。通过 Claude Code 的 hook 系统实现，支持按 pane 显示状态（空闲、处理中、等待授权、通知）。
+一个 tmux 插件，在 tmux 状态栏中显示 Claude Code 的实时状态。通过 Claude Code 的 hook 系统实现，支持按 pane 显示状态（空闲、处理中、等待授权、等待用户输入）。
 
 [English](README.md)
 
@@ -13,6 +13,16 @@ ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_
 ```
 
 Claude Code 将逐步引导你完成安装。
+
+## 快速卸载（自动）
+
+使用 Claude Code 自动卸载，运行：
+
+```
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```
+
+Claude Code 将逐步清除插件配置、hooks 和临时文件。插件目录本身会保留。
 
 ## 手动安装
 
@@ -39,23 +49,17 @@ git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 
 ```tmux
 # --- 插件 ---
-set -g @plugin 'erikw/tmux-powerline'
 set -g @plugin 'tmux-claude-hooks-status'
 
 # TPM 初始化（必须放在最后）
 set -g @plugin 'tmux-plugins/tpm'
 run '~/.tmux/plugins/tpm/tpm'
-
-# Claude Code 状态栏（必须在 TPM 初始化之后）
-set -g status-right "#{?#{@claude_all_status},#{@claude_all_status} ,}#(~/.tmux/plugins/tmux-powerline/powerline.sh right)"
-set -g status-right-length 120
-
-# Pane 边框显示
-set -g pane-border-status top
-set -g pane-border-format " #[fg=#BD93F9]#P#[default] #{pane_title} "
-set -g pane-active-border-style "fg=#BD93F9"
-set -g pane-border-style "fg=#6272A4"
 ```
+
+插件会自动完成以下配置：
+- 在多行状态栏中添加独立的 Claude 状态行
+- 配置 pane 边框显示（pane 编号 + 标题）
+- 不会修改你现有的 `status-right` 设置
 
 ### 4. 安装插件
 
@@ -95,30 +99,18 @@ prefix + C-u
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-hooks.sh
 ```
 
-## 插件功能
+## 状态符号与事件
 
-| 事件 | Pane 边框显示 |
-|------|-------------|
-| `SessionStart` / `Stop` / `StopFailure` | `✓ 空闲` |
-| `UserPromptSubmit` / `PostToolUse` | `⠿ 处理中` |
-| `PermissionRequest` | `🔒 等待授权` |
-| `Notification` | `💬 <消息前40字>` |
-| `SessionEnd` | （清空） |
+| 事件 | 状态 | 颜色 | 含义 |
+|------|------|------|------|
+| `SessionStart` | `-` | 黄色 | 会话空闲 |
+| `PreToolUse` / `PostToolUse` | `>` | 黄色 | 处理中 |
+| `PreToolUse` (AskUserQuestion) | `?` | 黄色 | 等待用户输入 |
+| `PermissionRequest` | `!` | 红色 | 等待授权 |
+| `Stop` / `StopFailure` | `✓` 或 `-` | 黄色 | 完成或回到空闲 |
+| `SessionEnd` | （清空） | — | 会话结束 |
 
-## 双模式支持
-
-插件自动检测运行模式：
-
-- **Powerline 模式**：检测到 tmux-powerline 时，Claude 状态显示在 powerline 状态栏之前。
-- **Native 模式**：无 powerline 时，独立渲染 status-right（Claude 状态 + 时间）。
-
-强制指定模式：
-
-```bash
-# 在 .tmux.conf 中添加
-set -g @claude_hooks_mode "native"     # 强制原生模式
-set -g @claude_hooks_mode "powerline"  # 强制 powerline 模式
-```
+Notification 事件在内部处理——特定消息（权限相关、已取消等）会被分发到对应状态，而非直接显示。
 
 ## 自定义选项
 
@@ -128,18 +120,18 @@ set -g @claude_hooks_mode "powerline"  # 强制 powerline 模式
 | `@claude_hooks_idle_icon` | `✓` | 空闲图标 |
 | `@claude_hooks_busy_icon` | `⠿` | 处理中图标 |
 | `@claude_hooks_auth_icon` | `🔒` | 等待授权图标 |
-| `@claude_hooks_mode` | `auto` | 强制 `native` 或 `powerline` 模式 |
 
 ## 依赖
 
-- tmux >= 3.1
+- tmux >= 3.1（user options、pane-border-status、set-hook、多行 status-format）
 - jq（用于 hook 安装）
+- bash >= 4.0
 
 ## 验证
 
 ```bash
 # 1. 手动触发一次 hook
-echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-powerline-claude-status SessionStart
+echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
 tmux show-option -g @claude_all_status
 
 # 2. 检查 pane 状态
