@@ -14,6 +14,16 @@ ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_
 
 Claude Code 将逐步引导你完成安装。
 
+## 快速卸载（自动）
+
+使用 Claude Code 自动卸载，运行：
+
+```
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```
+
+Claude Code 将逐步清除插件配置、hooks 和临时文件。插件目录本身会保留。
+
 ## 手动安装
 
 ### 1. 安装依赖

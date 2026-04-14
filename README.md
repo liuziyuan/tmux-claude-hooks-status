@@ -12,6 +12,16 @@ ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_
 
 This will guide you through the installation step by step.
 
+## Quick Uninstall (AI Auto Uninstall)
+
+To uninstall automatically with Claude Code, run:
+
+```
+ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```
+
+This will remove all plugin configuration, hooks, and temporary files step by step. The plugin directory itself is preserved.
+
 ## Manual Installation
 
 ### 1. Install Dependencies
