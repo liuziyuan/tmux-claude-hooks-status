@@ -138,7 +138,7 @@ fi
 
 ## Step 4: Configure .tmux.conf
 
-Safely modify `.tmux.conf`: add plugin declarations and status bar config. Each operation checks for existing entries before modifying.
+Safely modify `.tmux.conf`: add plugin declarations required for TPM to load the plugin. Step 4d (pane border config) is optional and will not be executed if you have custom pane border settings.
 
 ### 4a: Backup Current Config
 
@@ -205,24 +205,31 @@ else
 fi
 ```
 
-### 4d: Add Pane Border Config (must be after TPM init)
+### 4d: (Optional) Add Pane Border Config at Session Startup
+
+**⚠️ OPTIONAL STEP** — The plugin automatically configures pane borders when loaded (see `tmux-claude-hooks-status.tmux` lines 17-20). Skip this step if:
+- You have existing pane-border settings you want to preserve
+- You don't need pane borders to appear before plugin initialization (they will appear after the plugin loads)
+
+Only execute this step if you want pane border display to be active at tmux session startup, before the plugin loads.
 
 **Note**: The plugin does NOT modify `status-right`. Claude status is displayed on a separate row via multi-line `status-format`. The user's existing `status-right` is preserved as-is.
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
 
-# Ensure pane-border config exists
-if grep -q "pane-border-status" "$TMUX_CONF"; then
-    echo "[OK] pane-border config already exists"
+# Only add pane-border config if the user explicitly wants it and doesn't already have custom settings
+if grep -q "pane-border-status\|pane-border-format" "$TMUX_CONF"; then
+    echo "[SKIP] pane-border config already exists (user may have custom settings)"
+    echo "       The plugin will apply default settings when loaded."
 else
     echo "" >> "$TMUX_CONF"
-    echo "# Pane border display" >> "$TMUX_CONF"
+    echo "# Pane border display (plugin will also set these at startup)" >> "$TMUX_CONF"
     echo 'set -g pane-border-status top' >> "$TMUX_CONF"
     echo 'set -g pane-border-format " #P #{pane_title} "' >> "$TMUX_CONF"
     echo 'set -g pane-active-border-style "fg=#BD93F9"' >> "$TMUX_CONF"
     echo 'set -g pane-border-style "fg=#6272A4"' >> "$TMUX_CONF"
-    echo "[OK] Added pane-border config"
+    echo "[OK] Added pane-border config (will be active at session startup)"
 fi
 ```
 
