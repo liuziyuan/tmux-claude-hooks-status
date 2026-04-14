@@ -120,7 +120,7 @@ fi
 
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-PLUGIN_REPO="git@github.com:liuziyuan/tmux-claude-hooks-status.git"
+PLUGIN_REPO="https://github.com/liuziyuan/tmux-claude-hooks-status.git"
 
 if [ -d "$PLUGIN_DIR" ] && [ ! -L "$PLUGIN_DIR" ]; then
     echo "[OK] Plugin already installed at $PLUGIN_DIR"
@@ -219,7 +219,7 @@ else
     echo "" >> "$TMUX_CONF"
     echo "# Pane border display" >> "$TMUX_CONF"
     echo 'set -g pane-border-status top' >> "$TMUX_CONF"
-    echo 'set -g pane-border-format " #[fg=#BD93F9]#P#[default] #{pane_title} "' >> "$TMUX_CONF"
+    echo 'set -g pane-border-format " #P #{pane_title} "' >> "$TMUX_CONF"
     echo 'set -g pane-active-border-style "fg=#BD93F9"' >> "$TMUX_CONF"
     echo 'set -g pane-border-style "fg=#6272A4"' >> "$TMUX_CONF"
     echo "[OK] Added pane-border config"
@@ -231,6 +231,8 @@ fi
 ## Step 5: Register Claude Code Hooks
 
 Run the plugin's `install-hooks.sh` to register hooks in `~/.claude/settings.json`. The script is idempotent.
+
+> **Note**: The plugin automatically registers hooks when loaded via TPM (see `tmux-claude-hooks-status.tmux` line 61). This step is typically redundant but provided for manual installation or troubleshooting if auto-registration fails.
 
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
@@ -268,7 +270,7 @@ fi
 
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-SETTINGS_FILE="$HOME/.claude/settings.json"
+SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 ERRORS=0
 
 echo ""
@@ -305,7 +307,7 @@ import json
 with open('$SETTINGS_FILE', 'r') as f:
     data = json.loads(f.read(), strict=False)
 target = '$PLUGIN_DIR/scripts/tmux-claude-status'
-count = sum(1 for groups in data.get('hooks', {}).values() for g in groups for h in g.get('hooks', []) if h.get('command') == target)
+count = sum(1 for groups in data.get('hooks', {}).values() for g in groups for h in g.get('hooks', []) if h.get('command', '').startswith(target))
 print(count)
 ")
     if [ "${HOOK_COUNT:-0}" -gt 0 ]; then
