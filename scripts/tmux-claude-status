@@ -44,7 +44,7 @@ fi
 
 WATCHER_PID_FILE="/tmp/claude-watcher-${TMUX_PANE//[^a-zA-Z0-9]/_}.pid"
 PROTECT_FILE="/tmp/claude-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
-PROTECT_SECONDS=3
+PROTECT_SECONDS=1
 
 # 竞态保护：设置 ! 或 ? 时记录时间戳，防止异步 PostToolUse 覆盖
 _set_protection() {
@@ -91,20 +91,20 @@ kill_watcher() {
     _clear_protection
 }
 
-# 权限请求 watcher：监控 pane 内 claude 进程是否退出或权限提示是否消失
-# 两种检测机制：进程退出检测 + pane 内容变化检测
-start_permission_watcher() {
+# 状态 watcher：保护 !/? 不被竞态 PostToolUse 覆盖，监控 claude 进程退出
+# 参数: $1 = protected_status ("!" 或 "?")
+start_status_watcher() {
+    local protected_status="$1"
     if [ -z "$TMUX_PANE" ]; then return; fi
     local pane_pid
     pane_pid=$(tmux display-message -pt "$TMUX_PANE" -p "#{pane_pid}" 2>/dev/null)
     [ -n "$pane_pid" ] || return
     local watcher_gen="$$"
-    # 捕获 pane 底部内容基线，用于检测权限提示消失
-    local baseline
-    baseline=$(tmux capture-pane -pt "$TMUX_PANE" -p -S -5 2>/dev/null | cksum)
     (
         _my_gen="$watcher_gen"
         _my_pid_file="$WATCHER_PID_FILE"
+        _protected="$protected_status"
+        _pane_pid="$pane_pid"
         _is_current() {
             [ -f "$_my_pid_file" ] && [ "$(_read_watcher_gen)" = "$_my_gen" ]
         }
@@ -121,43 +121,25 @@ start_permission_watcher() {
             sleep 1
             _is_current || exit 0
             cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
-            # 二次保护：若 ! 被竞态 PostToolUse 覆盖为 > 且在保护窗口内，重新断言
+            # 二次保护：若 !/? 被竞态 PostToolUse 覆盖为 > 且在保护窗口内，重新断言
             if [ "$cur_status" = ">" ] && _is_protected; then
-                tmux set-option -pt "$TMUX_PANE" @claude_pane_status "!" 2>/dev/null
+                tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$_protected" 2>/dev/null
                 build_all_status
                 tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
                 tmux refresh-client -S 2>/dev/null || true
                 continue
             fi
-            # 若状态已不是 !（被其他 hook 更新且保护已过期），退出
-            [ "$cur_status" = "!" ] || { _clear_protection; exit 0; }
-            # 检查 pane shell 是否还有子进程（claude 是否仍在运行）
-            if ! pgrep -P "$pane_pid" >/dev/null 2>&1; then
+            # 若状态已不是 protected（被其他 hook 更新且保护已过期），退出
+            [ "$cur_status" = "$_protected" ] || { _clear_protection; exit 0; }
+            # 对于 !：检查 pane shell 是否还有子进程（claude 是否仍在运行）
+            if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
                 _is_current || exit 0
-                # claude 已退出（ESC 或其他原因），重置 ! 为 -
                 tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
                 _clear_protection
                 build_all_status
                 tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
                 tmux refresh-client -S 2>/dev/null || true
                 exit 0
-            fi
-            # 检查 pane 内容是否变化（权限提示消失，用户已取消）
-            if [ -n "$baseline" ]; then
-                _pane_content=$(tmux capture-pane -pt "$TMUX_PANE" -p -S -5 2>/dev/null | cksum)
-                if [ "$_pane_content" != "$baseline" ]; then
-                    # 内容变化，等待其他事件先处理
-                    sleep 2
-                    _is_current || exit 0
-                    cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
-                    if [ "$cur_status" = "!" ]; then
-                        tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
-                        build_all_status
-                        tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
-                        tmux refresh-client -S 2>/dev/null || true
-                        exit 0
-                    fi
-                fi
             fi
         done
     ) &
@@ -179,7 +161,7 @@ case "$EVENT" in
       *"permission"*|*"Permission"*)
         STATUS="!"
         kill_watcher
-        start_permission_watcher
+        start_status_watcher "!"
         ;;
       *)
         exit 0
@@ -189,18 +171,20 @@ case "$EVENT" in
   PermissionRequest)
     STATUS="!"
     kill_watcher
-    start_permission_watcher
+    start_status_watcher "!"
     _set_protection
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     if [ "$TOOL" = "AskUserQuestion" ]; then
         STATUS="?"
+        kill_watcher
+        start_status_watcher "?"
         _set_protection
     else
         STATUS=">"
+        kill_watcher
     fi
-    kill_watcher
     ;;
   PostToolUse|PostToolUseFailure)
     # 竞态保护：若 ! 或 ? 在保护窗口内，跳过（上一个工具的延迟 PostToolUse）
