@@ -28,7 +28,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}" 2>/dev/null | awk -F'|' '$6==1')
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}" 2>/dev/null | awk -F'|' '$6>0')
 }
 
 # Claude Code 的 hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
