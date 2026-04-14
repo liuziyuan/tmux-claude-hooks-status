@@ -78,6 +78,20 @@ done
 if [ "$KILLED" -eq 0 ]; then
     echo "[OK] No watcher processes found"
 fi
+
+# Clean up temporary protection files (created during permission/question events)
+rm -f /tmp/claude-protect-* 2>/dev/null
+PROTECT_COUNT=$(ls /tmp/claude-protect-* 2>/dev/null | wc -l)
+if [ "$PROTECT_COUNT" -eq 0 ]; then
+    echo "[OK] Cleaned temporary protection files"
+fi
+
+# Clean up temporary bind configuration files (created during plugin reload)
+rm -f /tmp/tmux-claude-bind-*.conf 2>/dev/null
+BIND_COUNT=$(ls /tmp/tmux-claude-bind-*.conf 2>/dev/null | wc -l)
+if [ "$BIND_COUNT" -eq 0 ]; then
+    echo "[OK] Cleaned temporary bind config files"
+fi
 ```
 
 ---
@@ -92,7 +106,12 @@ if tmux info &>/dev/null; then
     tmux set-option -gu @claude_all_status 2>/dev/null
     tmux set-option -gu @claude_status 2>/dev/null
     tmux set-option -gu @claude_hooks_reload_registered 2>/dev/null
-    tmux set-option -gu @claude_hooks_mode 2>/dev/null
+    
+    # Remove custom configuration options (set by plugin at startup)
+    tmux set-option -gu @claude_hooks_status_color 2>/dev/null
+    tmux set-option -gu @claude_hooks_idle_icon 2>/dev/null
+    tmux set-option -gu @claude_hooks_busy_icon 2>/dev/null
+    tmux set-option -gu @claude_hooks_auth_icon 2>/dev/null
 
     # Remove Claude status format row — find which row the plugin occupies
     STATUS_VAL=$(tmux show-option -gv status 2>/dev/null || echo "on")
@@ -147,22 +166,19 @@ else
         echo "[OK] Removed plugin declaration"
     fi
 
-    # Remove @claude_hooks_mode option
-    if grep -q '@claude_hooks_mode' "$TMUX_CONF"; then
-        sed -i '' '/@claude_hooks_mode/d' "$TMUX_CONF"
+    # Remove pane-border config (if user added from Step 4d of installation)
+    # This section removes all 4 lines of pane-border configuration if they exist
+    if grep -q "pane-border-status\|pane-border-format\|pane-active-border-style\|pane-border-style" "$TMUX_CONF"; then
+        sed -i '' '/^[[:space:]]*set -g pane-border-status\|^[[:space:]]*set -g pane-border-format\|^[[:space:]]*set -g pane-active-border-style\|^[[:space:]]*set -g pane-border-style/d' "$TMUX_CONF"
         CHANGES=$((CHANGES + 1))
-        echo "[OK] Removed @claude_hooks_mode"
+        echo "[OK] Removed pane-border configuration"
     fi
 
-    # Remove status-right-length override (only if it was set by plugin)
-    # Note: keep this if the user had it before installing the plugin
-    # The AI should ask the user if unsure.
-
-    # Remove commented-out pane-border-format with @claude_pane_status
-    if grep -q '@claude_pane_status' "$TMUX_CONF"; then
-        sed -i '' '/@claude_pane_status/d' "$TMUX_CONF"
+    # Remove plugin comment line if it exists (e.g., "# Pane border display")
+    if grep -q "# Pane border display" "$TMUX_CONF"; then
+        sed -i '' '/# Pane border display/d' "$TMUX_CONF"
         CHANGES=$((CHANGES + 1))
-        echo "[OK] Removed @claude_pane_status references"
+        echo "[OK] Removed pane-border comment"
     fi
 
     # Clean up consecutive blank lines (max 1 blank line between sections)
@@ -249,12 +265,36 @@ fi
 # 4. .tmux.conf cleaned
 TMUX_CONF="$HOME/.tmux.conf"
 if [ -f "$TMUX_CONF" ]; then
-    if grep -q "tmux-claude-hooks-status\|@claude_hooks_mode\|@claude_pane_status" "$TMUX_CONF" 2>/dev/null; then
+    if grep -q "tmux-claude-hooks-status\|pane-border-status.*top\|pane-border-format.*@claude" "$TMUX_CONF" 2>/dev/null; then
         echo "[FAIL] Plugin references still in .tmux.conf"
-        grep -n "tmux-claude-hooks-status\|@claude_hooks_mode\|@claude_pane_status" "$TMUX_CONF"
+        grep -n "tmux-claude-hooks-status\|pane-border" "$TMUX_CONF"
         ERRORS=$((ERRORS + 1))
     else
         echo "[OK] No plugin references in .tmux.conf"
+    fi
+fi
+
+# 5. Temporary files cleaned
+TEMP_PROTECT=$(ls /tmp/claude-protect-* 2>/dev/null | wc -l | tr -d ' ')
+TEMP_BIND=$(ls /tmp/tmux-claude-bind-*.conf 2>/dev/null | wc -l | tr -d ' ')
+if [ "$TEMP_PROTECT" -eq 0 ] && [ "$TEMP_BIND" -eq 0 ]; then
+    echo "[OK] No temporary plugin files remaining"
+else
+    echo "[WARN] Some temporary files remain: protect=$TEMP_PROTECT, bind=$TEMP_BIND"
+fi
+
+# 6. Custom tmux options cleaned
+if tmux info &>/dev/null; then
+    CUSTOM_OPTS=""
+    [ -n "$(tmux show-option -g @claude_hooks_status_color 2>/dev/null)" ] && CUSTOM_OPTS="@claude_hooks_status_color "
+    [ -n "$(tmux show-option -g @claude_hooks_idle_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_idle_icon "
+    [ -n "$(tmux show-option -g @claude_hooks_busy_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_busy_icon "
+    [ -n "$(tmux show-option -g @claude_hooks_auth_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_auth_icon "
+    
+    if [ -z "$CUSTOM_OPTS" ]; then
+        echo "[OK] No custom tmux options remaining"
+    else
+        echo "[WARN] Custom options still set: $CUSTOM_OPTS"
     fi
 fi
 
