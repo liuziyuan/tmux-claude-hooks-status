@@ -105,6 +105,8 @@ start_status_watcher() {
         _my_pid_file="$WATCHER_PID_FILE"
         _protected="$protected_status"
         _pane_pid="$pane_pid"
+        _baseline_title=""
+        _changed_count=0
         _is_current() {
             [ -f "$_my_pid_file" ] && [ "$(_read_watcher_gen)" = "$_my_gen" ]
         }
@@ -131,8 +133,8 @@ start_status_watcher() {
             fi
             # 若状态已不是 protected（被其他 hook 更新且保护已过期），退出
             [ "$cur_status" = "$_protected" ] || { _clear_protection; exit 0; }
-            # 对于 !：检查 pane shell 是否还有子进程（claude 是否仍在运行）
-            if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
+            # 检查 pane shell 是否还有子进程（claude 是否已退出）
+            if ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
                 _is_current || exit 0
                 tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
                 _clear_protection
@@ -140,6 +142,25 @@ start_status_watcher() {
                 tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
                 tmux refresh-client -S 2>/dev/null || true
                 exit 0
+            fi
+            # ESC 检测：通过 pane title 变化判断提示是否被关闭
+            if [ -z "$_baseline_title" ]; then
+                _baseline_title=$(tmux display -pt "$TMUX_PANE" "#{pane_title}" 2>/dev/null)
+            fi
+            _current_title=$(tmux display -pt "$TMUX_PANE" "#{pane_title}" 2>/dev/null)
+            if [ -n "$_baseline_title" ] && [ "$_current_title" != "$_baseline_title" ]; then
+                _changed_count=$((_changed_count + 1))
+                if [ "$_changed_count" -ge 2 ]; then
+                    _is_current || exit 0
+                    tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null
+                    _clear_protection
+                    build_all_status
+                    tmux set-option -g @claude_all_status "$ALL" 2>/dev/null
+                    tmux refresh-client -S 2>/dev/null || true
+                    exit 0
+                fi
+            else
+                _changed_count=0
             fi
         done
     ) &
@@ -210,7 +231,7 @@ case "$EVENT" in
     # 检查当前状态：! 表示权限被拒绝后结束，回到 - 空闲；其余情况显示 ✓ 完成
     if [ -n "$TMUX_PANE" ]; then
         cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
-        if [ "$cur_status" = "!" ]; then
+        if [ "$cur_status" = "!" ] || [ "$cur_status" = "?" ]; then
             STATUS="-"
         else
             STATUS="✓"
@@ -223,7 +244,7 @@ case "$EVENT" in
         while IFS='|' read -r pane_id pane_status; do
             case "$pane_status" in
                 ">") tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null ;;
-                "!") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
+                "!"|"?") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
             esac
         done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
         build_all_status
