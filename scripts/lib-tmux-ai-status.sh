@@ -54,7 +54,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{@copilot_pane_status}|#{session_attached}|#{session_created}" 2>/dev/null | awk -F'|' '$7>0' | sort -t'|' -k8,8n -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{@copilot_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$7>0' | sort -t'|' -k8,8n -k3,3n -k4,4n)
 }
 
 # --- 竞态保护 ---
