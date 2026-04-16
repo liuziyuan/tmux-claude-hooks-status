@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Terminology
+
+**AI Status** — 本项目所实现的核心功能的统称。指通过 tmux 状态栏和窗格边框实时显示 AI 编程助手（如 Claude Code、GitHub Copilot 等）运行状态的能力，包括状态检测、事件监听、符号渲染、颜色编码等整套机制。
+
 ## Project Overview
 
 A tmux plugin that displays Claude Code status in the tmux status bar and pane borders. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization) per pane via a dedicated status line.
