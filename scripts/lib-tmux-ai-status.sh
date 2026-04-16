@@ -5,6 +5,19 @@
 
 STATUS_COLOR="#F1FA8C"
 
+# --- 日志 ---
+AI_LOG_FILE="/tmp/tmux-ai-status.log"
+_ai_log() {
+    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] $*"
+    echo "$msg" >> "$AI_LOG_FILE" 2>/dev/null
+    # 自动轮转：超过 100KB 截断保留末尾 50KB
+    local size
+    size=$(wc -c < "$AI_LOG_FILE" 2>/dev/null || echo 0)
+    if [ "$size" -gt 102400 ]; then
+        tail -c 51200 "$AI_LOG_FILE" > "${AI_LOG_FILE}.tmp" 2>/dev/null && mv "${AI_LOG_FILE}.tmp" "$AI_LOG_FILE"
+    fi
+}
+
 # --- TMUX_PANE 解析 ---
 # hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
 resolve_tmux_pane() {
@@ -60,22 +73,35 @@ build_all_status() {
 # --- 竞态保护 ---
 _set_protection() {
     local tool_id="${1:-$TOOL_ID}"
-    [ -n "$TMUX_PANE" ] && date +%s > "/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
+    if [ -n "$TMUX_PANE" ]; then
+        local ts
+        ts=$(date +%s)
+        echo "$ts" > "/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
+        _ai_log "PROTECT SET ts=$ts"
+    fi
 }
 
 _is_protected() {
     local tool_id="${1:-$TOOL_ID}"
     local pfile="/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
-    [ -f "$pfile" ] || return 1
+    [ -f "$pfile" ] || { _ai_log "PROTECT CHECK result=no (no file)"; return 1; }
     local pt now
-    pt=$(cat "$pfile" 2>/dev/null) || return 1
+    pt=$(cat "$pfile" 2>/dev/null) || { _ai_log "PROTECT CHECK result=no (read fail)"; return 1; }
     now=$(date +%s)
-    [ $((now - pt)) -lt 1 ]
+    local elapsed=$((now - pt))
+    if [ "$elapsed" -lt 3 ]; then
+        _ai_log "PROTECT CHECK elapsed=${elapsed}s result=yes"
+        return 0
+    else
+        _ai_log "PROTECT CHECK elapsed=${elapsed}s result=no (expired)"
+        return 1
+    fi
 }
 
 _clear_protection() {
     local tool_id="${1:-$TOOL_ID}"
     rm -f "/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}" 2>/dev/null
+    _ai_log "PROTECT CLEAR"
 }
 
 # --- Watcher PID 管理 ---
@@ -107,10 +133,12 @@ kill_watcher() {
         pid=$(_read_watcher_pid "$tool_id")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null
+            _ai_log "WATCHER KILL pid=$pid"
         fi
         rm -f "$pid_file"
+    else
+        _ai_log "WATCHER KILL no watcher"
     fi
-    _clear_protection "$tool_id"
 }
 
 # --- 状态 watcher ---
@@ -125,6 +153,7 @@ start_status_watcher() {
     [ -n "$pane_pid" ] || return
     local watcher_gen="$$"
     local watcher_pid_file="/tmp/${tool_id}-watcher-${TMUX_PANE//[^a-zA-Z0-9]/_}.pid"
+    local _pane_loc_outer="$_pane_loc"
     local pane_status_var
     if [ "$tool_id" = "copilot" ]; then
         pane_status_var="@copilot_pane_status"
@@ -138,6 +167,7 @@ start_status_watcher() {
         _pane_pid="$pane_pid"
         _tool_id="$tool_id"
         _pane_status_var="$pane_status_var"
+        _pane_loc="$_pane_loc_outer"
         _is_current() {
             [ -f "$_my_pid_file" ] && [ "$(cat "$_my_pid_file" 2>/dev/null | cut -d: -f2)" = "$_my_gen" ]
         }
@@ -152,10 +182,11 @@ start_status_watcher() {
 
         while true; do
             sleep 1
-            _is_current || exit 0
+            _is_current || { _ai_log "WATCHER EXIT: superseded by newer watcher"; exit 0; }
             cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{${_pane_status_var}}" 2>/dev/null)
             # 二次保护：若 !/? 被竞态 PostToolUse 覆盖为 > 且在保护窗口内，重新断言
             if [ "$cur_status" = ">" ] && _is_protected "$_tool_id"; then
+                _ai_log "WATCHER REASSERT: cur=> protected=yes → $_protected"
                 tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "$_protected" 2>/dev/null
                 build_all_status
                 tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
@@ -163,10 +194,11 @@ start_status_watcher() {
                 continue
             fi
             # 若状态已不是 protected（被其他 hook 更新且保护已过期），退出
-            [ "$cur_status" = "$_protected" ] || { _clear_protection "$_tool_id"; exit 0; }
+            [ "$cur_status" = "$_protected" ] || { _ai_log "WATCHER EXIT: cur=$cur_status != $_protected"; _clear_protection "$_tool_id"; exit 0; }
             # 对于 !：检查 pane shell 是否还有子进程（AI 是否仍在运行）
             if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
                 _is_current || exit 0
+                _ai_log "WATCHER RESET: pane process exited → -"
                 tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
                 _clear_protection "$_tool_id"
                 build_all_status
@@ -176,6 +208,8 @@ start_status_watcher() {
             fi
         done
     ) &
-    echo "$!:$watcher_gen" > "$watcher_pid_file"
+    local w_pid=$!
+    echo "$w_pid:$watcher_gen" > "$watcher_pid_file"
+    _ai_log "WATCHER START pid=$w_pid gen=$watcher_gen protect=$protected_status pane_pid=$pane_pid"
     disown
 }

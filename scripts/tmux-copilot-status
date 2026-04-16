@@ -26,30 +26,26 @@ case "$EVENT" in
     kill_watcher "$TOOL_ID"
     ;;
   PreToolUse)
+    # 竞态保护：检查保护文件而非 tmux 状态
+    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
+      exit 0
+    fi
     TOOL_NAME=$(echo "$INPUT" | jq -r '.toolName // ""' 2>/dev/null)
     STATUS=">"
-    kill_watcher "$TOOL_ID"
     ;;
   PostToolUse)
-    # 竞态保护：若 ! 或 ? 在保护窗口内，跳过
-    if [ -n "$TMUX_PANE" ]; then
-      cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@copilot_pane_status}" 2>/dev/null)
-      case "$cur_status" in
-        "!"|"?")
-          if _is_protected "$TOOL_ID"; then
-            exit 0
-          fi
-          ;;
-      esac
+    # 竞态保护：检查保护文件而非 tmux 状态
+    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
+      exit 0
     fi
     STATUS=">"
     kill_watcher "$TOOL_ID"
     ;;
   ErrorOccurred)
     STATUS="!"
+    _set_protection "$TOOL_ID"
     kill_watcher "$TOOL_ID"
     start_status_watcher "$TOOL_ID" "!"
-    _set_protection "$TOOL_ID"
     ;;
   *)
     exit 0
