@@ -1,6 +1,6 @@
 #!/bin/bash
-# install-hooks.sh: 自动注册/卸载 Claude Code hooks 到 ~/.claude/settings.json
-# 用法: install-hooks.sh [uninstall]
+# install-claude-hooks.sh: 自动注册/卸载 Claude Code hooks 到 ~/.claude/settings.json
+# 用法: install-claude-hooks.sh [uninstall]
 
 set -o errexit
 set -o pipefail

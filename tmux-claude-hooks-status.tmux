@@ -19,9 +19,9 @@ tmux set-option -g pane-border-format " #P #{pane_title} " 2>/dev/null || true
 tmux set-option -g pane-active-border-style "fg=#BD93F9" 2>/dev/null || true
 tmux set-option -g pane-border-style "fg=#6272A4" 2>/dev/null || true
 
-# --- 多行状态栏：动态追加 Claude 状态行 ---
+# --- 多行状态栏：动态追加 AI 状态行 ---
 # 读取当前行数（其他插件已设置好的），追加到最后一行的下一行
-# 幂等检测：若最后一行已含 @claude_all_status 签名，则为我们上次占用的行，直接复用，
+# 幂等检测：扫描所有行，查找已含 @ai_all_status 签名的行，直接复用，
 # 不再追加——这样手动重载脚本不会累计增加行数
 _cur_status=$(tmux show-option -gv status 2>/dev/null || echo "on")
 case "$_cur_status" in
@@ -30,15 +30,19 @@ case "$_cur_status" in
     [0-9]*) _cur_rows=$((_cur_status + 0)) ;;
     *)      _cur_rows=1 ;;
 esac
-_last_row=$((_cur_rows - 1))
-_last_fmt=$(tmux show-option -gv "status-format[${_last_row}]" 2>/dev/null || true)
-if echo "$_last_fmt" | grep -q "@claude_all_status"; then
-    CLAUDE_ROW=$_last_row
-else
+CLAUDE_ROW=""
+for _i in $(seq 0 $((_cur_rows - 1))); do
+    _fmt=$(tmux show-option -gv "status-format[${_i}]" 2>/dev/null || true)
+    if echo "$_fmt" | grep -q "@ai_all_status"; then
+        CLAUDE_ROW=$_i
+        break
+    fi
+done
+if [ -z "$CLAUDE_ROW" ]; then
     CLAUDE_ROW=$_cur_rows
     tmux set-option -g status $((_cur_rows + 1)) 2>/dev/null || true
 fi
-tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@claude_all_status},#{T:@claude_all_status},}" 2>/dev/null || true
+tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@ai_all_status},#{T:@ai_all_status},}" 2>/dev/null || true
 
 # 不动 status-right，让用户自行管理第 1 行内容
 # Claude 状态通过多行 status-format 的独立行显示，不修改 status-right
@@ -58,7 +62,8 @@ if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ];
 fi
 
 # --- 自动注册 hooks（幂等，每次插件加载时确保 hooks 存在）---
-"${CURRENT_DIR}/scripts/install-hooks.sh" >/dev/null 2>&1 || true
+"${CURRENT_DIR}/scripts/install-claude-hooks.sh" >/dev/null 2>&1 || true
+"${CURRENT_DIR}/scripts/install-copilot-hooks.sh" >/dev/null 2>&1 || true
 
 # --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
 # session-closed: session 被销毁时清除残留条目
@@ -69,7 +74,11 @@ tmux set-hook -g client-detached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-
 tmux set-hook -g client-attached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
 
 # --- 快捷键绑定 ---
-# prefix + C-h: 安装 hooks 到 ~/.claude/settings.json
-tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-hooks.sh && tmux display 'Claude hooks installed'"
-# prefix + C-u: 卸载 hooks
-tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-hooks.sh uninstall && tmux display 'Claude hooks removed'"
+# prefix + C-h: 安装 Claude hooks 到 ~/.claude/settings.json
+tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh && tmux display 'Claude hooks installed'"
+# prefix + C-u: 卸载 Claude hooks
+tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh uninstall && tmux display 'Claude hooks removed'"
+# prefix + C-g: 安装 Copilot hooks
+tmux bind-key C-g run-shell "${CURRENT_DIR}/scripts/install-copilot-hooks.sh && tmux display 'Copilot hooks installed'"
+# prefix + C-G: 卸载 Copilot hooks
+tmux bind-key C-G run-shell "${CURRENT_DIR}/scripts/install-copilot-hooks.sh uninstall && tmux display 'Copilot hooks removed'"

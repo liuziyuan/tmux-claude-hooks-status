@@ -1,0 +1,66 @@
+#!/bin/bash
+# GitHub Copilot CLI → tmux 状态栏 hook
+# 用法: tmux-copilot-status <EVENT_TYPE>
+# stdin: Copilot CLI 传入的 JSON 数据
+
+TOOL_ID="copilot"
+EVENT="$1"
+INPUT=$(cat)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
+
+# 解析 TMUX_PANE
+resolve_tmux_pane
+
+case "$EVENT" in
+  SessionStart)
+    STATUS="-"
+    ;;
+  SessionEnd)
+    STATUS=""
+    kill_watcher "$TOOL_ID"
+    ;;
+  UserPromptSubmit)
+    STATUS=">"
+    kill_watcher "$TOOL_ID"
+    ;;
+  PreToolUse)
+    # 竞态保护：检查保护文件而非 tmux 状态
+    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
+      exit 0
+    fi
+    TOOL_NAME=$(echo "$INPUT" | jq -r '.toolName // ""' 2>/dev/null)
+    STATUS=">"
+    ;;
+  PostToolUse)
+    # 竞态保护：检查保护文件而非 tmux 状态
+    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
+      exit 0
+    fi
+    STATUS=">"
+    kill_watcher "$TOOL_ID"
+    ;;
+  ErrorOccurred)
+    STATUS="!"
+    _set_protection "$TOOL_ID"
+    kill_watcher "$TOOL_ID"
+    start_status_watcher "$TOOL_ID" "!"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+# 写入 tmux 全局变量
+tmux set-option -g @copilot_status "$STATUS" 2>/dev/null || true
+
+# 写入 pane 用户变量（Copilot hook 子进程可能不继承 $TMUX，仅检查 $TMUX_PANE）
+if [ -n "$TMUX_PANE" ]; then
+    tmux set-option -pt "$TMUX_PANE" @copilot_pane_status "$STATUS" 2>/dev/null || true
+
+    # 重建聚合状态：扫描所有 pane，收集非空状态写入全局变量供状态栏使用
+    build_all_status
+    tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
+fi
