@@ -6,6 +6,7 @@
 EVENT="$1"
 INPUT=$(cat)
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATUS_COLOR="#F1FA8C"
 
 # 构建聚合状态：每个 pane 独立显示 [session] win.pane: status
@@ -89,6 +90,21 @@ kill_watcher() {
         rm -f "$WATCHER_PID_FILE"
     fi
     _clear_protection
+}
+
+# hooks 完整性校验：确保所有事件都已注册本插件的 hook
+_check_hooks_integrity() {
+    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    [ -f "$settings_file" ] || return 1
+    local registered
+    registered=$(jq '
+        .hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
+        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
+        | length
+    ' "$settings_file" 2>/dev/null)
+    [ "${registered:-0}" -ge 10 ]
 }
 
 # 状态 watcher：保护 !/? 不被竞态 PostToolUse 覆盖，监控 claude 进程退出
@@ -232,6 +248,11 @@ case "$EVENT" in
     ;;
   SessionStart)
     STATUS="-"
+    # hooks 完整性校验：检测到缺失时自动修复并提示
+    if ! _check_hooks_integrity; then
+        "${SCRIPT_DIR}/install-hooks.sh" >/dev/null 2>&1
+        tmux display-message "⚠ Claude hooks 已自动修复（检测到缺失）" 2>/dev/null || true
+    fi
     ;;
   SessionEnd)
     STATUS=""
@@ -258,4 +279,5 @@ if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
     # 重建聚合状态：扫描所有 pane，收集非空状态写入全局变量供状态栏使用
     build_all_status
     tmux set-option -g @claude_all_status "$ALL" 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
 fi
