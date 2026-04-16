@@ -17,7 +17,7 @@ build_all_status() {
         [ -n "$pane_status" ] || continue
         session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
         panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
-        if [ "$pane_status" = "!" ]; then
+        if [ "$pane_status" = "!" ] || [ "$pane_status" = "?" ]; then
             status_block="#[bg=#FF5555,fg=#F8F8F2] ${pane_status} #[bg=default,fg=default]"
         else
             status_block="#[bg=${STATUS_COLOR},fg=#282A36] ${pane_status} #[bg=default,fg=default]"
