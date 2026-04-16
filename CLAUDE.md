@@ -2,182 +2,151 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Terminology
+## 术语
 
-**AI Status** — 本项目所实现的核心功能的统称。指通过 tmux 状态栏和窗格边框实时显示 AI 编程助手（如 Claude Code、GitHub Copilot 等）运行状态的能力，包括状态检测、事件监听、符号渲染、颜色编码等整套机制。
+**AI Status** — 本项目核心功能的统称。通过 tmux 状态栏实时显示 AI 编程助手（Claude Code、GitHub Copilot CLI 等）运行状态，包括状态检测、事件监听、符号渲染、颜色编码等整套机制。
 
-## Project Overview
+## 当前开发状态
 
-A tmux plugin that displays Claude Code status in the tmux status bar and pane borders. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization) per pane via a dedicated status line.
+**Claude Code 支持已稳定**，不需要进一步调试。后续工作重点在 **Copilot CLI 支持的调试和完善**。
 
-## Architecture
+## 项目概述
 
-### Core Files
+tmux 插件，在 tmux 状态栏和窗格边框中显示 AI 编程助手的运行状态。通过 hook 系统实时显示每个 pane 的状态（空闲、处理中、等待授权等），以独立状态行呈现。
 
-**`tmux-claude-hooks-status.tmux`** (76 lines) — TPM plugin entry point
-- Runs at tmux startup and on `prefix+r` reload
-- Configures pane-border-format (pane index + title)
-- Registers Claude Code events and tmux session/client hooks
-- Manages multi-line status format (appends Claude status as independent status-format line)
-- Reload protection: overrides `prefix+r` to auto-initialize on reconfig
-- Binds keyboard shortcuts: `prefix+C-h` (install), `prefix+C-u` (uninstall)
+## 架构
 
-**`scripts/tmux-claude-status`** (212 lines) — Core event handler
-- Invoked by Claude Code on hook events (SessionStart, UserPromptSubmit, PermissionRequest, etc.)
-- Resolves `TMUX_PANE` via process tree walk (hooks don't inherit `$TMUX_PANE`)
-- Maps Claude Code events to status symbols: `-` (idle), `>` (processing), `?` (user question), `!` (auth waiting)
-- Writes per-pane status (`@claude_pane_status`) and aggregated status (`@claude_all_status`)
-- Spawns watcher process for permission requests: monitors when user dismisses permission prompt (process exits) and resets status to idle
-
-**`scripts/install-hooks.sh`** (94 lines) — Hook registration
-- Idempotently registers/unregisters 10 Claude Code events into `~/.claude/settings.json`
-- Uses `jq` for JSON manipulation
-- Supports both install and uninstall modes
-
-### Data Flow
+### 文件结构
 
 ```
-Claude Code Event (SessionStart, UserPromptSubmit, etc.)
+tmux-claude-hooks-status.tmux          # TPM 入口（85行）
+scripts/
+  lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、watcher、竞态保护、日志（216行）
+  tmux-claude-status                   # Claude Code 事件处理器（174行）
+  tmux-copilot-status                  # Copilot CLI 事件处理器（67行）
+  install-claude-hooks.sh              # Claude Code hooks 注册/卸载（125行）
+  install-copilot-hooks.sh             # Copilot CLI hooks 注册/卸载（93行）
+```
+
+### 共享库 `lib-tmux-ai-status.sh`
+
+被 `tmux-claude-status` 和 `tmux-copilot-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"` 或 `"copilot"`）。提供：
+
+- **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
+- **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
+- **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，合并 `@claude_pane_status` 和 `@copilot_pane_status`，写入 `@ai_all_status`
+- **竞态保护** `_set_protection` / `_is_protected` / `_clear_protection` — 基于时间戳文件，3 秒窗口
+- **Watcher 管理** `start_status_watcher()` / `kill_watcher()` — 后台进程监控 !/? 状态，防止被竞态覆盖
+
+### 数据流
+
+```
+AI 事件（Claude Code / Copilot CLI）
     ↓
-tmux-claude-status script
-    ├─ Resolve TMUX_PANE (process tree walk)
-    ├─ Map event → status symbol
-    ├─ Write @claude_pane_status (per-pane)
-    ├─ Call build_all_status()
-    │  └─ Scan all attached-session panes
-    │  └─ Build aggregated @claude_all_status
-    ├─ Optionally spawn permission watcher
-    └─ Exit
+对应 tmux-*-status 脚本
+    ├─ source lib-tmux-ai-status.sh
+    ├─ resolve_tmux_pane()（进程树遍历）
+    ├─ case "$EVENT" → 映射状态符号
+    ├─ 写入 per-pane 状态（@claude_pane_status 或 @copilot_pane_status）
+    ├─ build_all_status() → @ai_all_status
+    ├─ 可选: spawn watcher（!/? 状态）
+    └─ tmux refresh-client
 
-Watcher Process (if permission request)
-    ├─ Every 1s: check if Claude process still running
-    ├─ If ! overwritten by racing PostToolUse → re-assert ! (within 3s window)
-    └─ If exited & status still '!': reset to '-' + rebuild
-
-Race Protection (timestamp-based)
-    ├─ _set_protection: record timestamp when ! or ? is set
-    ├─ _is_protected: check if timestamp is within 3s window
-    ├─ PostToolUse: skip if current status is !/? AND _is_protected
-    └─ Watcher: re-assert ! if overwritten by > within protection window
-
-tmux session/client lifecycle hooks
+tmux session/client 生命周期 hook
     (session-closed, client-detached, client-attached)
-    ↓
-    Trigger _refresh pseudo-event
-    ↓
-    Rebuild @claude_all_status (only attached sessions)
+    ↓ _refresh → rebuild @ai_all_status
 ```
 
-## Status Symbols and Events
+### 竞态保护机制
 
-| Event | Status | Color | Meaning |
-|-------|--------|-------|---------|
-| SessionStart | `-` | Yellow | Session idle |
-| PreToolUse / PostToolUse | `>` | Yellow | Processing |
-| PreToolUse (AskUserQuestion) | `?` | Yellow | Awaiting user input |
-| PermissionRequest | `!` | Red | Waiting for authorization |
-| Stop / StopFailure | `✓` or `-` | Yellow | Completed or back to idle |
-| SessionEnd | `` (empty) | — | Session ended |
-| _refresh (internal) | (rebuilt) | — | Aggregated state refresh |
+PermissionRequest 和 AskUserQuestion 设置 !/? 时，写入时间戳文件 `/tmp/${TOOL_ID}-protect-${TMUX_PANE}`。异步 PostToolUse 检查此文件，3 秒窗口内跳过。Watcher 进程在 ! 被竞态覆盖为 > 时重新断言。
 
-## Development Workflow
+### Claude Code 特有
 
-### Local Setup
+- **Hooks 完整性校验**：SessionStart 时 `_check_hooks_integrity()` 检测 10 个事件是否都注册了本插件的 hook，缺失则自动修复
+- **Notification 事件细分**：根据消息内容（waiting for input / denied / permission）分发到不同状态
+- **Stop/StopFailure 智能状态**：当前状态为 ! 时回到 -（被拒绝），其余显示 ✓
+- **Fallback 清理**：TMUX_PANE 未解析时，遍历所有 pane 清理残留的 > 和 ! 状态
 
-1. Clone/symlink plugin to tmux plugin directory:
-   ```bash
-   ln -s /Users/liuziyuan/work/home/tmux-claude-hooks-status ~/.tmux/plugins/tmux-claude-hooks-status
-   ```
+### Copilot CLI 特有
 
-2. Install Claude Code hooks (one-time):
-   ```bash
-   prefix + C-h
-   # Or manually: bash scripts/install-hooks.sh
-   ```
+- **Hooks 安装方式**：通过 `copilot plugin install` 注册，fallback 到直接复制到 `~/.copilot/installed-plugins/_direct/`
+- **事件映射**：SessionStart → -，PreToolUse/PostToolUse → >，ErrorOccurred → !（带 watcher）
+- **JSON 字段差异**：Copilot 使用 `toolName` 而非 Claude 的 `tool_name`
 
-3. Test changes immediately with `prefix+r` (reload plugin entry point automatically)
+## 状态符号
 
-### Testing Commands
+| 事件 | 状态 | 含义 |
+|------|------|------|
+| SessionStart | `-` | 会话空闲 |
+| PreToolUse / PostToolUse | `>` | 处理中 |
+| PreToolUse (AskUserQuestion) | `?` | 等待用户输入 |
+| PermissionRequest | `!` | 等待授权 |
+| Stop / StopFailure | `✓` 或 `-` | 完成或回到空闲 |
+| SessionEnd | (空) | 会话结束 |
+
+## 开发
+
+### 本地设置
 
 ```bash
-# Manually trigger a hook event
+ln -s /Users/liuziyuan/work/home/tmux-claude-hooks-status ~/.tmux/plugins/tmux-claude-hooks-status
+prefix + C-h    # 安装 Claude hooks
+prefix + C-g    # 安装 Copilot hooks
+prefix + r      # 重载（自动触发初始化）
+```
+
+### 测试命令
+
+```bash
+# 手动触发 Claude 事件
 echo '{}' | bash scripts/tmux-claude-status SessionStart
-tmux show-option -g @claude_all_status
+tmux show-option -g @ai_all_status
 
-# Check all pane statuses
-tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status}"
+# 查看 pane 状态
+tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status} #{@copilot_pane_status}"
 
-# Verify hooks registered in Claude Code
+# 查看 Claude hooks 注册
 jq '.hooks | keys' ~/.claude/settings.json
 
-# Trigger permission request simulation
+# 查看日志
+tail -f /tmp/tmux-ai-status.log
+
+# 模拟权限请求
 echo '{}' | bash scripts/tmux-claude-status PermissionRequest
-# Should show '!' (red) temporarily, auto-reset to '-' after 3s
-
-# Watch watcher process
-ps aux | grep "claude-watcher"
-
-# Reload tmux config
-tmux source ~/.tmux.conf
 ```
 
-### Common Development Tasks
+### 快捷键
 
-**Modify status symbol mapping**: Edit the `case "$EVENT"` block in `scripts/tmux-claude-status` (around line 119).
+| 快捷键 | 操作 |
+|--------|------|
+| `prefix + C-h` | 安装 Claude Code hooks |
+| `prefix + C-u` | 卸载 Claude Code hooks |
+| `prefix + C-g` | 安装 Copilot hooks |
+| `prefix + C-G` | 卸载 Copilot hooks |
+| `prefix + r` | 重载 tmux 配置（含插件初始化） |
 
-**Add new Claude Code event**: 
-1. Add event name to `EVENTS` array in `scripts/install-hooks.sh`
-2. Add event handler in `scripts/tmux-claude-status` case statement
-3. Reload: `prefix+r` to test
+## 关键设计决策
 
-**Change display format**: Edit `build_all_status()` function in `scripts/tmux-claude-status` (around line 12) or status-format line in `tmux-claude-hooks-status.tmux` (line 41).
+- **共享库架构**：Claude 和 Copilot 共用 `lib-tmux-ai-status.sh`，通过 `TOOL_ID` 区分状态变量和临时文件
+- **Attached-only 显示**：`build_all_status()` 按 `session_last_attached` 降序、`window_index`/`pane_index` 升序排列，仅显示 attached session
+- **进程树解析**：hook 子进程不继承 `$TMUX_PANE`，通过 `ps -o ppid` 向上遍历找到 pane PID
+- **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
+- **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
+- **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 
-**Customize colors/icons**: Add to `~/.tmux.conf`:
-```bash
-set -g @claude_hooks_status_color '#FF6B6B'
-set -g @claude_hooks_idle_icon '✔'
-set -g @claude_hooks_busy_icon '◄▶'
-set -g @claude_hooks_auth_icon '⚠'
-```
+## 依赖
 
-## Key Design Decisions
+- tmux >= 3.1
+- jq
+- bash >= 4.0
 
-- **Attached-only display**: `build_all_status()` filters `session_attached==1` to exclude detached sessions from aggregated view
-- **Process tree resolution**: Since hook subprocesses don't inherit `TMUX_PANE`, walk process parents (`ps -o ppid`) to find the pane PID
-- **Watcher as separate process**: Permission state monitoring uses background process + PID file (`/tmp/claude-watcher-${TMUX_PANE}.pid`) with generation ID to prevent race conditions
-- **Timestamp-based race protection**: When `!` or `?` is set, a 3-second protection window is recorded (`/tmp/claude-protect-${TMUX_PANE}`). Async `PostToolUse` events from previous tools are blocked during this window. The watcher also re-asserts `!` if a racing event overwrites it
-- **Idempotent initialization**: Plugin can be reloaded via `prefix+r` without side effects (checks if line already occupied, register hooks only if missing)
-- **Stale hook cleanup**: `install-hooks.sh` removes dead hooks (non-existent script paths) and duplicate plugin-path hooks before installing
-- **Multi-line status**: Claude status occupies independent `status-format[N]` line, preserving user's `status-right` configuration
+## Hook 事件注册
 
-## Customization Options
+**Claude Code**（10 个事件，注册到 `~/.claude/settings.json`）：
+SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, Stop, StopFailure
 
-| tmux Option | Default | Purpose |
-|-----------|---------|---------|
-| `@claude_hooks_status_color` | `#F1FA8C` | Status text color |
-| `@claude_hooks_idle_icon` | `✓` | Idle indicator |
-| `@claude_hooks_busy_icon` | `⠿` | Processing indicator |
-| `@claude_hooks_auth_icon` | `🔒` | Authorization indicator |
+全部 async=true，PermissionRequest 例外（async=false 用于立即阻塞）。
 
-## Dependencies
-
-- tmux >= 3.1 (supports user options, pane-border-status, set-hook, multi-line status-format)
-- jq (JSON manipulation)
-- bash >= 4.0 (process substitution, arrays)
-
-## Hook Events Registered
-
-The plugin registers Claude Code hooks for these 10 events (in `install-hooks.sh`):
-
-1. SessionStart — Session initialized
-2. SessionEnd — Session ended
-3. UserPromptSubmit — User submitted input
-4. PreToolUse — Before tool execution
-5. PostToolUse — After successful tool execution
-6. PostToolUseFailure — Tool execution failed
-7. PermissionRequest — Awaiting user authorization
-8. Notification — Generic notification
-9. Stop — Session stopped
-10. StopFailure — Stop failed
-
-All registered to `~/.claude/settings.json` with async=true except PermissionRequest (async=false for immediate blocking).
+**Copilot CLI**（6 个事件，通过 plugin 系统注册）：
+sessionStart, sessionEnd, userPromptSubmit, preToolUse, postToolUse, errorOccurred
