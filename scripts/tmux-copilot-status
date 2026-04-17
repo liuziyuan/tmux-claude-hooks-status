@@ -7,11 +7,19 @@ TOOL_ID="copilot"
 EVENT="$1"
 INPUT=$(cat)
 
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "copilot"' 2>/dev/null)
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
 # 解析 TMUX_PANE
 resolve_tmux_pane
+
+# 缓存 pane 可读位置信息
+_pane_loc=""
+if [ -n "$TMUX_PANE" ]; then
+    _pane_loc=$(tmux display-message -pt "$TMUX_PANE" -p "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)
+fi
 
 case "$EVENT" in
   SessionStart)
@@ -26,24 +34,27 @@ case "$EVENT" in
     kill_watcher "$TOOL_ID"
     ;;
   PreToolUse)
-    # 竞态保护：检查保护文件而非 tmux 状态
-    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
-      exit 0
+    if _is_permission_mode; then
+        TOOL_USE_ID=$(echo "$INPUT" | jq -r '.toolUseId // .tool_use_id // ""' 2>/dev/null)
+        _record_pretool_id "$TOOL_USE_ID"
     fi
     TOOL_NAME=$(echo "$INPUT" | jq -r '.toolName // ""' 2>/dev/null)
     STATUS=">"
     ;;
   PostToolUse)
-    # 竞态保护：检查保护文件而非 tmux 状态
-    if [ -n "$TMUX_PANE" ] && _is_protected "$TOOL_ID"; then
-      exit 0
+    if _is_permission_mode; then
+        TOOL_USE_ID=$(echo "$INPUT" | jq -r '.toolUseId // .tool_use_id // ""' 2>/dev/null)
+        if ! _check_pretool_id "$TOOL_USE_ID"; then
+            exit 0
+        fi
+        _exit_permission_mode
     fi
     STATUS=">"
     kill_watcher "$TOOL_ID"
     ;;
   ErrorOccurred)
     STATUS="!"
-    _set_protection "$TOOL_ID"
+    _enter_permission_mode
     kill_watcher "$TOOL_ID"
     start_status_watcher "$TOOL_ID" "!"
     ;;
@@ -55,8 +66,8 @@ esac
 # 写入 tmux 全局变量
 tmux set-option -g @copilot_status "$STATUS" 2>/dev/null || true
 
-# 写入 pane 用户变量（Copilot hook 子进程可能不继承 $TMUX，仅检查 $TMUX_PANE）
-if [ -n "$TMUX_PANE" ]; then
+# 写入 pane 用户变量（当在 tmux pane 内运行时，每个 pane 独立显示）
+if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
     tmux set-option -pt "$TMUX_PANE" @copilot_pane_status "$STATUS" 2>/dev/null || true
 
     # 重建聚合状态：扫描所有 pane，收集非空状态写入全局变量供状态栏使用

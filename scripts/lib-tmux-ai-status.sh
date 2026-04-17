@@ -3,20 +3,12 @@
 # 被 tmux-claude-status 和 tmux-copilot-status source
 # 调用方需设置: TOOL_ID ("claude" 或 "copilot")
 
+_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 STATUS_COLOR="#F1FA8C"
 
-# --- 日志 ---
-AI_LOG_FILE="/tmp/tmux-ai-status.log"
-_ai_log() {
-    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] $*"
-    echo "$msg" >> "$AI_LOG_FILE" 2>/dev/null
-    # 自动轮转：超过 100KB 截断保留末尾 50KB
-    local size
-    size=$(wc -c < "$AI_LOG_FILE" 2>/dev/null || echo 0)
-    if [ "$size" -gt 102400 ]; then
-        tail -c 51200 "$AI_LOG_FILE" > "${AI_LOG_FILE}.tmp" 2>/dev/null && mv "${AI_LOG_FILE}.tmp" "$AI_LOG_FILE"
-    fi
-}
+# --- 日志模块 ---
+source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 
 # --- TMUX_PANE 解析 ---
 # hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
@@ -40,6 +32,18 @@ resolve_tmux_pane() {
             check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d '[:space:]')
         done
     fi
+}
+
+# --- Pane ID 持久化（供 SessionEnd 回读）---
+_save_pane_id() {
+    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && echo "$TMUX_PANE" > "/tmp/claude-pane-${SESSION_ID}"
+}
+_load_pane_id() {
+    [ -z "$SESSION_ID" ] && return 1
+    [ -f "/tmp/claude-pane-${SESSION_ID}" ] && TMUX_PANE=$(cat "/tmp/claude-pane-${SESSION_ID}" 2>/dev/null) && [ -n "$TMUX_PANE" ]
+}
+_clear_pane_id() {
+    [ -n "$SESSION_ID" ] && rm -f "/tmp/claude-pane-${SESSION_ID}"
 }
 
 # --- 状态聚合 ---
@@ -70,38 +74,44 @@ build_all_status() {
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{@copilot_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$7>0' | sort -t'|' -k8,8n -k3,3n -k4,4n)
 }
 
-# --- 竞态保护 ---
-_set_protection() {
-    local tool_id="${1:-$TOOL_ID}"
-    if [ -n "$TMUX_PANE" ]; then
-        local ts
-        ts=$(date +%s)
-        echo "$ts" > "/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
-        _ai_log "PROTECT SET ts=$ts"
-    fi
+# --- 权限模式（事件序列保护）---
+# 临时文件 key = ${TOOL_ID}-${SESSION_ID}-${TMUX_PANE（sanitized）}
+# SESSION_ID 由调用方从 hook input JSON 中解析后设置
+
+_permission_key() {
+    echo "${TOOL_ID}-${SESSION_ID:-unknown}-${TMUX_PANE//[^a-zA-Z0-9]/_}"
 }
 
-_is_protected() {
-    local tool_id="${1:-$TOOL_ID}"
-    local pfile="/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}"
-    [ -f "$pfile" ] || { _ai_log "PROTECT CHECK result=no (no file)"; return 1; }
-    local pt now
-    pt=$(cat "$pfile" 2>/dev/null) || { _ai_log "PROTECT CHECK result=no (read fail)"; return 1; }
-    now=$(date +%s)
-    local elapsed=$((now - pt))
-    if [ "$elapsed" -lt 3 ]; then
-        _ai_log "PROTECT CHECK elapsed=${elapsed}s result=yes"
-        return 0
-    else
-        _ai_log "PROTECT CHECK elapsed=${elapsed}s result=no (expired)"
-        return 1
-    fi
+_enter_permission_mode() {
+    if [ -z "$TMUX_PANE" ]; then return; fi
+    local key=$(_permission_key)
+    echo "$(date +%s)" > "/tmp/${key}-permission"
+    # 保留已有 pretool-ids：PreToolUse 先于 PermissionRequest 到达时，
+    # 需要保留它已记录的 tool_use_id，否则 PostToolUse 无法匹配、永远卡在 permission_mode
+    touch "/tmp/${key}-pretool-ids"
 }
 
-_clear_protection() {
-    local tool_id="${1:-$TOOL_ID}"
-    rm -f "/tmp/${tool_id}-protect-${TMUX_PANE//[^a-zA-Z0-9]/_}" 2>/dev/null
-    _ai_log "PROTECT CLEAR"
+_exit_permission_mode() {
+    if [ -z "$TMUX_PANE" ]; then return; fi
+    local key=$(_permission_key)
+    rm -f "/tmp/${key}-permission" "/tmp/${key}-pretool-ids"
+}
+
+_is_permission_mode() {
+    if [ -z "$TMUX_PANE" ]; then return 1; fi
+    [ -f "/tmp/$(_permission_key)-permission" ]
+}
+
+_record_pretool_id() {
+    local tool_use_id="$1"
+    if [ -z "$TMUX_PANE" ] || [ -z "$tool_use_id" ]; then return; fi
+    echo "$tool_use_id" >> "/tmp/$(_permission_key)-pretool-ids"
+}
+
+_check_pretool_id() {
+    local tool_use_id="$1"
+    if [ -z "$TMUX_PANE" ] || [ -z "$tool_use_id" ]; then return 1; fi
+    grep -qx "$tool_use_id" "/tmp/$(_permission_key)-pretool-ids" 2>/dev/null
 }
 
 # --- Watcher PID 管理 ---
@@ -133,16 +143,13 @@ kill_watcher() {
         pid=$(_read_watcher_pid "$tool_id")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null
-            _ai_log "WATCHER KILL pid=$pid"
         fi
         rm -f "$pid_file"
-    else
-        _ai_log "WATCHER KILL no watcher"
     fi
 }
 
 # --- 状态 watcher ---
-# 保护 !/? 不被竞态 PostToolUse 覆盖，监控进程退出
+# 监控 pane 进程退出，检测 AI 是否停止运行
 # 参数: $1 = tool_id, $2 = protected_status ("!" 或 "?")
 start_status_watcher() {
     local tool_id="$1"
@@ -165,7 +172,6 @@ start_status_watcher() {
         _my_pid_file="$watcher_pid_file"
         _protected="$protected_status"
         _pane_pid="$pane_pid"
-        _tool_id="$tool_id"
         _pane_status_var="$pane_status_var"
         _pane_loc="$_pane_loc_outer"
         _is_current() {
@@ -182,25 +188,11 @@ start_status_watcher() {
 
         while true; do
             sleep 1
-            _is_current || { _ai_log "WATCHER EXIT: superseded by newer watcher"; exit 0; }
-            cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{${_pane_status_var}}" 2>/dev/null)
-            # 二次保护：若 !/? 被竞态 PostToolUse 覆盖为 > 且在保护窗口内，重新断言
-            if [ "$cur_status" = ">" ] && _is_protected "$_tool_id"; then
-                _ai_log "WATCHER REASSERT: cur=> protected=yes → $_protected"
-                tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "$_protected" 2>/dev/null
-                build_all_status
-                tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
-                tmux refresh-client -S 2>/dev/null || true
-                continue
-            fi
-            # 若状态已不是 protected（被其他 hook 更新且保护已过期），退出
-            [ "$cur_status" = "$_protected" ] || { _ai_log "WATCHER EXIT: cur=$cur_status != $_protected"; _clear_protection "$_tool_id"; exit 0; }
+            _is_current || exit 0
             # 对于 !：检查 pane shell 是否还有子进程（AI 是否仍在运行）
             if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
                 _is_current || exit 0
-                _ai_log "WATCHER RESET: pane process exited → -"
                 tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
-                _clear_protection "$_tool_id"
                 build_all_status
                 tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
                 tmux refresh-client -S 2>/dev/null || true
@@ -210,6 +202,5 @@ start_status_watcher() {
     ) &
     local w_pid=$!
     echo "$w_pid:$watcher_gen" > "$watcher_pid_file"
-    _ai_log "WATCHER START pid=$w_pid gen=$watcher_gen protect=$protected_status pane_pid=$pane_pid"
     disown
 }
