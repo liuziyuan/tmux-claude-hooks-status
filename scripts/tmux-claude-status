@@ -66,26 +66,24 @@ case "$EVENT" in
     ;;
   PermissionRequest)
     _ai_log "PermissionRequest input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
-    STATUS="!"
-    _enter_permission_mode
-    kill_watcher "$TOOL_ID"
-    start_status_watcher "$TOOL_ID" "!"
-    ;;
-  PreToolUse)
-    _ai_log "PreToolUse input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    # 无条件记录 id：PreToolUse 可能先于 PermissionRequest 到达（异步并发），
-    # 此时尚未进入 permission_mode，但 PostToolUse 仍需靠 id 匹配退出
-    _record_pretool_id "$TOOL_USE_ID"
-
+    _enter_permission_mode
     if [ "$TOOL" = "AskUserQuestion" ]; then
         STATUS="?"
         kill_watcher "$TOOL_ID"
         start_status_watcher "$TOOL_ID" "?"
-        _enter_permission_mode
-    elif _is_permission_mode; then
-        # PermissionRequest 已设 !，保持现状不覆盖
+    else
+        STATUS="!"
+        kill_watcher "$TOOL_ID"
+        start_status_watcher "$TOOL_ID" "!"
+    fi
+    ;;
+  PreToolUse)
+    _ai_log "PreToolUse input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
+    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
+    _record_pretool_id "$TOOL_USE_ID"
+
+    if _is_permission_mode; then
         exit 0
     else
         STATUS=">"
@@ -182,8 +180,6 @@ if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; th
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
     tmux refresh-client -S 2>/dev/null || true
 fi
-
-_ai_log "WRITE status=${STATUS:-<empty>} pane=${TMUX_PANE:-?} event=${EVENT}"
 
 # Fallback: SessionEnd 仍无 TMUX_PANE 时，全 pane 清理活跃状态
 if [ -z "$TMUX_PANE" ] && command -v tmux &>/dev/null; then
