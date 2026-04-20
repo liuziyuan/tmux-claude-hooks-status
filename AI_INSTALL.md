@@ -244,10 +244,10 @@ Run the plugin's `install-hooks.sh` to register hooks in `~/.claude/settings.jso
 ```bash
 PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
 
-if [ -f "$PLUGIN_DIR/scripts/install-hooks.sh" ]; then
-    bash "$PLUGIN_DIR/scripts/install-hooks.sh"
+if [ -f "$PLUGIN_DIR/scripts/install-claude-hooks.sh" ]; then
+    bash "$PLUGIN_DIR/scripts/install-claude-hooks.sh"
 else
-    echo "[ERROR] install-hooks.sh not found: $PLUGIN_DIR/scripts/install-hooks.sh"
+    echo "[ERROR] install-claude-hooks.sh not found: $PLUGIN_DIR/scripts/install-claude-hooks.sh"
     echo "Make sure the plugin is properly installed."
 fi
 ```
@@ -338,7 +338,7 @@ fi
 # 6. Live tmux test
 if tmux info &>/dev/null; then
     echo '{}' | bash "$PLUGIN_DIR/scripts/tmux-claude-status" SessionStart 2>/dev/null
-    STATUS=$(tmux show-option -g @claude_all_status 2>/dev/null)
+    STATUS=$(tmux show-option -g @ai_all_status 2>/dev/null)
     if [ -n "$STATUS" ]; then
         echo "[OK] Live tmux status: $STATUS"
     else

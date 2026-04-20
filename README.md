@@ -96,7 +96,7 @@ prefix + C-u
 ### Manual Hook Install (Alternative)
 
 ```bash
-bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-hooks.sh
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 ```
 
 ## Status Symbols and Events
@@ -105,12 +105,13 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-hooks.sh
 |-------|--------|-------|---------|
 | `SessionStart` | `-` | Yellow | Session idle |
 | `PreToolUse` / `PostToolUse` | `>` | Yellow | Processing |
-| `PreToolUse` (AskUserQuestion) | `?` | Yellow | Awaiting user input |
-| `PermissionRequest` | `!` | Red | Waiting for authorization |
+| `PermissionRequest` (AskUserQuestion) | `?` | Red | Awaiting user input |
+| `PermissionRequest` (other tools) | `!` | Red | Waiting for authorization |
 | `Stop` / `StopFailure` | `✓` or `-` | Yellow | Completed or back to idle |
 | `SessionEnd` | (empty) | — | Session ended |
 
-Notification events are handled internally — specific messages (permission-related, cancelled, etc.) are dispatched to the appropriate status rather than displayed directly.
+- `!` status has a 30-second timeout (configurable via `PERMISSION_TIMEOUT` env var) — auto-resets to `-` if the permission is denied or unresolved
+- Notification events are handled internally — `idle_prompt` resets to `-`; `permission_prompt` notifications are handled by the PermissionRequest flow
 
 ## Customization Options
 
@@ -132,7 +133,7 @@ Notification events are handled internally — specific messages (permission-rel
 ```bash
 # 1. Trigger a hook manually
 echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
-tmux show-option -g @claude_all_status
+tmux show-option -g @ai_all_status
 
 # 2. Check pane status
 tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status}"

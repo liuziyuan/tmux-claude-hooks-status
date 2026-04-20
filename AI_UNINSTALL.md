@@ -35,8 +35,8 @@ Remove all hook entries pointing to this plugin from `~/.claude/settings.json`.
 ```bash
 SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
-if [ -f "$PLUGIN_DIR/scripts/install-hooks.sh" ]; then
-    bash "$PLUGIN_DIR/scripts/install-hooks.sh" uninstall
+if [ -f "$PLUGIN_DIR/scripts/install-claude-hooks.sh" ]; then
+    bash "$PLUGIN_DIR/scripts/install-claude-hooks.sh" uninstall
 else
     # Fallback: remove hooks manually via jq
     if command -v jq &>/dev/null && [ -f "$SETTINGS_FILE" ]; then
@@ -67,7 +67,7 @@ Terminate any running watcher processes spawned by the plugin.
 KILLED=0
 for f in /tmp/claude-watcher-*.pid; do
     [ -f "$f" ] || continue
-    PID=$(cat "$f" 2>/dev/null)
+    PID=$(cat "$f" 2>/dev/null | cut -d: -f1)
     if [ -n "$PID" ] && kill "$PID" 2>/dev/null; then
         echo "[OK] Killed watcher PID $PID"
         KILLED=$((KILLED + 1))
@@ -79,12 +79,15 @@ if [ "$KILLED" -eq 0 ]; then
     echo "[OK] No watcher processes found"
 fi
 
-# Clean up temporary protection files (created during permission/question events)
-rm -f /tmp/claude-protect-* 2>/dev/null
-PROTECT_COUNT=$(ls /tmp/claude-protect-* 2>/dev/null | wc -l)
-if [ "$PROTECT_COUNT" -eq 0 ]; then
-    echo "[OK] Cleaned temporary protection files"
+# Clean up temporary permission mode and pretool-id files
+rm -f /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null
+TEMP_COUNT=$(ls /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null | wc -l)
+if [ "$TEMP_COUNT" -eq 0 ]; then
+    echo "[OK] Cleaned permission mode files"
 fi
+
+# Clean up pane ID persistence files
+rm -f /tmp/claude-pane-* 2>/dev/null
 
 # Clean up temporary bind configuration files (created during plugin reload)
 rm -f /tmp/tmux-claude-bind-*.conf 2>/dev/null
@@ -103,7 +106,7 @@ Remove all tmux user options and settings set by the plugin. Restore status bar 
 ```bash
 if tmux info &>/dev/null; then
     # Remove plugin-specific user options
-    tmux set-option -gu @claude_all_status 2>/dev/null
+    tmux set-option -gu @ai_all_status 2>/dev/null
     tmux set-option -gu @claude_status 2>/dev/null
     tmux set-option -gu @claude_hooks_reload_registered 2>/dev/null
     
@@ -121,7 +124,7 @@ if tmux info &>/dev/null; then
             # status is multi-line, check last row for plugin signature
             LAST_ROW=$((STATUS_VAL - 1))
             LAST_FMT=$(tmux show-option -gv "status-format[${LAST_ROW}]" 2>/dev/null || true)
-            if echo "$LAST_FMT" | grep -q "@claude_all_status"; then
+            if echo "$LAST_FMT" | grep -q "@ai_all_status"; then
                 CLAUDE_ROW=$LAST_ROW
             fi
             ;;
@@ -245,11 +248,11 @@ fi
 
 # 3. tmux user options cleared
 if tmux info &>/dev/null; then
-    OPT_STATUS=$(tmux show-option -g @claude_all_status 2>/dev/null)
+    OPT_STATUS=$(tmux show-option -g @ai_all_status 2>/dev/null)
     if [ -z "$OPT_STATUS" ]; then
-        echo "[OK] @claude_all_status cleared"
+        echo "[OK] @ai_all_status cleared"
     else
-        echo "[FAIL] @claude_all_status still set: $OPT_STATUS"
+        echo "[FAIL] @ai_all_status still set: $OPT_STATUS"
         ERRORS=$((ERRORS + 1))
     fi
 
@@ -275,12 +278,13 @@ if [ -f "$TMUX_CONF" ]; then
 fi
 
 # 5. Temporary files cleaned
-TEMP_PROTECT=$(ls /tmp/claude-protect-* 2>/dev/null | wc -l | tr -d ' ')
+TEMP_PERMISSION=$(ls /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null | wc -l | tr -d ' ')
 TEMP_BIND=$(ls /tmp/tmux-claude-bind-*.conf 2>/dev/null | wc -l | tr -d ' ')
-if [ "$TEMP_PROTECT" -eq 0 ] && [ "$TEMP_BIND" -eq 0 ]; then
+TEMP_PANE=$(ls /tmp/claude-pane-* 2>/dev/null | wc -l | tr -d ' ')
+if [ "$TEMP_PERMISSION" -eq 0 ] && [ "$TEMP_BIND" -eq 0 ] && [ "$TEMP_PANE" -eq 0 ]; then
     echo "[OK] No temporary plugin files remaining"
 else
-    echo "[WARN] Some temporary files remain: protect=$TEMP_PROTECT, bind=$TEMP_BIND"
+    echo "[WARN] Some temporary files remain: permission=$TEMP_PERMISSION, bind=$TEMP_BIND, pane=$TEMP_PANE"
 fi
 
 # 6. Custom tmux options cleaned
