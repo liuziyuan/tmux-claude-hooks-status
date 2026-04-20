@@ -179,29 +179,17 @@ start_status_watcher() {
         }
         trap _cleanup EXIT
 
-        _start_time=$(date +%s)
         while true; do
             sleep 1
             _is_current || exit 0
-            if [ "$_protected" = "!" ]; then
-                # AI 进程已退出 → reset 为 -
-                if ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
-                    _is_current || exit 0
-                    tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
-                    build_all_status
-                    tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
-                    tmux refresh-client -S 2>/dev/null || true
-                    exit 0
-                fi
-                # 超时 30 秒：权限被拒绝但无事件触发，自动 reset 为 -
-                if [ $(( $(date +%s) - _start_time )) -ge "${PERMISSION_TIMEOUT:-30}" ]; then
-                    _is_current || exit 0
-                    tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
-                    build_all_status
-                    tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
-                    tmux refresh-client -S 2>/dev/null || true
-                    exit 0
-                fi
+            # 对于 !：检查 pane shell 是否还有子进程（AI 是否仍在运行）
+            if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
+                _is_current || exit 0
+                tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
+                build_all_status
+                tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
+                tmux refresh-client -S 2>/dev/null || true
+                exit 0
             fi
         done
     ) &
