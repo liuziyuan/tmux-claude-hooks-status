@@ -103,6 +103,7 @@ case "$EVENT" in
     ;;
   UserPromptSubmit)
     _ai_log "UserPromptSubmit input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
+    _exit_permission_mode
     STATUS=">"
     kill_watcher "$TOOL_ID"
     ;;
