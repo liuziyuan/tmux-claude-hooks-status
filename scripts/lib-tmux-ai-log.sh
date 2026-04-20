@@ -1,7 +1,7 @@
 #!/bin/bash
 # lib-tmux-ai-log.sh: 轻量日志模块 — 直接 O_APPEND 追加 + 原子轮转
 # 被 lib-tmux-ai-status.sh source
-# 调用方需设置: TOOL_ID ("claude" 或 "copilot")、EVENT、_pane_loc
+# 调用方需设置: TOOL_ID ("claude")、EVENT、_pane_loc
 
 AI_LOG_FILE="/tmp/tmux-ai-status.log"
 AI_LOG_MAX_SIZE=102400   # 100KB 触发轮转

@@ -63,7 +63,6 @@ fi
 
 # --- 自动注册 hooks（幂等，每次插件加载时确保 hooks 存在）---
 "${CURRENT_DIR}/scripts/install-claude-hooks.sh" >/dev/null 2>&1 || true
-"${CURRENT_DIR}/scripts/install-copilot-hooks.sh" >/dev/null 2>&1 || true
 
 # --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
 # session-closed: session 被销毁时清除残留条目
@@ -78,7 +77,3 @@ tmux set-hook -g client-attached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-
 tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh && tmux display 'Claude hooks installed'"
 # prefix + C-u: 卸载 Claude hooks
 tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh uninstall && tmux display 'Claude hooks removed'"
-# prefix + C-g: 安装 Copilot hooks
-tmux bind-key C-g run-shell "${CURRENT_DIR}/scripts/install-copilot-hooks.sh && tmux display 'Copilot hooks installed'"
-# prefix + C-G: 卸载 Copilot hooks
-tmux bind-key C-G run-shell "${CURRENT_DIR}/scripts/install-copilot-hooks.sh uninstall && tmux display 'Copilot hooks removed'"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、watcher、竞态保护
-# 被 tmux-claude-status 和 tmux-copilot-status source
-# 调用方需设置: TOOL_ID ("claude" 或 "copilot")
+# 被 tmux-claude-status source
+# 调用方需设置: TOOL_ID ("claude")
 
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -18,7 +18,6 @@ resolve_tmux_pane() {
             # Claude Code hooks: $TMUX 已继承，直接遍历进程树
             :
         elif command -v tmux &>/dev/null; then
-            # Copilot CLI hooks: $TMUX 可能未继承，通过 tmux 命令可用性判断
             :
         else
             return
@@ -47,14 +46,13 @@ _clear_pane_id() {
 }
 
 # --- 状态聚合 ---
-# 扫描所有 attached session 的 pane，读取 @claude_pane_status 和 @copilot_pane_status
+# 扫描所有 attached session 的 pane，读取 @claude_pane_status
 # 每个 pane 取非空值，写入 @ai_all_status
 build_all_status() {
     ALL=""
     cur_sess=""
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status copilot_status _attached; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached; do
         local pane_status="$claude_status"
-        [ -n "$pane_status" ] || pane_status="$copilot_status"
         [ -n "$pane_status" ] || continue
         local session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
         local panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
@@ -71,7 +69,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{@copilot_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$7>0' | sort -t'|' -k8,8n -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k3,3n -k4,4n)
 }
 
 # --- 权限模式（事件序列保护）---
@@ -161,12 +159,7 @@ start_status_watcher() {
     local watcher_gen="$$"
     local watcher_pid_file="/tmp/${tool_id}-watcher-${TMUX_PANE//[^a-zA-Z0-9]/_}.pid"
     local _pane_loc_outer="$_pane_loc"
-    local pane_status_var
-    if [ "$tool_id" = "copilot" ]; then
-        pane_status_var="@copilot_pane_status"
-    else
-        pane_status_var="@claude_pane_status"
-    fi
+    local pane_status_var="@claude_pane_status"
     (
         _my_gen="$watcher_gen"
         _my_pid_file="$watcher_pid_file"
