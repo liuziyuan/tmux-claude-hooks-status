@@ -156,7 +156,7 @@ start_status_watcher() {
     local pane_pid
     pane_pid=$(tmux display-message -pt "$TMUX_PANE" -p "#{pane_pid}" 2>/dev/null)
     [ -n "$pane_pid" ] || return
-    local watcher_gen="$$"
+    local watcher_gen="${RANDOM}${RANDOM}"
     local watcher_pid_file="/tmp/${tool_id}-watcher-${TMUX_PANE//[^a-zA-Z0-9]/_}.pid"
     local _pane_loc_outer="$_pane_loc"
     local pane_status_var="@claude_pane_status"
@@ -182,8 +182,8 @@ start_status_watcher() {
         while true; do
             sleep 1
             _is_current || exit 0
-            # 对于 !：检查 pane shell 是否还有子进程（AI 是否仍在运行）
-            if [ "$_protected" = "!" ] && ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
+            # 检查 pane shell 是否还有子进程（AI 是否仍在运行）
+            if ! pgrep -P "$_pane_pid" >/dev/null 2>&1; then
                 _is_current || exit 0
                 tmux set-option -pt "$TMUX_PANE" "$_pane_status_var" "-" 2>/dev/null
                 build_all_status
