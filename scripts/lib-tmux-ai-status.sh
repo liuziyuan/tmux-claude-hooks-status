@@ -172,7 +172,7 @@ _toolmap_upgrade_oldest_pending_to_awaiting() {
     _toolmap_unlock "$lock"
 }
 
-# PostToolUse 无 tool_use_id 时的容错：降级最早的 PENDING 为 COMPLETED
+# PostToolUse 无 tool_use_id 时的容错：降级最早的 PENDING 或 AWAITING_PERM 为 COMPLETED
 _toolmap_downgrade_oldest_pending() {
     [ -z "$TMUX_PANE" ] && return
     local file; file=$(_toolmap_path)
@@ -181,7 +181,7 @@ _toolmap_downgrade_oldest_pending() {
     if [ -f "$file" ]; then
         local tmp="${file}.tmp.$$"
         awk -F: 'BEGIN{done=0} {
-            if (!done && $2=="P") { printf "%s:C\n", $1; done=1 }
+            if (!done && ($2=="P" || $2=="A")) { printf "%s:C\n", $1; done=1 }
             else { print }
         }' "$file" > "$tmp" 2>/dev/null
         [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"

@@ -108,7 +108,7 @@ case "$EVENT" in
     else
         _toolmap_downgrade_oldest_pending
     fi
-    if ! _toolmap_has_pending && ! _toolmap_has_awaiting; then
+    if ! _toolmap_has_awaiting; then
         _clear_perm_flag
     fi
     # AskUserQuestion 的 ask_flag 只能靠自己的 PostToolUse 清 —
