@@ -2,28 +2,28 @@
 # Claude Code → tmux 状态栏 hook
 # 用法: tmux-claude-status <EVENT_TYPE>
 # stdin: Claude Code 传入的 JSON 数据
+#
+# 状态机: per-pane tool_state map + 独立 ask 标志
+# 详见 lib-tmux-ai-status.sh 中 _toolmap_* / _compute_status 注释
 
 TOOL_ID="claude"
 EVENT="$1"
 INPUT=$(cat)
 
-# 解析 SESSION_ID（权限模式隔离 key）
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
-# 解析 TMUX_PANE
 resolve_tmux_pane
 _save_pane_id
 
-# 缓存 pane 可读位置信息
 _pane_loc=""
 if [ -n "$TMUX_PANE" ]; then
     _pane_loc=$(tmux display-message -pt "$TMUX_PANE" -p "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)
 fi
 
-# hooks 完整性校验：确保所有事件都已注册本插件的 hook
+# hooks 完整性校验
 _check_hooks_integrity() {
     local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
     [ -f "$settings_file" ] || return 1
@@ -38,12 +38,17 @@ _check_hooks_integrity() {
     [ "${registered:-0}" -ge 10 ]
 }
 
+# 读取当前 pane 状态符号（用于 Stop 时判断是否已被前置事件置为 "-"）
+_current_pane_status() {
+    [ -z "$TMUX_PANE" ] && return
+    tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null
+}
+
 case "$EVENT" in
   Notification)
     _ai_log "NOTIFICATION input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
     NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // ""' 2>/dev/null)
     MSG=$(echo "$INPUT" | jq -r '.message // ""' 2>/dev/null)
-    # 权限相关状态（!）由 PermissionRequest 统一处理，这里只管非权限场景
     case "$NOTIF_TYPE" in
       idle_prompt)
         STATUS="-"
@@ -54,9 +59,9 @@ case "$EVENT" in
             STATUS="-"
             ;;
           *"denied"*|*"cancelled"*|*"canceled"*|*"rejected"*)
+            # 冗余清理：Notification 显式拒绝 → 直接 "-"
+            # 不清 map，让随后的 Stop 继续推断（若 Stop 先到则 Stop 清）
             STATUS="-"
-            _exit_permission_mode
-            kill_watcher "$TOOL_ID"
             ;;
           *)
             exit 0
@@ -68,67 +73,73 @@ case "$EVENT" in
   PermissionRequest)
     _ai_log "PermissionRequest input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    _enter_permission_mode
+    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     if [ "$TOOL" = "AskUserQuestion" ]; then
-        STATUS="?"
-        kill_watcher "$TOOL_ID"
-        start_status_watcher "$TOOL_ID" "?"
+        _set_ask_flag
     else
-        STATUS="!"
-        kill_watcher "$TOOL_ID"
-        start_status_watcher "$TOOL_ID" "!"
+        _set_perm_flag
+        if [ -n "$TOOL_USE_ID" ]; then
+            _toolmap_set "$TOOL_USE_ID" "A"
+        else
+            _toolmap_upgrade_oldest_pending_to_awaiting
+        fi
+    fi
+    STATUS=$(_compute_status)
+    if [ -z "$STATUS" ]; then
+        [ "$TOOL" = "AskUserQuestion" ] && STATUS="?" || STATUS="!"
     fi
     ;;
   PreToolUse)
     _ai_log "PreToolUse input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    _record_pretool_id "$TOOL_USE_ID"
-
-    if _is_permission_mode; then
-        exit 0
-    else
-        STATUS=">"
-    fi
+    # tool_use_id 缺失时合成 id，保证队列可追踪（极少发生）
+    [ -z "$TOOL_USE_ID" ] && TOOL_USE_ID="synthetic-$(date +%s)-$RANDOM"
+    _toolmap_set_pending_guarded "$TOOL_USE_ID"
+    STATUS=$(_compute_status)
+    [ -z "$STATUS" ] && STATUS=">"
     ;;
   PostToolUse|PostToolUseFailure)
     _ai_log "PostToolUse input=$(echo "$INPUT" | jq -c '{tool_name, tool_use_id, session_id, agent_id, agent_type}' 2>/dev/null)"
-    if _is_permission_mode; then
-        TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-        if ! _check_pretool_id "$TOOL_USE_ID"; then
-            exit 0
-        fi
-        _exit_permission_mode
+    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
+    if [ -n "$TOOL_USE_ID" ]; then
+        _toolmap_set "$TOOL_USE_ID" "C"
+    else
+        _toolmap_downgrade_oldest_pending
     fi
-    STATUS=">"
-    kill_watcher "$TOOL_ID"
+    if ! _toolmap_has_pending && ! _toolmap_has_awaiting; then
+        _clear_perm_flag
+    fi
+    STATUS=$(_compute_status)
+    # PostToolUse 后若 map 全部 COMPLETED，显示 > 表示 Claude 仍在处理（下一个 PreToolUse 可能随后到）
+    [ -z "$STATUS" ] && STATUS=">"
     ;;
   UserPromptSubmit)
     _ai_log "UserPromptSubmit input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
-    _exit_permission_mode
+    _clear_all_state
     STATUS=">"
-    kill_watcher "$TOOL_ID"
     ;;
   Stop|StopFailure)
     _ai_log "Stop input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
-    _exit_permission_mode
-    kill_watcher "$TOOL_ID"
-    # 检查当前状态：! 表示权限被拒绝后结束，回到 - 空闲；其余情况显示 ✓ 完成
-    if [ -n "$TMUX_PANE" ]; then
-        cur_status=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
-        if [ "$cur_status" = "!" ]; then
-            STATUS="-"
-        else
-            STATUS="✓"
-        fi
+    cur_status=$(_current_pane_status)
+    # 拒绝推断：
+    #   1. map 中有 AWAITING_PERM → 权限被拒绝（PostToolUse 从未到达）
+    #   2. 当前状态已是 "-"（Notification(denied) 先置） → 保持
+    #   3. 当前状态是 "?"（AskUserQuestion 未答） → 视为取消
+    #   4. 否则正常完成 → "✓"
+    if _toolmap_has_awaiting; then
+        STATUS="-"
+    elif [ "$cur_status" = "-" ] || [ "$cur_status" = "?" ]; then
+        STATUS="-"
     else
         STATUS="✓"
     fi
-    # fallback：如果 TMUX_PANE 未解析，清除所有残留的处理中状态
+    _clear_all_state
+    # fallback: TMUX_PANE 未解析时，清除所有残留的处理中状态
     if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
         while IFS='|' read -r pane_id pane_status; do
             case "$pane_status" in
                 ">") tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null ;;
-                "!") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
+                "!"|"?") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
             esac
         done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
         build_all_status
@@ -138,10 +149,7 @@ case "$EVENT" in
   SessionStart)
     _ai_log "SessionStart input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
     STATUS="-"
-    # 卫生清理：上次会话异常退出可能残留 permission/pretool-ids/watcher
-    _exit_permission_mode
-    kill_watcher "$TOOL_ID"
-    # hooks 完整性校验：检测到缺失时自动修复并提示
+    _clear_all_state
     if ! _check_hooks_integrity; then
         "${SCRIPT_DIR}/install-claude-hooks.sh" >/dev/null 2>&1
         tmux display-message "⚠ Claude hooks 已自动修复（检测到缺失）" 2>/dev/null || true
@@ -149,18 +157,22 @@ case "$EVENT" in
     ;;
   SessionEnd)
     _ai_log "SessionEnd input=$(echo "$INPUT" | jq -c '.' 2>/dev/null)"
-    # 进程树已断裂（Claude Code 已退出），从保存文件回读 TMUX_PANE
     if [ -z "$TMUX_PANE" ]; then
         _load_pane_id
         _ai_log "SessionEnd pane restored: TMUX_PANE=${TMUX_PANE:-?}"
     fi
-    STATUS=""
-    _exit_permission_mode
-    kill_watcher "$TOOL_ID"
+    _clear_all_state
     _clear_pane_id
+    # /new 竞态保护：SessionEnd(async) 可能晚于 SessionStart(async) 执行，
+    # 此时不应清空状态。检查是否有新 session 已接管此 pane。
+    if _new_session_owns_pane; then
+        STATUS="-"
+    else
+        STATUS=""
+    fi
     ;;
   _refresh)
-    # 由 tmux session-closed / client-detached hook 触发，重建聚合状态
+    _cleanup_stale_panes
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
     exit 0
@@ -170,14 +182,12 @@ case "$EVENT" in
     ;;
 esac
 
-# 写入 tmux 全局变量
 tmux set-option -g @claude_status "$STATUS" 2>/dev/null || true
 
-# 写入 pane 用户变量（当在 tmux pane 内运行时，每个 pane 独立显示）
+_ai_log "→ STATUS='$STATUS' pane=$_pane_loc perm=$(_has_perm_flag && echo Y || echo N) ask=$(_has_ask_flag && echo Y || echo N)"
+
 if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; then
     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
-
-    # 重建聚合状态：扫描所有 pane，收集非空状态写入全局变量供状态栏使用
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
     tmux refresh-client -S 2>/dev/null || true

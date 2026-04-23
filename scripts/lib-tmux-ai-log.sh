@@ -16,7 +16,7 @@ _ai_log_rotate() {
     if [ "${cur_size:-0}" -gt "$AI_LOG_MAX_SIZE" ]; then
         local tmp="${AI_LOG_FILE}.tmp.$$"
         if tail -c "$AI_LOG_KEEP_SIZE" "$AI_LOG_FILE" > "$tmp" 2>/dev/null; then
-            mv "$tmp" "$AI_LOG_FILE" 2>/dev/null
+            cat "$tmp" > "$AI_LOG_FILE"
         fi
         rm -f "$tmp"
     fi
