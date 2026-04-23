@@ -284,9 +284,48 @@ _new_session_owns_pane() {
     return 1
 }
 
+# --- 进程树检查 ---
+# BFS 遍历 pane 的进程树，检查是否有包含 "claude" 的命令
+_pane_has_claude_process() {
+    local pane_id="$1"
+    local pane_pid
+    pane_pid=$(tmux list-panes -t "$pane_id" -F "#{pane_pid}" 2>/dev/null)
+    [ -z "$pane_pid" ] && return 1
+    local pids="$pane_pid" next="" depth=0
+    while [ $depth -lt 10 ] && [ -n "$pids" ]; do
+        for p in $pids; do
+            ps -o args= -p "$p" 2>/dev/null | grep -qi "claude" && return 0
+            local children
+            children=$(pgrep -P "$p" 2>/dev/null)
+            [ -n "$children" ] && next="$next $children"
+        done
+        pids="${next# }"
+        next=""
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+# 检查 pane 的所有 pane-id 文件是否过期（> 5 min），再验证进程树
+_is_pane_session_dead() {
+    local pane_id="$1"
+    local f stored_pane
+    for f in /tmp/claude-pane-*; do
+        [ -f "$f" ] || continue
+        stored_pane=$(cat "$f" 2>/dev/null)
+        [ "$stored_pane" != "$pane_id" ] && continue
+        local mtime
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        local age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt 300 ] && return 1
+    done
+    ! _pane_has_claude_process "$pane_id"
+}
+
 # --- 孤儿状态清理（_refresh 用）---
 # 活跃状态 (!, ?, >) 的 pane 必须有对应的 /tmp/claude-pane-* 文件（由 SessionStart 写入）。
 # 无对应文件则说明状态已过期（手动测试残留、pane 被销毁等），清除状态和 toolmap。
+# 有对应文件但文件过期且进程已死（Stop 未触发的崩溃场景），也清除。
 _cleanup_stale_panes() {
     local active_panes=""
     local f pane_id
@@ -299,15 +338,39 @@ _cleanup_stale_panes() {
     while IFS='|' read -r pane_id pane_status; do
         case "$pane_status" in
             "!"|"?"|">")
+                local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
-                    local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
                     rm -f /tmp/claude-*-${sanitized}-toolmap 2>/dev/null
                     rm -f /tmp/claude-*-${sanitized}-ask 2>/dev/null
                     rm -f /tmp/claude-*-${sanitized}-perm 2>/dev/null
+                elif _is_pane_session_dead "$pane_id"; then
+                    _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
+                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                    rm -f /tmp/claude-*-${sanitized}-toolmap 2>/dev/null
+                    rm -f /tmp/claude-*-${sanitized}-ask 2>/dev/null
+                    rm -f /tmp/claude-*-${sanitized}-perm 2>/dev/null
+                    for f in /tmp/claude-pane-*; do
+                        [ -f "$f" ] || continue
+                        [ "$(cat "$f" 2>/dev/null)" = "$pane_id" ] && rm -f "$f"
+                    done
                 fi
                 ;;
         esac
     done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+}
+
+# 频率限制的孤儿清理（每次 hook 调用，最多每 60s 执行一次）
+_maybe_cleanup_stale() {
+    local marker="/tmp/.claude-stale-cleanup-ts"
+    local now
+    now=$(date +%s)
+    if [ -f "$marker" ]; then
+        local last
+        last=$(cat "$marker" 2>/dev/null)
+        [ $((now - ${last:-0})) -lt 60 ] && return
+    fi
+    _cleanup_stale_panes
+    echo "$now" > "$marker"
 }

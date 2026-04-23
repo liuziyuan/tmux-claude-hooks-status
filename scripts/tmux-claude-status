@@ -17,6 +17,7 @@ source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
 resolve_tmux_pane
 _save_pane_id
+_maybe_cleanup_stale
 
 _pane_loc=""
 if [ -n "$TMUX_PANE" ]; then
@@ -100,6 +101,7 @@ case "$EVENT" in
     ;;
   PostToolUse|PostToolUseFailure)
     _ai_log "PostToolUse input=$(echo "$INPUT" | jq -c '{tool_name, tool_use_id, session_id, agent_id, agent_type}' 2>/dev/null)"
+    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     if [ -n "$TOOL_USE_ID" ]; then
         _toolmap_set "$TOOL_USE_ID" "C"
@@ -109,6 +111,9 @@ case "$EVENT" in
     if ! _toolmap_has_pending && ! _toolmap_has_awaiting; then
         _clear_perm_flag
     fi
+    # AskUserQuestion 的 ask_flag 只能靠自己的 PostToolUse 清 —
+    # 其他事件(Stop / UserPromptSubmit / SessionEnd)作为兜底。
+    [ "$TOOL" = "AskUserQuestion" ] && _clear_ask_flag
     STATUS=$(_compute_status)
     # PostToolUse 后若 map 全部 COMPLETED，显示 > 表示 Claude 仍在处理（下一个 PreToolUse 可能随后到）
     [ -z "$STATUS" ] && STATUS=">"
