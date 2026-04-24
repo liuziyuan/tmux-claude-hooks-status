@@ -82,7 +82,8 @@ case "$EVENT" in
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     # tool_name / tool_use_id 在 tool 行已显示，input 行只放 tool_input
-    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
+    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.' 2>/dev/null)
+    _log_full_input=1
     if [ "$TOOL" = "AskUserQuestion" ]; then
         _set_ask_flag
     else
@@ -202,7 +203,11 @@ if [ -n "$TOOL" ] || [ -n "$TOOL_USE_ID" ]; then
 fi
 _log_input_line=""
 if [ -n "$INPUT_DIGEST" ] && [ "$INPUT_DIGEST" != "null" ]; then
-    _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST")"
+    if [ "${_log_full_input:-0}" = "1" ]; then
+        _log_input_line="input: $INPUT_DIGEST"
+    else
+        _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST")"
+    fi
 fi
 _log_flags="perm=$(_has_perm_flag && echo Y || echo N) ask=$(_has_ask_flag && echo Y || echo N)"
 _ai_log_event "$PREV_STATUS" "$STATUS" "$_log_flags" "$_log_tool_line" "$_log_input_line"
