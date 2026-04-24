@@ -277,10 +277,12 @@ _has_perm_flag() {
 # stdout: "!" | "?" | ">" | "" （空表示无活跃状态）
 # A 条目始终视为活跃，由 Stop/PostToolUse 负责清理
 _compute_status() {
-    if _toolmap_has_awaiting || _has_perm_flag; then
+    if _has_perm_flag; then
         echo "!"
     elif _has_ask_flag; then
         echo "?"
+    elif _toolmap_has_awaiting; then
+        echo "!"
     elif _toolmap_has_pending; then
         echo ">"
     else
@@ -388,6 +390,23 @@ _cleanup_stale_panes() {
                 ;;
         esac
     done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+
+    # 清理孤儿目录：目录存在但对应 pane 已不在 tmux 中
+    local all_pane_ids
+    all_pane_ids=$(tmux list-panes -a -F "#{pane_id}" 2>/dev/null)
+    for pane_dir in "${_STATUS_DIR}"/*/; do
+        [ -d "$pane_dir" ] || continue
+        local dir_name
+        dir_name=$(basename "$pane_dir")
+        local found=0
+        while IFS= read -r pid; do
+            [ "${pid//[^a-zA-Z0-9]/_}" = "$dir_name" ] && { found=1; break; }
+        done <<< "$all_pane_ids"
+        if [ "$found" -eq 0 ]; then
+            _ai_log "ORPHAN: removing $pane_dir (pane no longer exists)"
+            rm -rf "$pane_dir" 2>/dev/null
+        fi
+    done
 }
 
 # 频率限制的孤儿清理（每次 hook 调用，最多每 60s 执行一次）

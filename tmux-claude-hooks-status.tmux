@@ -68,9 +68,13 @@ fi
 # session-closed: session 被销毁时清除残留条目
 # client-detached: client 断开连接时排除已变为 detached 的 session
 # client-attached: client 重新连接时恢复该 session 的状态
-tmux set-hook -g session-closed  "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
-tmux set-hook -g client-detached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
-tmux set-hook -g client-attached "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+tmux set-hook -g session-closed    "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+tmux set-hook -g client-detached   "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+tmux set-hook -g client-attached   "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+# pane-exited: 程序自然退出 → 触发孤儿清理（#{pane_id} 在此 hook 中不可靠）
+tmux set-hook -g pane-exited       "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
+# after-kill-pane: kill-pane 后触发孤儿清理
+tmux set-hook -g after-kill-pane   "run-shell '${CURRENT_DIR}/scripts/tmux-claude-status _refresh'"
 
 # --- 快捷键绑定 ---
 # prefix + C-h: 安装 Claude hooks 到 ~/.claude/settings.json

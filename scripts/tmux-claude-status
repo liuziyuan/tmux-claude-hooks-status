@@ -8,6 +8,7 @@
 
 TOOL_ID="claude"
 EVENT="$1"
+
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)
@@ -86,6 +87,9 @@ case "$EVENT" in
     _log_full_input=1
     if [ "$TOOL" = "AskUserQuestion" ]; then
         _set_ask_flag
+        if [ -n "$TOOL_USE_ID" ]; then
+            _toolmap_set "$TOOL_USE_ID" "A"
+        fi
     else
         _set_perm_flag
         if [ -n "$TOOL_USE_ID" ]; then
@@ -117,10 +121,8 @@ case "$EVENT" in
     fi
     if ! _toolmap_has_awaiting && ! _toolmap_has_pending; then
         _clear_perm_flag
+        _clear_ask_flag
     fi
-    # AskUserQuestion 的 ask_flag 只能靠自己的 PostToolUse 清 —
-    # 其他事件(Stop / UserPromptSubmit / SessionEnd)作为兜底。
-    [ "$TOOL" = "AskUserQuestion" ] && _clear_ask_flag
     STATUS=$(_compute_status)
     # PostToolUse 后若 map 全部 COMPLETED，显示 > 表示 Claude 仍在处理（下一个 PreToolUse 可能随后到）
     [ -z "$STATUS" ] && STATUS=">"
@@ -132,13 +134,12 @@ case "$EVENT" in
   Stop|StopFailure)
     cur_status="$PREV_STATUS"
     # 拒绝推断：
-    #   1. map 中有 AWAITING_PERM → 权限被拒绝（PostToolUse 从未到达）
+    #   1. map 中有 AWAITING_PERM / perm_flag / ask_flag → 权限被拒绝（PostToolUse 从未到达）
     #   2. 当前状态已是 "-"（Notification(denied) 先置） → 保持
-    #   3. 当前状态是 "?"（AskUserQuestion 未答） → 视为取消
-    #   4. 否则正常完成 → "✓"
-    if _toolmap_has_awaiting || _has_perm_flag; then
+    #   3. 否则正常完成 → "✓"
+    if _toolmap_has_awaiting || _has_perm_flag || _has_ask_flag; then
         STATUS="-"
-    elif [ "$cur_status" = "-" ] || [ "$cur_status" = "?" ]; then
+    elif [ "$cur_status" = "-" ]; then
         STATUS="-"
     else
         STATUS="✓"

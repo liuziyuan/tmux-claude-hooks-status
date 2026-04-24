@@ -24,7 +24,7 @@ _ai_log_rotate() {
 }
 
 _ai_log() {
-    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] $*"
+    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] [${EVENT:-?}] $*"
 
     # 首次创建时限制权限（避免 /tmp 下日志对其它用户可读）
     [ -f "$AI_LOG_FILE" ] || (umask 077; : >> "$AI_LOG_FILE")
@@ -51,7 +51,7 @@ _ai_log_event() {
         transition="'${prev}' → '${curr}'"
     fi
 
-    local header="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}]  ${transition}  ${flags}"
+    local header="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] [${EVENT:-?}]  ${transition}  ${flags}"
 
     [ -f "$AI_LOG_FILE" ] || (umask 077; : >> "$AI_LOG_FILE")
 
