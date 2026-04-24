@@ -375,7 +375,7 @@ _cleanup_stale_panes() {
 
     while IFS='|' read -r pane_id pane_status; do
         case "$pane_status" in
-            "!"|"?"|">"|"✓")
+            "!"|"?"|">")
                 local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
                 local pane_dir="${_STATUS_DIR}/${sanitized}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
