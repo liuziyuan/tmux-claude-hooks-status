@@ -114,8 +114,13 @@ tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_s
 # 查看 Claude hooks 注册
 jq '.hooks | keys' ~/.claude/settings.json
 
-# 查看日志
+# 查看日志（每次 hook 事件 = 一个多行块：头行含状态转移，缩进行含 tool/input 摘要）
 tail -f /tmp/tmux-ai-status.log
+# 块头格式: [时间] [claude] [EVENT] [pane]  'prev' → 'curr'  perm=Y/N ask=Y/N
+# 示例:
+#   [2026-04-24T11:31:35] [claude] [PermissionRequest] [tmux-claude-hooks-status:1.3]  '>' → '!'  perm=Y ask=N
+#     tool: Bash  id=toolu_01KwepCiVxbU8eoBYBvwgCxi
+#     input: {"command":"ls -la"}
 
 # 模拟带 tool_use_id 的权限请求流程
 echo '{"tool_use_id":"t1"}' | bash scripts/tmux-claude-status PreToolUse

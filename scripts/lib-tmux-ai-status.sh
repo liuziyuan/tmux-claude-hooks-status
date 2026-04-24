@@ -5,10 +5,31 @@
 
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+_STATUS_DIR="/tmp/claude-status"
 STATUS_COLOR="#F1FA8C"
 
 # --- 日志模块 ---
 source "${_LIB_DIR}/lib-tmux-ai-log.sh"
+
+# --- Per-pane 目录 ---
+# 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
+#   pane-${SESSION_ID}          session → pane 映射（内容为 pane_id）
+#   ${SESSION_ID}-toolmap       工具状态队列
+#   ${SESSION_ID}-ask           AskUserQuestion 标志
+#   ${SESSION_ID}-perm          PermissionRequest 标志
+
+_pane_sanitized() {
+    echo "${TMUX_PANE//[^a-zA-Z0-9]/_}"
+}
+
+_pane_dir() {
+    echo "${_STATUS_DIR}/$(_pane_sanitized)"
+}
+
+_ensure_pane_dir() {
+    local dir; dir=$(_pane_dir)
+    [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null
+}
 
 # --- TMUX_PANE 解析 ---
 # hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
@@ -34,14 +55,19 @@ resolve_tmux_pane() {
 
 # --- Pane ID 持久化（供 SessionEnd 回读）---
 _save_pane_id() {
-    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && echo "$TMUX_PANE" > "/tmp/claude-pane-${SESSION_ID}"
+    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && { _ensure_pane_dir; echo "$TMUX_PANE" > "$(_pane_dir)/pane-${SESSION_ID}"; }
 }
 _load_pane_id() {
     [ -z "$SESSION_ID" ] && return 1
-    [ -f "/tmp/claude-pane-${SESSION_ID}" ] && TMUX_PANE=$(cat "/tmp/claude-pane-${SESSION_ID}" 2>/dev/null) && [ -n "$TMUX_PANE" ]
+    local f
+    for f in "${_STATUS_DIR}"/*/pane-${SESSION_ID}; do
+        [ -f "$f" ] || continue
+        TMUX_PANE=$(cat "$f" 2>/dev/null) && [ -n "$TMUX_PANE" ] && return 0
+    done
+    return 1
 }
 _clear_pane_id() {
-    [ -n "$SESSION_ID" ] && rm -f "/tmp/claude-pane-${SESSION_ID}"
+    [ -n "$SESSION_ID" ] && rm -f "$(_pane_dir)/pane-${SESSION_ID}"
 }
 
 # --- 状态聚合 ---
@@ -70,21 +96,17 @@ build_all_status() {
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k3,3n -k4,4n)
 }
 
-# --- Per-pane key ---
-_state_key() {
-    echo "${TOOL_ID}-${SESSION_ID:-unknown}-${TMUX_PANE//[^a-zA-Z0-9]/_}"
-}
-
+# --- Per-pane 状态文件路径 ---
 _toolmap_path() {
-    echo "/tmp/$(_state_key)-toolmap"
+    echo "$(_pane_dir)/${SESSION_ID:-unknown}-toolmap"
 }
 
 _ask_flag_path() {
-    echo "/tmp/$(_state_key)-ask"
+    echo "$(_pane_dir)/${SESSION_ID:-unknown}-ask"
 }
 
 _perm_flag_path() {
-    echo "/tmp/$(_state_key)-perm"
+    echo "$(_pane_dir)/${SESSION_ID:-unknown}-perm"
 }
 
 # --- mkdir-based 原子锁（与日志模块同策略）---
@@ -116,6 +138,7 @@ _toolmap_set() {
     [ -z "$TMUX_PANE" ] && return
     local id="$1" state="$2"
     [ -z "$id" ] || [ -z "$state" ] && return
+    _ensure_pane_dir
     local file; file=$(_toolmap_path)
     local lock="${file}.lock"
     _toolmap_lock "$lock" || return
@@ -135,6 +158,7 @@ _toolmap_set_pending_guarded() {
     [ -z "$TMUX_PANE" ] && return
     local id="$1"
     [ -z "$id" ] && return
+    _ensure_pane_dir
     local file; file=$(_toolmap_path)
     local lock="${file}.lock"
     _toolmap_lock "$lock" || return
@@ -217,6 +241,7 @@ _toolmap_has_pending() {
 # --- AskUserQuestion 标志（? 状态，与 tool_state map 独立）---
 _set_ask_flag() {
     [ -z "$TMUX_PANE" ] && return
+    _ensure_pane_dir
     printf '%s\n' "$(date +%s)" > "$(_ask_flag_path)" 2>/dev/null
 }
 
@@ -233,6 +258,7 @@ _has_ask_flag() {
 # --- PermissionRequest 标志（! 状态，防止 PreToolUse async 竞态覆盖）---
 _set_perm_flag() {
     [ -z "$TMUX_PANE" ] && return
+    _ensure_pane_dir
     printf '%s\n' "$(date +%s)" > "$(_perm_flag_path)" 2>/dev/null
 }
 
@@ -275,11 +301,20 @@ _clear_all_state() {
 # 清除自身 pane-id 文件后，检查是否有其他 session 已接管此 pane。
 _new_session_owns_pane() {
     [ -z "$TMUX_PANE" ] && return 1
-    local f stored_pane
-    for f in /tmp/claude-pane-*; do
+    local sanitized; sanitized=$(_pane_sanitized)
+    local pane_dir="${_STATUS_DIR}/${sanitized}"
+    [ -d "$pane_dir" ] || return 1
+    local f
+    for f in "${pane_dir}"/pane-*; do
         [ -f "$f" ] || continue
+        local stored_pane
         stored_pane=$(cat "$f" 2>/dev/null)
-        [ "$stored_pane" = "$TMUX_PANE" ] && return 0
+        [ "$stored_pane" = "$TMUX_PANE" ] || continue
+        local mtime
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        local age=$(( $(date +%s) - mtime ))
+        [ "$age" -ge 300 ] && ! _pane_has_claude_process "$TMUX_PANE" && continue
+        return 0
     done
     return 1
 }
@@ -309,11 +344,12 @@ _pane_has_claude_process() {
 # 检查 pane 的所有 pane-id 文件是否过期（> 5 min），再验证进程树
 _is_pane_session_dead() {
     local pane_id="$1"
-    local f stored_pane
-    for f in /tmp/claude-pane-*; do
+    local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
+    local pane_dir="${_STATUS_DIR}/${sanitized}"
+    [ -d "$pane_dir" ] || return 0
+    local f
+    for f in "${pane_dir}"/pane-*; do
         [ -f "$f" ] || continue
-        stored_pane=$(cat "$f" 2>/dev/null)
-        [ "$stored_pane" != "$pane_id" ] && continue
         local mtime
         mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
         local age=$(( $(date +%s) - mtime ))
@@ -323,13 +359,13 @@ _is_pane_session_dead() {
 }
 
 # --- 孤儿状态清理（_refresh 用）---
-# 活跃状态 (!, ?, >) 的 pane 必须有对应的 /tmp/claude-pane-* 文件（由 SessionStart 写入）。
-# 无对应文件则说明状态已过期（手动测试残留、pane 被销毁等），清除状态和 toolmap。
+# 活跃状态 (!, ?, >) 的 pane 必须有对应的 pane 目录和 pane-${SESSION_ID} 文件（由 SessionStart 写入）。
+# 无对应文件则说明状态已过期（手动测试残留、pane 被销毁等），清除整个 pane 目录。
 # 有对应文件但文件过期且进程已死（Stop 未触发的崩溃场景），也清除。
 _cleanup_stale_panes() {
     local active_panes=""
     local f pane_id
-    for f in /tmp/claude-pane-*; do
+    for f in "${_STATUS_DIR}"/*/pane-*; do
         [ -f "$f" ] || continue
         pane_id=$(cat "$f" 2>/dev/null)
         [ -n "$pane_id" ] && active_panes="$active_panes $pane_id"
@@ -337,24 +373,17 @@ _cleanup_stale_panes() {
 
     while IFS='|' read -r pane_id pane_status; do
         case "$pane_status" in
-            "!"|"?"|">")
+            "!"|"?"|">"|"✓")
                 local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
+                local pane_dir="${_STATUS_DIR}/${sanitized}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
-                    rm -f /tmp/claude-*-${sanitized}-toolmap 2>/dev/null
-                    rm -f /tmp/claude-*-${sanitized}-ask 2>/dev/null
-                    rm -f /tmp/claude-*-${sanitized}-perm 2>/dev/null
+                    rm -rf "$pane_dir" 2>/dev/null
                 elif _is_pane_session_dead "$pane_id"; then
                     _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
-                    rm -f /tmp/claude-*-${sanitized}-toolmap 2>/dev/null
-                    rm -f /tmp/claude-*-${sanitized}-ask 2>/dev/null
-                    rm -f /tmp/claude-*-${sanitized}-perm 2>/dev/null
-                    for f in /tmp/claude-pane-*; do
-                        [ -f "$f" ] || continue
-                        [ "$(cat "$f" 2>/dev/null)" = "$pane_id" ] && rm -f "$f"
-                    done
+                    rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
         esac
@@ -363,9 +392,10 @@ _cleanup_stale_panes() {
 
 # 频率限制的孤儿清理（每次 hook 调用，最多每 60s 执行一次）
 _maybe_cleanup_stale() {
-    local marker="/tmp/.claude-stale-cleanup-ts"
+    local marker="${_STATUS_DIR}/.stale-cleanup-ts"
     local now
     now=$(date +%s)
+    [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
     if [ -f "$marker" ]; then
         local last
         last=$(cat "$marker" 2>/dev/null)

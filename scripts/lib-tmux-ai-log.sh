@@ -24,8 +24,7 @@ _ai_log_rotate() {
 }
 
 _ai_log() {
-    local B=$'\033[1;36m' R=$'\033[0m'
-    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${B}${EVENT:-?}${R}] [${_pane_loc:-${TMUX_PANE:-?}}] $*"
+    local msg="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}] $*"
 
     # 首次创建时限制权限（避免 /tmp 下日志对其它用户可读）
     [ -f "$AI_LOG_FILE" ] || (umask 077; : >> "$AI_LOG_FILE")
@@ -37,4 +36,46 @@ _ai_log() {
     local fsize
     fsize=$(wc -c < "$AI_LOG_FILE" 2>/dev/null || echo 0)
     [ "${fsize:-0}" -gt "$AI_LOG_MAX_SIZE" ] && _ai_log_rotate
+}
+
+# 事件块日志：头行 + 缩进详情行，一次写入保证原子
+# 用法: _ai_log_event PREV_STATUS CURR_STATUS FLAGS_STR [detail_line...]
+_ai_log_event() {
+    local prev="${1:-·}" curr="${2:-·}" flags="$3"; shift 3
+    [ -z "$prev" ] && prev="·"
+    [ -z "$curr" ] && curr="·"
+    local transition
+    if [ "$prev" = "$curr" ]; then
+        transition="'${curr}'"
+    else
+        transition="'${prev}' → '${curr}'"
+    fi
+
+    local header="[$(date '+%Y-%m-%dT%H:%M:%S')] [${TOOL_ID:-?}] [${EVENT:-?}] [${_pane_loc:-${TMUX_PANE:-?}}]  ${transition}  ${flags}"
+
+    [ -f "$AI_LOG_FILE" ] || (umask 077; : >> "$AI_LOG_FILE")
+
+    # 构造整块后一次 printf 追加，≤PIPE_BUF 原子
+    local block="${header}"$'\n'
+    local line
+    for line in "$@"; do
+        [ -z "$line" ] && continue
+        block+="  ${line}"$'\n'
+    done
+    printf '%s' "$block" >> "$AI_LOG_FILE" 2>/dev/null
+
+    local fsize
+    fsize=$(wc -c < "$AI_LOG_FILE" 2>/dev/null || echo 0)
+    [ "${fsize:-0}" -gt "$AI_LOG_MAX_SIZE" ] && _ai_log_rotate
+}
+
+# input 超长截断：>2000B 保留前 2000B 加 "…+Nbytes"
+_ai_log_truncate_input() {
+    local s="$1" max=2000
+    local n=${#s}
+    if [ "$n" -gt "$max" ]; then
+        printf '%s…+%dbytes' "${s:0:$max}" "$((n - max))"
+    else
+        printf '%s' "$s"
+    fi
 }
