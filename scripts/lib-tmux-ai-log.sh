@@ -4,8 +4,8 @@
 # 调用方需设置: TOOL_ID ("claude")、EVENT、_pane_loc
 
 AI_LOG_FILE="/tmp/tmux-ai-status.log"
-AI_LOG_MAX_SIZE=102400   # 100KB 触发轮转
-AI_LOG_KEEP_SIZE=51200   # 轮转后保留尾部 50KB
+AI_LOG_MAX_SIZE=524288   # 512KB 触发轮转
+AI_LOG_KEEP_SIZE=262144   # 轮转后保留尾部 256KB
 AI_LOG_LOCK_DIR="${AI_LOG_FILE}.lock"
 
 # 原子轮转（mkdir 作为互斥锁，多进程安全）
