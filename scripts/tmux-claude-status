@@ -193,6 +193,17 @@ case "$EVENT" in
     ;;
 esac
 
+# PreToolUse(async)与 PermissionRequest(sync)的写后竞态保护：
+# PreToolUse 计算 STATUS 早于 PermissionRequest 设置 perm_flag，
+# 若直接落盘会把 PermissionRequest 已写入的 ! / ? 覆盖回 >。
+# 仅在 PreToolUse 且 STATUS=> 时启用，沿用 pane 当前的 ! / ?。
+if [ "$EVENT" = "PreToolUse" ] && [ "$STATUS" = ">" ] && [ -n "$TMUX_PANE" ]; then
+    _cur_pane=$(tmux display-message -pt "$TMUX_PANE" -p "#{@claude_pane_status}" 2>/dev/null)
+    if [ "$_cur_pane" = "!" ] || [ "$_cur_pane" = "?" ]; then
+        STATUS="$_cur_pane"
+    fi
+fi
+
 tmux set-option -g @claude_status "$STATUS" 2>/dev/null || true
 
 # 构造事件块详情行：
