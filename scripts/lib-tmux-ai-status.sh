@@ -54,6 +54,10 @@ resolve_tmux_pane() {
 }
 
 # --- Pane ID 持久化（供 SessionEnd 回读）---
+# 注意: SessionStart/SessionEnd 事件不含 session_id，_save_pane_id 在这两事件中不会保存。
+# 映射由后续事件（PreToolUse、PermissionRequest 等）建立。
+# SessionEnd 回退链: resolve_tmux_pane → _load_pane_id → _cleanup_stale_panes。
+# 若 Claude 会话全程无工具调用，pane 状态可能残留最多 60s（直到下次 cleanup）。
 _save_pane_id() {
     [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && { _ensure_pane_dir; echo "$TMUX_PANE" > "$(_pane_dir)/pane-${SESSION_ID}"; }
 }
@@ -117,6 +121,11 @@ _toolmap_lock() {
     while ! mkdir "$lock_dir" 2>/dev/null; do
         attempts=$((attempts - 1))
         [ "$attempts" -le 0 ] && return 1
+        # 过期锁清理：进程死亡后残留的 .lock 目录 >5s 视为孤儿
+        if [ -d "$lock_dir" ]; then
+            local lock_age=$(( $(date +%s) - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo 0) ))
+            [ "$lock_age" -gt 5 ] && rmdir "$lock_dir" 2>/dev/null
+        fi
         sleep 0.02 2>/dev/null || sleep 1
     done
     return 0
@@ -153,7 +162,7 @@ _toolmap_set() {
     _toolmap_unlock "$lock"
 }
 
-# PreToolUse 专用：仅当 id 当前不是 A 或 C 时写入 P（防止反向竞态覆盖已到达的 PermissionRequest）
+# PreToolUse 专用：仅当 id 当前不是 A/Q/C 时写入 P（防止反向竞态覆盖已到达的 PermissionRequest）
 _toolmap_set_pending_guarded() {
     [ -z "$TMUX_PANE" ] && return
     local id="$1"
@@ -166,7 +175,7 @@ _toolmap_set_pending_guarded() {
     if [ -f "$file" ]; then
         cur=$(grep "^${id}:" "$file" 2>/dev/null | head -1 | cut -d: -f2)
     fi
-    if [ "$cur" != "A" ] && [ "$cur" != "C" ]; then
+    if [ "$cur" != "A" ] && [ "$cur" != "Q" ] && [ "$cur" != "C" ]; then
         local tmp="${file}.tmp.$$"
         if [ -f "$file" ]; then
             grep -v "^${id}:" "$file" > "$tmp" 2>/dev/null || true
@@ -179,16 +188,18 @@ _toolmap_set_pending_guarded() {
     _toolmap_unlock "$lock"
 }
 
-# PermissionRequest 无 tool_use_id 时的容错：升级最早的 PENDING 为 AWAITING_PERM
-_toolmap_upgrade_oldest_pending_to_awaiting() {
+# PermissionRequest 无 tool_use_id 时的容错：升级最早的 PENDING 为目标状态
+# $1 = target state ("A" or "Q")
+_toolmap_upgrade_oldest_pending_to() {
     [ -z "$TMUX_PANE" ] && return
+    local target="${1:-A}"
     local file; file=$(_toolmap_path)
     local lock="${file}.lock"
     _toolmap_lock "$lock" || return
     if [ -f "$file" ]; then
         local tmp="${file}.tmp.$$"
-        awk -F: 'BEGIN{done=0} {
-            if (!done && $2=="P") { printf "%s:A\n", $1; done=1 }
+        awk -F: -v t="$target" 'BEGIN{done=0} {
+            if (!done && $2=="P") { printf "%s:%s\n", $1, t; done=1 }
             else { print }
         }' "$file" > "$tmp" 2>/dev/null
         [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
@@ -205,7 +216,7 @@ _toolmap_downgrade_oldest_pending() {
     if [ -f "$file" ]; then
         local tmp="${file}.tmp.$$"
         awk -F: 'BEGIN{done=0} {
-            if (!done && ($2=="P" || $2=="A")) { printf "%s:C\n", $1; done=1 }
+            if (!done && ($2=="P" || $2=="A" || $2=="Q")) { printf "%s:C\n", $1; done=1 }
             else { print }
         }' "$file" > "$tmp" 2>/dev/null
         [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
@@ -228,6 +239,14 @@ _toolmap_has_awaiting() {
     local file; file=$(_toolmap_path)
     [ -f "$file" ] || return 1
     grep -qE ':A$' "$file" 2>/dev/null
+}
+
+# 判断 map 是否有 AWAITING_ASK 项（AskUserQuestion）
+_toolmap_has_awaiting_ask() {
+    [ -z "$TMUX_PANE" ] && return 1
+    local file; file=$(_toolmap_path)
+    [ -f "$file" ] || return 1
+    grep -qE ':Q$' "$file" 2>/dev/null
 }
 
 # 判断 map 是否有 PENDING 项
@@ -275,14 +294,12 @@ _has_perm_flag() {
 # --- 状态聚合计算 ---
 # 优先级: ! > ? > > > (empty)
 # stdout: "!" | "?" | ">" | "" （空表示无活跃状态）
-# A 条目始终视为活跃，由 Stop/PostToolUse 负责清理
+# 纯 map 驱动：:A → !, :Q → ?, :P → >, 全 :C → 空
 _compute_status() {
-    if _has_perm_flag; then
+    if _toolmap_has_awaiting; then
         echo "!"
-    elif _has_ask_flag; then
+    elif _toolmap_has_awaiting_ask; then
         echo "?"
-    elif _toolmap_has_awaiting; then
-        echo "!"
     elif _toolmap_has_pending; then
         echo ">"
     else
@@ -313,7 +330,8 @@ _new_session_owns_pane() {
         stored_pane=$(cat "$f" 2>/dev/null)
         [ "$stored_pane" = "$TMUX_PANE" ] || continue
         local mtime
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -ge 300 ] && ! _pane_has_claude_process "$TMUX_PANE" && continue
         return 0
@@ -331,7 +349,9 @@ _pane_has_claude_process() {
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            ps -o args= -p "$p" 2>/dev/null | grep -qi "claude" && return 0
+            local cmd
+            cmd=$(ps -o comm= -p "$p" 2>/dev/null)
+            [ "$(basename "$cmd" 2>/dev/null)" = "claude" ] && return 0
             local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
@@ -353,7 +373,8 @@ _is_pane_session_dead() {
     for f in "${pane_dir}"/pane-*; do
         [ -f "$f" ] || continue
         local mtime
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done

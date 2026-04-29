@@ -88,12 +88,16 @@ case "$EVENT" in
     if [ "$TOOL" = "AskUserQuestion" ]; then
         _set_ask_flag
         if [ -n "$TOOL_USE_ID" ]; then
-            _toolmap_set "$TOOL_USE_ID" "A"
+            _toolmap_set "$TOOL_USE_ID" "Q"
+        else
+            _toolmap_upgrade_oldest_pending_to "Q"
         fi
     else
         _set_perm_flag
         if [ -n "$TOOL_USE_ID" ]; then
             _toolmap_set "$TOOL_USE_ID" "A"
+        else
+            _toolmap_upgrade_oldest_pending_to "A"
         fi
     fi
     STATUS=$(_compute_status)
@@ -119,10 +123,6 @@ case "$EVENT" in
     else
         _toolmap_downgrade_oldest_pending
     fi
-    if ! _toolmap_has_awaiting && ! _toolmap_has_pending; then
-        _clear_perm_flag
-        _clear_ask_flag
-    fi
     STATUS=$(_compute_status)
     # PostToolUse 后若 map 全部 COMPLETED，显示 > 表示 Claude 仍在处理（下一个 PreToolUse 可能随后到）
     [ -z "$STATUS" ] && STATUS=">"
@@ -145,16 +145,12 @@ case "$EVENT" in
         STATUS="✓"
     fi
     _clear_all_state
-    # fallback: TMUX_PANE 未解析时，清除所有残留的处理中状态
+    # fallback: TMUX_PANE 未解析时，精准清理孤儿状态（不碰其他活跃 pane）
     if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
-        while IFS='|' read -r pane_id pane_status; do
-            case "$pane_status" in
-                ">") tmux set-option -pt "$pane_id" @claude_pane_status "✓" 2>/dev/null ;;
-                "!"|"?") tmux set-option -pt "$pane_id" @claude_pane_status "-" 2>/dev/null ;;
-            esac
-        done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+        _cleanup_stale_panes
         build_all_status
-        tmux set-option -g @ai_all_status "$ALL" 2>/dev/null
+        tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+        _ai_log "Stop FALLBACK: _cleanup_stale_panes ran"
     fi
     ;;
   SessionStart)
@@ -186,6 +182,10 @@ case "$EVENT" in
     _cleanup_stale_panes
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+    # 诊断日志：记录 pane 状态快照（纯文本，去掉 tmux 格式码）
+    _refresh_snapshot=$(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}=#{@claude_pane_status}|#{session_attached}" 2>/dev/null \
+        | awk -F'|' '$2+0>0' | cut -d'|' -f1 | tr '\n' ' ')
+    _ai_log "REFRESH: ${_refresh_snapshot:-<empty>}"
     exit 0
     ;;
   *)
@@ -231,19 +231,16 @@ if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; th
     tmux refresh-client -S 2>/dev/null || true
 fi
 
-# Fallback: SessionEnd 仍无 TMUX_PANE 时，全 pane 清理活跃状态
+# Fallback: SessionEnd 仍无 TMUX_PANE 时，用 _cleanup_stale_panes 精准清理
+# （只清除孤儿 > / ! / ?，保留 - 和 ✓）
 if [ -z "$TMUX_PANE" ] && command -v tmux &>/dev/null; then
     case "$EVENT" in
         SessionEnd)
-            while IFS='|' read -r pane_id pane_status; do
-                case "$pane_status" in
-                    ">"|"!"|"?"|"✓"|"-") tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null ;;
-                esac
-            done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+            _cleanup_stale_panes
             build_all_status
             tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
             tmux refresh-client -S 2>/dev/null || true
-            _ai_log "SessionEnd FALLBACK: cleared all stale pane statuses"
+            _ai_log "SessionEnd FALLBACK: _cleanup_stale_panes ran"
             ;;
     esac
 fi
