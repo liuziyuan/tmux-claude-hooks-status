@@ -409,6 +409,12 @@ _cleanup_stale_panes() {
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
+            "✓"|"-")
+                if ! _pane_has_claude_process "$pane_id"; then
+                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no claude process)"
+                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                fi
+                ;;
         esac
     done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
 
