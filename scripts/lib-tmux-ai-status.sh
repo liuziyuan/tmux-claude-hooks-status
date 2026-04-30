@@ -136,21 +136,25 @@ _start_approval_poll() {
     (
         echo $$ > "$pid_file"
         trap 'rm -f "$pid_file" 2>/dev/null' EXIT
+        _ai_log "POLL: started (wait=$wait_status, pane=$TMUX_PANE)"
         while :; do
             sleep 0.3 2>/dev/null || sleep 1
             # pane 状态已被外部变更（Stop 等），退出
             local cur_status
             cur_status=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
             if [ "$cur_status" != "!" ] && [ "$cur_status" != "?" ]; then
+                _ai_log "POLL: exit (cur_status='$cur_status' != !/?)"
                 exit 0
             fi
             # title 从 ✳ 变为盲文 = 用户已批准
+            local cur_title
+            cur_title=$(tmux display-message -pt "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null)
             if _pane_title_is_processing "$TMUX_PANE"; then
                 tmux set-option -pt "$TMUX_PANE" @claude_pane_status ">" 2>/dev/null || true
                 build_all_status
                 tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
                 tmux refresh-client -S 2>/dev/null || true
-                _ai_log "POLL: approved (title → processing), status → '>'"
+                _ai_log "POLL: approved (title='$cur_title'), status → '>'"
                 exit 0
             fi
         done
