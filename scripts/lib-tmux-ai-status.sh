@@ -122,8 +122,12 @@ _pane_title_is_processing() {
     esac
 }
 
-# 后台监控 pane title，检测用户批准权限
-# 无超时：poll 永不主动改变状态，仅通过外部事件（Stop/PostToolUse）或批准检测退出。
+# 后台监控 pane title + 弹窗状态，检测用户批准/拒绝
+# 检测机制：
+#   1. 权限弹窗显示时 pane lastline 包含 "Esc to cancel"
+#   2. 弹窗关闭（用户操作了）后 lastline 变化
+#   3. 此时检查 title：盲文 = 批准，✳ = 拒绝
+# 无超时：poll 通过弹窗消失精确检测用户操作，不依赖定时器。
 # $1 = wait_status ("!" 或 "?")
 _start_approval_poll() {
     [ -z "$TMUX_PANE" ] || [ -z "$SESSION_ID" ] && return
@@ -136,6 +140,7 @@ _start_approval_poll() {
     (
         echo $$ > "$pid_file"
         trap 'rm -f "$pid_file" 2>/dev/null' EXIT
+        local saw_popup=0
         while :; do
             sleep 0.3 2>/dev/null || sleep 1
             # pane 状态已被外部变更（Stop 等），退出
@@ -144,15 +149,34 @@ _start_approval_poll() {
             if [ "$cur_status" != "!" ] && [ "$cur_status" != "?" ]; then
                 exit 0
             fi
-            # title 从 ✳ 变为盲文 = 用户已批准
-            if _pane_title_is_processing "$TMUX_PANE"; then
-                tmux set-option -pt "$TMUX_PANE" @claude_pane_status ">" 2>/dev/null || true
-                build_all_status
-                tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
-                tmux refresh-client -S 2>/dev/null || true
-                _ai_log "POLL: approved (title → processing), status → '>'"
-                exit 0
-            fi
+            # 检测权限弹窗状态（lastline 含 "Esc to cancel" = 弹窗显示中）
+            local lastline
+            lastline=$(tmux capture-pane -pt "$TMUX_PANE" -p 2>/dev/null | grep -v '^$' | tail -1)
+            case "$lastline" in
+                *"Esc to cancel"*)
+                    saw_popup=1
+                    ;;
+                *)
+                    if [ "$saw_popup" -eq 1 ]; then
+                        # 弹窗关闭 → 用户做了操作
+                        if _pane_title_is_processing "$TMUX_PANE"; then
+                            tmux set-option -pt "$TMUX_PANE" @claude_pane_status ">" 2>/dev/null || true
+                            build_all_status
+                            tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+                            tmux refresh-client -S 2>/dev/null || true
+                            _ai_log "POLL: approved (popup closed + title → processing)"
+                            exit 0
+                        else
+                            tmux set-option -pt "$TMUX_PANE" @claude_pane_status "-" 2>/dev/null || true
+                            build_all_status
+                            tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+                            tmux refresh-client -S 2>/dev/null || true
+                            _ai_log "POLL: rejected (popup closed + title still ✳)"
+                            exit 0
+                        fi
+                    fi
+                    ;;
+            esac
         done
     ) &
 }
