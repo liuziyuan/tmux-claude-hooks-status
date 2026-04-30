@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、tool_state map、AskUserQuestion 标志
+# lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、pane title 监控
 # 被 tmux-claude-status source
 # 调用方需设置: TOOL_ID ("claude")、SESSION_ID（从 hook input 解析）
 
@@ -14,9 +14,7 @@ source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 # --- Per-pane 目录 ---
 # 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
 #   pane-${SESSION_ID}          session → pane 映射（内容为 pane_id）
-#   ${SESSION_ID}-toolmap       工具状态队列
-#   ${SESSION_ID}-ask           AskUserQuestion 标志
-#   ${SESSION_ID}-perm          PermissionRequest 标志
+#   ${SESSION_ID}-poll-pid      approval poll 后台进程 PID
 
 _pane_sanitized() {
     echo "${TMUX_PANE//[^a-zA-Z0-9]/_}"
@@ -100,218 +98,82 @@ build_all_status() {
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k3,3n -k4,4n)
 }
 
-# --- Per-pane 状态文件路径 ---
-_toolmap_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-toolmap"
+# --- Pane Title 监控 ---
+# Claude Code 通过 pane title 显示状态:
+#   ✳ Claude Code (U+2733) = 等待用户操作（PermissionRequest / 等待输入）
+#   ⠐ Claude Code (盲文字符 U+2800-U+28FF，动态变化) = 处理中/thinking
+# 用户批准权限时 title 从 ✳ → 盲文，作为批准检测的 ground truth。
+
+_poll_pid_path() {
+    echo "$(_pane_dir)/${SESSION_ID:-unknown}-poll-pid"
 }
 
-_ask_flag_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-ask"
+# 检查 pane title 是否为处理中状态
+# return 0 = 处理中, return 1 = 等待用户或非 Claude pane
+_pane_title_is_processing() {
+    local pane_id="${1:-$TMUX_PANE}"
+    [ -n "$pane_id" ] || return 1
+    local title
+    title=$(tmux display-message -pt "$pane_id" -p '#{pane_title}' 2>/dev/null) || return 1
+    case "$title" in
+        ✳*) return 1 ;;
+        *Claude\ Code*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-_perm_flag_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-perm"
-}
-
-# --- mkdir-based 原子锁（与日志模块同策略）---
-# 最多等待 ~1s，超时放弃（单次 hook 冲突概率低）
-_toolmap_lock() {
-    local lock_dir="$1"
-    local attempts=50
-    while ! mkdir "$lock_dir" 2>/dev/null; do
-        attempts=$((attempts - 1))
-        [ "$attempts" -le 0 ] && return 1
-        # 过期锁清理：进程死亡后残留的 .lock 目录 >5s 视为孤儿
-        if [ -d "$lock_dir" ]; then
-            local lock_age=$(( $(date +%s) - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo 0) ))
-            [ "$lock_age" -gt 5 ] && rmdir "$lock_dir" 2>/dev/null
-        fi
-        sleep 0.02 2>/dev/null || sleep 1
-    done
-    return 0
-}
-
-_toolmap_unlock() {
-    rmdir "$1" 2>/dev/null
-}
-
-# --- tool_state map 操作 ---
-# 格式: 每行 "tool_use_id:STATE"，STATE ∈ {P, A, C}
-#   P = PENDING       (PreToolUse 已到，未知是否需权限)
-#   A = AWAITING_PERM (PermissionRequest 已到，等用户响应)
-#   C = COMPLETED     (PostToolUse 已到)
-
-# 设置某 id 的状态（覆盖写入，始终移到文件末尾）
-# $1 = id, $2 = state
-_toolmap_set() {
-    [ -z "$TMUX_PANE" ] && return
-    local id="$1" state="$2"
-    [ -z "$id" ] || [ -z "$state" ] && return
+# 后台监控 pane title，检测用户批准权限
+# $1 = wait_status ("!" 或 "?")
+_start_approval_poll() {
+    [ -z "$TMUX_PANE" ] || [ -z "$SESSION_ID" ] && return
+    _stop_approval_poll
+    local wait_status="${1:-!}"
+    local pid_file
+    pid_file=$(_poll_pid_path)
     _ensure_pane_dir
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    local tmp="${file}.tmp.$$"
-    if [ -f "$file" ]; then
-        grep -v "^${id}:" "$file" > "$tmp" 2>/dev/null || true
-    else
-        : > "$tmp"
-    fi
-    printf '%s:%s\n' "$id" "$state" >> "$tmp"
-    mv "$tmp" "$file"
-    _toolmap_unlock "$lock"
+
+    (
+        echo $$ > "$pid_file"
+        trap 'rm -f "$pid_file" 2>/dev/null' EXIT
+        local elapsed=0
+        while [ $elapsed -lt 400 ]; do
+            sleep 0.3 2>/dev/null || sleep 1
+            elapsed=$((elapsed + 1))
+            # pane 状态已被外部变更（Stop 等），退出
+            local cur_status
+            cur_status=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
+            if [ "$cur_status" != "!" ] && [ "$cur_status" != "?" ]; then
+                exit 0
+            fi
+            # title 从 ✳ 变为盲文 = 用户已批准
+            if _pane_title_is_processing "$TMUX_PANE"; then
+                tmux set-option -pt "$TMUX_PANE" @claude_pane_status ">" 2>/dev/null || true
+                build_all_status
+                tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+                tmux refresh-client -S 2>/dev/null || true
+                _ai_log "POLL: approved (title → processing), status → '>'"
+                exit 0
+            fi
+        done
+        _ai_log "POLL: timeout after 120s"
+    ) &
 }
 
-# PreToolUse 专用：仅当 id 当前不是 A/Q/C 时写入 P（防止反向竞态覆盖已到达的 PermissionRequest）
-_toolmap_set_pending_guarded() {
-    [ -z "$TMUX_PANE" ] && return
-    local id="$1"
-    [ -z "$id" ] && return
-    _ensure_pane_dir
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    local cur=""
-    if [ -f "$file" ]; then
-        cur=$(grep "^${id}:" "$file" 2>/dev/null | head -1 | cut -d: -f2)
-    fi
-    if [ "$cur" != "A" ] && [ "$cur" != "Q" ] && [ "$cur" != "C" ]; then
-        local tmp="${file}.tmp.$$"
-        if [ -f "$file" ]; then
-            grep -v "^${id}:" "$file" > "$tmp" 2>/dev/null || true
-        else
-            : > "$tmp"
-        fi
-        printf '%s:P\n' "$id" >> "$tmp"
-        mv "$tmp" "$file"
-    fi
-    _toolmap_unlock "$lock"
+# 停止后台 approval poll
+_stop_approval_poll() {
+    [ -z "$SESSION_ID" ] && return
+    local pid_file
+    pid_file=$(_poll_pid_path)
+    [ -f "$pid_file" ] || return
+    local pid
+    pid=$(cat "$pid_file" 2>/dev/null)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    rm -f "$pid_file"
 }
 
-# PermissionRequest 无 tool_use_id 时的容错：升级最早的 PENDING 为目标状态
-# $1 = target state ("A" or "Q")
-_toolmap_upgrade_oldest_pending_to() {
-    [ -z "$TMUX_PANE" ] && return
-    local target="${1:-A}"
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    if [ -f "$file" ]; then
-        local tmp="${file}.tmp.$$"
-        awk -F: -v t="$target" 'BEGIN{done=0} {
-            if (!done && $2=="P") { printf "%s:%s\n", $1, t; done=1 }
-            else { print }
-        }' "$file" > "$tmp" 2>/dev/null
-        [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
-    fi
-    _toolmap_unlock "$lock"
-}
-
-# PostToolUse 无 tool_use_id 时的容错：降级最早的 PENDING 或 AWAITING_PERM 为 COMPLETED
-_toolmap_downgrade_oldest_pending() {
-    [ -z "$TMUX_PANE" ] && return
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    if [ -f "$file" ]; then
-        local tmp="${file}.tmp.$$"
-        awk -F: 'BEGIN{done=0} {
-            if (!done && ($2=="P" || $2=="A" || $2=="Q")) { printf "%s:C\n", $1; done=1 }
-            else { print }
-        }' "$file" > "$tmp" 2>/dev/null
-        [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
-    fi
-    _toolmap_unlock "$lock"
-}
-
-_toolmap_clear() {
-    [ -z "$TMUX_PANE" ] && return
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    rm -f "$file"
-    _toolmap_unlock "$lock"
-}
-
-# 判断 map 是否有 AWAITING_PERM 项（用于 Stop 拒绝推断）
-_toolmap_has_awaiting() {
-    [ -z "$TMUX_PANE" ] && return 1
-    local file; file=$(_toolmap_path)
-    [ -f "$file" ] || return 1
-    grep -qE ':A$' "$file" 2>/dev/null
-}
-
-# 判断 map 是否有 AWAITING_ASK 项（AskUserQuestion）
-_toolmap_has_awaiting_ask() {
-    [ -z "$TMUX_PANE" ] && return 1
-    local file; file=$(_toolmap_path)
-    [ -f "$file" ] || return 1
-    grep -qE ':Q$' "$file" 2>/dev/null
-}
-
-# 判断 map 是否有 PENDING 项
-_toolmap_has_pending() {
-    [ -z "$TMUX_PANE" ] && return 1
-    local file; file=$(_toolmap_path)
-    [ -f "$file" ] || return 1
-    grep -qE ':P$' "$file" 2>/dev/null
-}
-
-# --- AskUserQuestion 标志（? 状态，与 tool_state map 独立）---
-_set_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    _ensure_pane_dir
-    printf '%s\n' "$(date +%s)" > "$(_ask_flag_path)" 2>/dev/null
-}
-
-_clear_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    rm -f "$(_ask_flag_path)"
-}
-
-_has_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return 1
-    [ -f "$(_ask_flag_path)" ]
-}
-
-# --- PermissionRequest 标志（! 状态，防止 PreToolUse async 竞态覆盖）---
-_set_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    _ensure_pane_dir
-    printf '%s\n' "$(date +%s)" > "$(_perm_flag_path)" 2>/dev/null
-}
-
-_clear_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    rm -f "$(_perm_flag_path)"
-}
-
-_has_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return 1
-    [ -f "$(_perm_flag_path)" ]
-}
-
-# --- 状态聚合计算 ---
-# 优先级: ! > ? > > > (empty)
-# stdout: "!" | "?" | ">" | "" （空表示无活跃状态）
-# map + flag 驱动：:A 或 perm_flag → !, :Q 或 ask_flag → ?, :P → >, 全 :C 且无 flag → 空
-_compute_status() {
-    if _toolmap_has_awaiting || _has_perm_flag; then
-        echo "!"
-    elif _toolmap_has_awaiting_ask || _has_ask_flag; then
-        echo "?"
-    elif _toolmap_has_pending; then
-        echo ">"
-    else
-        echo ""
-    fi
-}
-
-# 清理所有 per-pane 状态文件（SessionStart/SessionEnd/UserPromptSubmit 用）
+# 清理所有 per-pane 状态（SessionStart/SessionEnd/UserPromptSubmit 用）
 _clear_all_state() {
-    _toolmap_clear
-    _clear_ask_flag
-    _clear_perm_flag
+    _stop_approval_poll
 }
 
 # --- SessionEnd 竞态保护 ---
@@ -430,6 +292,13 @@ _cleanup_stale_panes() {
             [ "${pid//[^a-zA-Z0-9]/_}" = "$dir_name" ] && { found=1; break; }
         done <<< "$all_pane_ids"
         if [ "$found" -eq 0 ]; then
+            # 清理孤儿 poll 进程
+            for pid_file in "${pane_dir}"*-poll-pid; do
+                [ -f "$pid_file" ] || continue
+                local pid
+                pid=$(cat "$pid_file" 2>/dev/null)
+                [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            done
             _ai_log "ORPHAN: removing $pane_dir (pane no longer exists)"
             rm -rf "$pane_dir" 2>/dev/null
         fi
