@@ -51,8 +51,9 @@ tmux-claude-status 脚本
     └─ tmux refresh-client
 
 后台 approval poll（per pane）:
-    ├─ 每 0.3s 检查 pane lastline（权限弹窗含 "Esc to cancel"）
-    ├─ 弹窗消失后检查 pane title：盲文 = 批准 → ">"，✳ = 拒绝 → "-"
+    ├─ 每 0.3s 检查 pane title
+    ├─ title 从 ✳ → 盲文 = 用户已批准
+    ├─ 设置 @claude_pane_status ">"，rebuild
     └─ 退出（trap 清理 PID 文件）
 
 tmux session/client 生命周期 hook
@@ -68,12 +69,9 @@ Claude Code 通过 tmux pane title 显示状态：
 
 当 PermissionRequest 到达时：
 1. 按 tool_name 直接设 `!` 或 `?`
-2. 启动后台 poll 进程监控 pane 内容
-3. Poll 每 0.3s 检查 pane lastline：
-   - lastline 含 `Esc to cancel` = 权限弹窗显示中
-   - 弹窗关闭（lastline 不再含 `Esc to cancel`）后检查 title：
-     - 盲文 = 用户已批准 → `>`
-     - ✳ = 用户已拒绝 → `-`
+2. 启动后台 poll 进程监控 pane title
+3. Poll 每 0.3s 检查 title，若从 `✳` 变为盲文 = 用户已批准 → 转 `>`
+4. 120s 超时自动退出
 
 **Stop 拒绝推断**：Stop 时若 `$PREV_STATUS` 仍为 `!`/`?`，说明权限未被批准 → `-`；否则 → `✓`。
 
