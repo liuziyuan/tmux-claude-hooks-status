@@ -123,6 +123,7 @@ _pane_title_is_processing() {
 }
 
 # 后台监控 pane title，检测用户批准权限
+# 无超时：poll 永不主动改变状态，仅通过外部事件（Stop/PostToolUse）或批准检测退出。
 # $1 = wait_status ("!" 或 "?")
 _start_approval_poll() {
     [ -z "$TMUX_PANE" ] || [ -z "$SESSION_ID" ] && return
@@ -135,10 +136,8 @@ _start_approval_poll() {
     (
         echo $$ > "$pid_file"
         trap 'rm -f "$pid_file" 2>/dev/null' EXIT
-        local elapsed=0
-        while [ $elapsed -lt 400 ]; do
+        while :; do
             sleep 0.3 2>/dev/null || sleep 1
-            elapsed=$((elapsed + 1))
             # pane 状态已被外部变更（Stop 等），退出
             local cur_status
             cur_status=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
@@ -155,7 +154,6 @@ _start_approval_poll() {
                 exit 0
             fi
         done
-        _ai_log "POLL: timeout after 120s"
     ) &
 }
 
