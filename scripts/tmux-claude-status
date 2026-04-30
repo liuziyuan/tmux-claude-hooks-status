@@ -89,15 +89,11 @@ case "$EVENT" in
         _set_ask_flag
         if [ -n "$TOOL_USE_ID" ]; then
             _toolmap_set "$TOOL_USE_ID" "Q"
-        else
-            _toolmap_upgrade_oldest_pending_to "Q"
         fi
     else
         _set_perm_flag
         if [ -n "$TOOL_USE_ID" ]; then
             _toolmap_set "$TOOL_USE_ID" "A"
-        else
-            _toolmap_upgrade_oldest_pending_to "A"
         fi
     fi
     STATUS=$(_compute_status)
@@ -125,7 +121,12 @@ case "$EVENT" in
     fi
     STATUS=$(_compute_status)
     # PostToolUse 后若 map 全部 COMPLETED，显示 > 表示 Claude 仍在处理（下一个 PreToolUse 可能随后到）
-    [ -z "$STATUS" ] && STATUS=">"
+    # 同时清理残留 flag（Agent 子 agent PermissionRequest 无 id 时只设 flag，PostToolUse 时清除）
+    if [ -z "$STATUS" ]; then
+        _clear_perm_flag
+        _clear_ask_flag
+        STATUS=">"
+    fi
     ;;
   UserPromptSubmit)
     _clear_all_state

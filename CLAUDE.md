@@ -75,7 +75,7 @@ tmux session/client 生命周期 hook
 - **Hooks 完整性校验**：SessionStart 时 `_check_hooks_integrity()` 检测 10 个事件是否都注册了本插件的 hook，缺失则自动修复
 - **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`（冗余清理路径，Stop 仍独立推断）
 - **反向竞态保护**：PreToolUse 用 `_toolmap_set_pending_guarded` 写入，不会把已存在的 `A`/`C` 降级为 `P`
-- **tool_use_id 缺失容错**：PreToolUse 无 id 时合成 `synthetic-*`；PostToolUse 无 id 时降级最早 PENDING
+- **tool_use_id 缺失容错**：PreToolUse 无 id 时合成 `synthetic-*`；PostToolUse 无 id 时降级最早非 COMPLETED；PermissionRequest 无 id 时仅设 flag 不碰 toolmap（防止 Agent 子 agent 升级错误条目）
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
 ## 状态符号
@@ -84,9 +84,9 @@ tmux session/client 生命周期 hook
 |------|------|------|
 | SessionStart | `-` | 会话空闲 |
 | UserPromptSubmit / PreToolUse / PostToolUse | `>` | 处理中（map 有 PENDING 或过渡态） |
-| PermissionRequest (AskUserQuestion) | `?` | 等待用户输入（ask 标志；优先级低于 `!`） |
-| PermissionRequest (其他工具) | `!` | 等待授权（map 有 AWAITING_PERM） |
-| Stop / StopFailure | `✓` 或 `-` | 无 `:A` 则 `✓`；有 `:A` 则推断拒绝 → `-` |
+| PermissionRequest (AskUserQuestion) | `?` | 等待用户输入（ask 标志 + toolmap :Q） |
+| PermissionRequest (其他工具) | `!` | 等待授权（perm 标志 + toolmap :A） |
+| Stop / StopFailure | `✓` 或 `-` | 无 perm/ask flag 且无 `:A`/`:Q` 则 `✓`；否则推断拒绝 → `-` |
 | SessionEnd | (空) | 会话结束 |
 
 **聚合优先级**：`!` > `?` > `>` > 空。多个工具并发时，只要有一个 AWAITING_PERM 即显示 `!`。

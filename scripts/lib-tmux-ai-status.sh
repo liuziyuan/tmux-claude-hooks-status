@@ -294,11 +294,11 @@ _has_perm_flag() {
 # --- 状态聚合计算 ---
 # 优先级: ! > ? > > > (empty)
 # stdout: "!" | "?" | ">" | "" （空表示无活跃状态）
-# 纯 map 驱动：:A → !, :Q → ?, :P → >, 全 :C → 空
+# map + flag 驱动：:A 或 perm_flag → !, :Q 或 ask_flag → ?, :P → >, 全 :C 且无 flag → 空
 _compute_status() {
-    if _toolmap_has_awaiting; then
+    if _toolmap_has_awaiting || _has_perm_flag; then
         echo "!"
-    elif _toolmap_has_awaiting_ask; then
+    elif _toolmap_has_awaiting_ask || _has_ask_flag; then
         echo "?"
     elif _toolmap_has_pending; then
         echo ">"
