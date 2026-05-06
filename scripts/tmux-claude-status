@@ -25,21 +25,6 @@ if [ -n "$TMUX_PANE" ]; then
     _pane_loc=$(tmux display-message -pt "$TMUX_PANE" -p "#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)
 fi
 
-# hooks 完整性校验
-_check_hooks_integrity() {
-    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-    [ -f "$settings_file" ] || return 1
-    local registered
-    registered=$(jq '
-        .hooks as $h |
-        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
-         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
-        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
-        | length
-    ' "$settings_file" 2>/dev/null)
-    [ "${registered:-0}" -ge 10 ]
-}
-
 # 读取当前 pane 状态符号（用于 Stop 时判断是否已被前置事件置为 "-"）
 _current_pane_status() {
     [ -z "$TMUX_PANE" ] && return
@@ -151,6 +136,7 @@ case "$EVENT" in
     fi
     ;;
   _refresh)
+    _maybe_repair_hooks
     _cleanup_stale_panes
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true

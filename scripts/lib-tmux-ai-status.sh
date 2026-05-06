@@ -95,7 +95,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7nr -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pane Title 监控 ---
@@ -320,4 +320,39 @@ _maybe_cleanup_stale() {
     fi
     _cleanup_stale_panes
     echo "$now" > "$marker"
+}
+
+# Hooks 完整性检查：10 个事件中必须都注册了 tmux-claude-status hook
+# 缺失 → 返回 1（settings.json 被外部应用覆盖时会发生）
+_check_hooks_integrity() {
+    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    [ -f "$settings_file" ] || return 1
+    local registered
+    registered=$(jq '
+        .hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
+        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
+        | length
+    ' "$settings_file" 2>/dev/null)
+    [ "${registered:-0}" -ge 10 ]
+}
+
+# 兜底自修复：tmux 端事件路径调用，settings.json 被外部覆盖时自动重装。
+# 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
+_maybe_repair_hooks() {
+    local marker="${_STATUS_DIR}/.hooks-repair-ts"
+    local now
+    now=$(date +%s)
+    [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
+    if [ -f "$marker" ]; then
+        local last
+        last=$(cat "$marker" 2>/dev/null)
+        [ $((now - ${last:-0})) -lt 60 ] && return
+    fi
+    echo "$now" > "$marker"
+    if ! _check_hooks_integrity; then
+        _ai_log "REPAIR: hooks integrity check failed, reinstalling"
+        "${_LIB_DIR}/install-claude-hooks.sh" >/dev/null 2>&1 || true
+    fi
 }
