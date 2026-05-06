@@ -95,7 +95,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7nr -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pane Title 监控 ---

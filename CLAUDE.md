@@ -148,7 +148,7 @@ ls /tmp/claude-status/*/*-poll-pid
 ## 关键设计决策
 
 - **共享库架构**：通过 `lib-tmux-ai-status.sh` 提供通用功能，`TOOL_ID` 区分状态变量和临时文件
-- **Attached-only 显示**：`build_all_status()` 按 `session_last_attached` 降序、`window_index`/`pane_index` 升序排列，仅显示 attached session
+- **Attached-only 显示**：`build_all_status()` 按 `session_last_attached` 升序、`window_index`/`pane_index` 升序排列，仅显示 attached session
 - **进程树解析**：hook 子进程不继承 `$TMUX_PANE`，通过 `ps -o ppid` 向上遍历找到 pane PID
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
