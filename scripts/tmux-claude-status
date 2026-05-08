@@ -80,8 +80,9 @@ case "$EVENT" in
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
-    if [ "$PREV_STATUS" = "!" ] || [ "$PREV_STATUS" = "?" ]; then
-        STATUS="$PREV_STATUS"
+    LIVE_STATUS=$(_current_pane_status)
+    if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
+        STATUS="$LIVE_STATUS"
     else
         STATUS=">"
     fi
@@ -89,7 +90,12 @@ case "$EVENT" in
   PostToolUse|PostToolUseFailure)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    STATUS=">"
+    LIVE_STATUS=$(_current_pane_status)
+    if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
+        STATUS="$LIVE_STATUS"
+    else
+        STATUS=">"
+    fi
     ;;
   UserPromptSubmit)
     _stop_approval_poll
