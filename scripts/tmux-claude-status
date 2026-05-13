@@ -82,6 +82,9 @@ case "$EVENT" in
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
     LIVE_STATUS=$(_current_pane_status)
     if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
+        # PermissionRequest(sync) 与 PreToolUse(async) 并发时存在竞态：
+        # PermissionRequest 已写 ! 但 poll subshell 的 PID 文件还未落盘，
+        # _poll_is_active 会误判为 false → 覆写 >。直接信任 LIVE_STATUS 消除竞态窗口。
         STATUS="$LIVE_STATUS"
     else
         STATUS=">"
@@ -183,7 +186,10 @@ if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; th
     if [ "$STATUS" = ">" ] && [ "$EVENT" = "PreToolUse" ]; then
         _live=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
         if [ "$_live" = "!" ] || [ "$_live" = "?" ]; then
-            STATUS="$_live"
+            if ! _pane_title_is_processing "$TMUX_PANE"; then
+                STATUS="$_live"
+            fi
+            # else: pane 盲文 = 用户已批准 → stale → keep STATUS=">"
         fi
     fi
     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
