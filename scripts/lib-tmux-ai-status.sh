@@ -108,6 +108,17 @@ _poll_pid_path() {
     echo "$(_pane_dir)/${SESSION_ID:-unknown}-poll-pid"
 }
 
+# 检查 approval poll 是否正在运行
+# return 0 = 运行中, return 1 = 无活跃 poll
+_poll_is_active() {
+    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] || return 1
+    local pid_file; pid_file=$(_poll_pid_path)
+    [ -f "$pid_file" ] || return 1
+    local pid; pid=$(cat "$pid_file" 2>/dev/null)
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
 # 检查 pane title 是否为处理中状态
 # return 0 = 处理中, return 1 = 等待用户或非 Claude pane
 _pane_title_is_processing() {
@@ -116,9 +127,8 @@ _pane_title_is_processing() {
     local title
     title=$(tmux display-message -pt "$pane_id" -p '#{pane_title}' 2>/dev/null) || return 1
     case "$title" in
-        ✳*) return 1 ;;
-        *Claude\ Code*) return 0 ;;
-        *) return 1 ;;
+        ✳*|"") return 1 ;;
+        *) return 0 ;;
     esac
 }
 
@@ -134,7 +144,7 @@ _start_approval_poll() {
     _ensure_pane_dir
 
     (
-        echo $$ > "$pid_file"
+        echo "$BASHPID" > "$pid_file"
         trap 'rm -f "$pid_file" 2>/dev/null' EXIT
         _ai_log "POLL: started (wait=$wait_status, pane=$TMUX_PANE)"
         while :; do
