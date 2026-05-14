@@ -52,49 +52,47 @@ if [ "$ACTION" = "uninstall" ]; then
     exit 0
 fi
 
-# 清理 + 安装：合并为单次 jq pipeline，一次性原子写入
+# 清理 + 安装：合并式更新,保留其他工具(masko 等)注册的 hook 条目。
+# 仅在 10 个目标事件中:
+#   1) 删除指向其他路径的旧 tmux-claude-status / tmux-powerline-claude-status 条目（stale）
+#   2) 若当前 $dev_script 尚未注册,追加（不覆盖）
+# 不动其他事件键(ConfigChange/PreCompact/SubagentStart 等)。
 UPDATED=$(jq --arg dev_script "$HOOK_SCRIPT" '
-    # 10 个目标事件
     ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
      "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
-
-    # async=false 的事件集合
     ["PermissionRequest"] as $sync_events |
 
     reduce $events[] as $event (
-        {};
-
-        . as $acc |
-        (.[$event] // []) |
-        map(
-            .hooks = [
-                .hooks[]
-                | select(.command | contains("tmux-powerline-claude-status") | not)
-                | select(
-                    (.command | contains("tmux-claude-status") | not)
-                    or (.command | startswith($dev_script))
-                )
-            ]
-            | select(.hooks | length > 0)
-        ) as $cleaned |
-
+        .;
         ($dev_script + " " + $event) as $hook_cmd |
-        ([$cleaned[]?.hooks[]?.command] | index($hook_cmd)) as $idx |
-
-        if $idx != null then $cleaned
-        else $cleaned + [{
-            "hooks": [{
-                "async": (($event | IN($sync_events[])) | not),
-                "command": $hook_cmd,
-                "type": "command"
-            }],
-            "matcher": ""
-        }]
-        end
-        | $acc + {($event): .}
-    ) as $new_hooks |
-
-    . + {hooks: $new_hooks}
+        .hooks //= {} |
+        .hooks[$event] //= [] |
+        # 清理 stale:删除 legacy 名称 + 删除指向其他路径的 tmux-claude-status
+        .hooks[$event] |= (
+            map(
+                .hooks = [
+                    .hooks[]
+                    | select(.command | contains("tmux-powerline-claude-status") | not)
+                    | select(
+                        (.command | contains("tmux-claude-status") | not)
+                        or (.command | startswith($dev_script))
+                    )
+                ]
+                | select(.hooks | length > 0)
+            )
+        ) |
+        # 若本 dev_script 尚未注册则追加
+        if ([.hooks[$event][]?.hooks[]?.command] | index($hook_cmd)) == null then
+            .hooks[$event] += [{
+                "hooks": [{
+                    "async": (($event | IN($sync_events[])) | not),
+                    "command": $hook_cmd,
+                    "type": "command"
+                }],
+                "matcher": ""
+            }]
+        else . end
+    )
 ' "$SETTINGS_FILE")
 
 _atomic_write "$UPDATED" "$SETTINGS_FILE"
