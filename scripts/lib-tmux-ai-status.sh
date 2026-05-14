@@ -14,7 +14,9 @@ source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 # --- Per-pane 目录 ---
 # 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
 #   pane-${SESSION_ID}          session → pane 映射（内容为 pane_id）
-#   ${SESSION_ID}-poll-pid      approval poll 后台进程 PID
+#   pending-pre                 已收 PreToolUse、未收 PostToolUse 的 tool_use_id（每行 "id tool ts"）
+#   pending-perm                已收 PermissionRequest、未配对的 tool_use_id（每行 "id !/? tool ts"）
+#   .lock/                      修改 pending-* 时的 per-pane mkdir mutex
 
 _pane_sanitized() {
     echo "${TMUX_PANE//[^a-zA-Z0-9]/_}"
@@ -98,94 +100,127 @@ build_all_status() {
     done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
-# --- Pane Title 监控 ---
-# Claude Code 通过 pane title 显示状态:
-#   ✳ Claude Code (U+2733) = 等待用户操作（PermissionRequest / 等待输入）
-#   ⠐ Claude Code (盲文字符 U+2800-U+28FF，动态变化) = 处理中/thinking
-# 用户批准权限时 title 从 ✳ → 盲文，作为批准检测的 ground truth。
+# --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
+# 状态判定基于两个 per-pane 集合:
+#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id
+#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id (含 ! 或 ?)
+# 派生规则:
+#   perm 含 "!"   → STATUS=!
+#   perm 含 "?"   → STATUS=?
+#   pre 非空      → STATUS=>
+#   都空          → STATUS=""（事件自行决定）
 
-_poll_pid_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-poll-pid"
-}
+_pending_pre_path()  { echo "$(_pane_dir)/pending-pre"; }
+_pending_perm_path() { echo "$(_pane_dir)/pending-perm"; }
+_lock_dir()          { echo "$(_pane_dir)/.lock"; }
 
-# 检查 approval poll 是否正在运行
-# return 0 = 运行中, return 1 = 无活跃 poll
-_poll_is_active() {
-    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] || return 1
-    local pid_file; pid_file=$(_poll_pid_path)
-    [ -f "$pid_file" ] || return 1
-    local pid; pid=$(cat "$pid_file" 2>/dev/null)
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null
-}
-
-# 检查 pane title 是否为处理中状态
-# return 0 = 处理中, return 1 = 等待用户或非 Claude pane
-_pane_title_is_processing() {
-    local pane_id="${1:-$TMUX_PANE}"
-    [ -n "$pane_id" ] || return 1
-    local title
-    title=$(tmux display-message -pt "$pane_id" -p '#{pane_title}' 2>/dev/null) || return 1
-    case "$title" in
-        ✳*|"") return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
-# 后台监控 pane title，检测用户批准权限
-# 无超时：poll 永不主动改变状态，仅通过外部事件（Stop/PostToolUse）或批准检测退出。
-# $1 = wait_status ("!" 或 "?")
-_start_approval_poll() {
-    [ -z "$TMUX_PANE" ] || [ -z "$SESSION_ID" ] && return
-    _stop_approval_poll
-    local wait_status="${1:-!}"
-    local pid_file
-    pid_file=$(_poll_pid_path)
+# Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
+_acquire_lock() {
+    [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
-
-    (
-        echo "$BASHPID" > "$pid_file"
-        trap 'rm -f "$pid_file" 2>/dev/null' EXIT
-        _ai_log "POLL: started (wait=$wait_status, pane=$TMUX_PANE)"
-        while :; do
-            sleep 0.3 2>/dev/null || sleep 1
-            # pane 状态已被外部变更（Stop 等），退出
-            local cur_status
-            cur_status=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
-            if [ "$cur_status" != "!" ] && [ "$cur_status" != "?" ]; then
-                _ai_log "POLL: exit (cur_status='$cur_status' != !/?)"
-                exit 0
+    local lock; lock=$(_lock_dir)
+    local i
+    for i in $(seq 1 20); do
+        if mkdir "$lock" 2>/dev/null; then
+            return 0
+        fi
+        # stale 检测: 锁目录 mtime > 5s 视为遗弃
+        local mtime
+        mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)
+        if [ -n "$mtime" ]; then
+            local age=$(( $(date +%s) - mtime ))
+            if [ "$age" -ge 5 ]; then
+                rmdir "$lock" 2>/dev/null
+                mkdir "$lock" 2>/dev/null && return 0
             fi
-            # title 从 ✳ 变为盲文 = 用户已批准
-            local cur_title
-            cur_title=$(tmux display-message -pt "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null)
-            if _pane_title_is_processing "$TMUX_PANE"; then
-                tmux set-option -pt "$TMUX_PANE" @claude_pane_status ">" 2>/dev/null || true
-                build_all_status
-                tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
-                tmux refresh-client -S 2>/dev/null || true
-                _ai_log "POLL: approved (title='$cur_title'), status → '>'"
-                exit 0
-            fi
-        done
-    ) &
+        fi
+        sleep 0.01 2>/dev/null || sleep 1
+    done
+    _ai_log "LOCK: acquire timeout on $lock"
+    return 1
 }
 
-# 停止后台 approval poll
-_stop_approval_poll() {
-    [ -z "$SESSION_ID" ] && return
-    local pid_file
-    pid_file=$(_poll_pid_path)
-    [ -f "$pid_file" ] || return
-    local pid
-    pid=$(cat "$pid_file" 2>/dev/null)
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-    rm -f "$pid_file"
+_release_lock() {
+    [ -n "$TMUX_PANE" ] || return
+    rmdir "$(_lock_dir)" 2>/dev/null
 }
 
-# 清理所有 per-pane 状态（SessionStart/SessionEnd/UserPromptSubmit 用）
+# 在锁内追加一行到 pending-pre。$1=tool_use_id $2=tool_name
+_add_pending_pre() {
+    local id="$1" tool="$2"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local f; f=$(_pending_pre_path)
+    # 已存在则不重复
+    if ! grep -q "^${id} " "$f" 2>/dev/null; then
+        echo "${id} ${tool:-?} $(date +%s)" >> "$f"
+    fi
+    _release_lock
+}
+
+# 在锁内追加一行到 pending-perm。$1=tool_use_id $2=! 或 ? $3=tool_name
+_add_pending_perm() {
+    local id="$1" mark="$2" tool="$3"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local f; f=$(_pending_perm_path)
+    if ! grep -q "^${id} " "$f" 2>/dev/null; then
+        echo "${id} ${mark} ${tool:-?} $(date +%s)" >> "$f"
+    fi
+    _release_lock
+}
+
+# 从 pending-pre 和 pending-perm 同时移除 id（配对清除）
+_remove_pending_id() {
+    local id="$1"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local pre; pre=$(_pending_pre_path)
+    local perm; perm=$(_pending_perm_path)
+    # 注意: grep -v 无匹配行时退出 1,不能用 && 串接 mv;改用无条件 mv
+    if [ -f "$pre" ]; then
+        grep -v "^${id} " "$pre" > "${pre}.tmp" 2>/dev/null
+        mv "${pre}.tmp" "$pre" 2>/dev/null || rm -f "${pre}.tmp"
+    fi
+    if [ -f "$perm" ]; then
+        grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
+        mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
+    fi
+    _release_lock
+}
+
+# 清空两个 pending 文件（Stop/SessionStart/SessionEnd/UserPromptSubmit/Esc 用）
+_clear_pending() {
+    [ -n "$TMUX_PANE" ] || return
+    _acquire_lock || return
+    rm -f "$(_pending_pre_path)" "$(_pending_perm_path)" 2>/dev/null
+    _release_lock
+}
+
+# 根据当前 pending-perm / pending-pre 派生 STATUS。结果写入全局 DERIVED
+# return 0 = 派生出非空 STATUS, return 1 = 都空（事件需自行决定）
+_derive_status_from_pending() {
+    DERIVED=""
+    [ -n "$TMUX_PANE" ] || return 1
+    local perm; perm=$(_pending_perm_path)
+    local pre; pre=$(_pending_pre_path)
+    if [ -s "$perm" ]; then
+        if awk '{if ($2=="!") {f=1; exit}} END{exit !f}' "$perm" 2>/dev/null; then
+            DERIVED="!"; return 0
+        fi
+        if awk '{if ($2=="?") {f=1; exit}} END{exit !f}' "$perm" 2>/dev/null; then
+            DERIVED="?"; return 0
+        fi
+    fi
+    if [ -s "$pre" ]; then
+        DERIVED=">"; return 0
+    fi
+    return 1
+}
+
+# 兼容旧调用名（Stop/SessionEnd 仍可能引用）
 _clear_all_state() {
-    _stop_approval_poll
+    _clear_pending
 }
 
 # --- SessionEnd 竞态保护 ---

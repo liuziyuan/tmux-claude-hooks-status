@@ -3,8 +3,8 @@
 # 用法: tmux-claude-status <EVENT_TYPE>
 # stdin: Claude Code 传入的 JSON 数据
 #
-# 状态机: per-pane 状态 + pane title 监控
-# 详见 lib-tmux-ai-status.sh 中 _start_approval_poll 注释
+# 状态机: per-pane 状态 + PreToolUse/PostToolUse 配对集合
+# 详见 lib-tmux-ai-status.sh 中 pending 集合管理注释
 
 TOOL_ID="claude"
 EVENT="$1"
@@ -71,23 +71,18 @@ case "$EVENT" in
     else
         STATUS="!"
     fi
-    # Early write: 立即写入 per-pane 状态，减少与 PreToolUse(async) 的竞态窗口。
-    # 正常写入在脚本末尾（~50ms 后），此处提前写入把窗口缩至 ~5ms。
+    # 铁律: PermissionRequest 立即写入,优先级最高。同时记入 pending-perm,
+    # 保证后续乱序到达的 PreToolUse/PostToolUse 派生时仍守住 !/?
     [ -n "$TMUX_PANE" ] && tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
-    # 子代理（有 agent_id）不启动 poll — pane title 不反映子代理状态
-    AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // ""' 2>/dev/null)
-    [ -z "$AGENT_ID" ] && _start_approval_poll "$STATUS"
+    _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
-    LIVE_STATUS=$(_current_pane_status)
-    if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
-        # PermissionRequest(sync) 与 PreToolUse(async) 并发时存在竞态：
-        # PermissionRequest 已写 ! 但 poll subshell 的 PID 文件还未落盘，
-        # _poll_is_active 会误判为 false → 覆写 >。直接信任 LIVE_STATUS 消除竞态窗口。
-        STATUS="$LIVE_STATUS"
+    _add_pending_pre "$TOOL_USE_ID" "$TOOL"
+    if _derive_status_from_pending; then
+        STATUS="$DERIVED"
     else
         STATUS=">"
     fi
@@ -95,24 +90,28 @@ case "$EVENT" in
   PostToolUse|PostToolUseFailure)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    LIVE_STATUS=$(_current_pane_status)
-    if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
-        if _poll_is_active; then
-            STATUS="$LIVE_STATUS"
-        else
-            STATUS=">"
-        fi
+    _remove_pending_id "$TOOL_USE_ID"
+    if _derive_status_from_pending; then
+        # perm 还有项 → 守 !/?；否则 pre 还有 → ">"
+        STATUS="$DERIVED"
     else
+        # 两集合都空：强制写 ">" 表示 Claude 仍在思考下一步
         STATUS=">"
     fi
     ;;
   UserPromptSubmit)
-    _stop_approval_poll
+    _clear_pending
     STATUS=">"
     ;;
   Stop|StopFailure)
-    _stop_approval_poll
-    if [ "$PREV_STATUS" = "!" ] || [ "$PREV_STATUS" = "?" ] || [ "$PREV_STATUS" = "-" ]; then
+    # 判定: pending-perm 还有项 = 用户未批准被打断 → "-"; 否则 "✓"
+    HAS_PERM=0
+    if [ -n "$TMUX_PANE" ]; then
+        PERM_FILE=$(_pending_perm_path)
+        [ -s "$PERM_FILE" ] && HAS_PERM=1
+    fi
+    _clear_pending
+    if [ "$HAS_PERM" = "1" ] || [ "$PREV_STATUS" = "!" ] || [ "$PREV_STATUS" = "?" ] || [ "$PREV_STATUS" = "-" ]; then
         STATUS="-"
     else
         STATUS="✓"
@@ -128,7 +127,7 @@ case "$EVENT" in
   SessionStart)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{source, model}' 2>/dev/null)
     STATUS="-"
-    _stop_approval_poll
+    _clear_pending
     if ! _check_hooks_integrity; then
         "${SCRIPT_DIR}/install-claude-hooks.sh" >/dev/null 2>&1
         tmux display-message "⚠ Claude hooks 已自动修复（检测到缺失）" 2>/dev/null || true
@@ -140,7 +139,7 @@ case "$EVENT" in
         _load_pane_id
         _ai_log "SessionEnd pane restored: TMUX_PANE=${TMUX_PANE:-?}"
     fi
-    _stop_approval_poll
+    _clear_pending
     _clear_pane_id
     # /new 竞态保护：SessionEnd(async) 可能晚于 SessionStart(async) 执行，
     # 此时不应清空状态。检查是否有新 session 已接管此 pane。
@@ -186,18 +185,18 @@ fi
 _ai_log_event "$PREV_STATUS" "$STATUS" "" "$_log_tool_line" "$_log_input_line"
 
 if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; then
-    # PreToolUse 竞态保护（写前重检，紧贴 set-option 缩小窗口）：
-    # PreToolUse(async) 和 PermissionRequest 可能并发，PreToolUse 读到的 PREV
-    # 可能晚于 PermissionRequest 的早写。写入前最后一刻 re-check tmux 实际值。
-    if [ "$STATUS" = ">" ] && [ "$EVENT" = "PreToolUse" ]; then
-        _live=$(tmux display-message -pt "$TMUX_PANE" -p '#{@claude_pane_status}' 2>/dev/null)
-        if [ "$_live" = "!" ] || [ "$_live" = "?" ]; then
-            if ! _pane_title_is_processing "$TMUX_PANE"; then
-                STATUS="$_live"
+    # 竞态最终保护: PreToolUse/PostToolUse 与 PermissionRequest 并发时,
+    # 派生时点 pending-perm 可能尚未落盘; 写前最后一刻再 re-derive,
+    # 若发现 perm 已有项 → 改写为 !/? (永不覆盖审批态)。
+    case "$EVENT" in
+        PreToolUse|PostToolUse|PostToolUseFailure)
+            if _derive_status_from_pending; then
+                if [ "$DERIVED" = "!" ] || [ "$DERIVED" = "?" ]; then
+                    STATUS="$DERIVED"
+                fi
             fi
-            # else: pane 盲文 = 用户已批准 → stale → keep STATUS=">"
-        fi
-    fi
+            ;;
+    esac
     tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
