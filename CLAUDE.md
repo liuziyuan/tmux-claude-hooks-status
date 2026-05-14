@@ -23,6 +23,7 @@ tmux-claude-hooks-status.tmux          # TPM 入口
 scripts/
   lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、pane title 监控、日志
   tmux-claude-status                   # Claude Code 事件处理器
+  tmux-claude-esc                      # Esc 键拒绝检测（!/? → -）
   install-claude-hooks.sh              # Claude Code hooks 注册/卸载
 ```
 
@@ -59,6 +60,11 @@ tmux-claude-status 脚本
 tmux session/client 生命周期 hook
     (session-closed, client-detached, client-attached)
     ↓ _refresh → rebuild @ai_all_status
+
+Esc 键拒绝检测（tmux bind-key -n Escape）:
+    ├─ 全局拦截 Esc，读取 active pane 的 @claude_pane_status
+    ├─ 状态为 ! / ? → 设为 -，rebuild，透传 Esc
+    └─ 其余状态 → 直接透传 Esc（~15ms 开销）
 ```
 
 ### Pane Title 监控机制
@@ -155,6 +161,7 @@ ls /tmp/claude-status/*/*-poll-pid
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
+- **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
 
 ## 依赖
 

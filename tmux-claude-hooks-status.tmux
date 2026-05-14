@@ -81,3 +81,6 @@ tmux set-hook -g after-kill-pane   "run-shell '${CURRENT_DIR}/scripts/tmux-claud
 tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh && tmux display 'Claude hooks installed'"
 # prefix + C-u: 卸载 Claude hooks
 tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh uninstall && tmux display 'Claude hooks removed'"
+
+# Esc 拒绝检测：! / ? 状态下 Esc → -
+tmux bind-key -n Escape run-shell "${CURRENT_DIR}/scripts/tmux-claude-esc"
