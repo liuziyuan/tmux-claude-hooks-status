@@ -74,7 +74,9 @@ case "$EVENT" in
     # Early write: 立即写入 per-pane 状态，减少与 PreToolUse(async) 的竞态窗口。
     # 正常写入在脚本末尾（~50ms 后），此处提前写入把窗口缩至 ~5ms。
     [ -n "$TMUX_PANE" ] && tmux set-option -pt "$TMUX_PANE" @claude_pane_status "$STATUS" 2>/dev/null || true
-    _start_approval_poll "$STATUS"
+    # 子代理（有 agent_id）不启动 poll — pane title 不反映子代理状态
+    AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // ""' 2>/dev/null)
+    [ -z "$AGENT_ID" ] && _start_approval_poll "$STATUS"
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
