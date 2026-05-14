@@ -97,7 +97,11 @@ case "$EVENT" in
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     LIVE_STATUS=$(_current_pane_status)
     if [ "$LIVE_STATUS" = "!" ] || [ "$LIVE_STATUS" = "?" ]; then
-        STATUS="$LIVE_STATUS"
+        if _poll_is_active; then
+            STATUS="$LIVE_STATUS"
+        else
+            STATUS=">"
+        fi
     else
         STATUS=">"
     fi
