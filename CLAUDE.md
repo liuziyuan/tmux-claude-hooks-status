@@ -21,8 +21,9 @@ tmux 插件，在 tmux 状态栏和窗格边框中显示 Claude Code 的运行�
 ```
 tmux-claude-hooks-status.tmux          # TPM 入口
 scripts/
-  lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、tool_state map、日志
+  lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、pane title 监控、日志
   tmux-claude-status                   # Claude Code 事件处理器
+  tmux-claude-esc                      # Esc 键拒绝检测（!/? → -）
   install-claude-hooks.sh              # Claude Code hooks 注册/卸载
 ```
 
@@ -33,9 +34,7 @@ scripts/
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@claude_pane_status`，写入 `@ai_all_status`
-- **tool_state map** `_toolmap_set` / `_toolmap_set_pending_guarded` / `_toolmap_clear` / `_toolmap_has_awaiting` / `_toolmap_has_pending` — per-pane 工具状态队列，mkdir 原子锁
-- **Ask 标志** `_set_ask_flag` / `_clear_ask_flag` / `_has_ask_flag` — AskUserQuestion 的独立 `?` 状态标志
-- **状态聚合计算** `_compute_status` — 按优先级 `!` > `?` > `>` > 空 计算显示符号
+- **Pane Title 监控** `_pane_title_is_processing` / `_start_approval_poll` / `_stop_approval_poll` — 后台监控 pane title 变化，检测用户批准权限
 
 ### 数据流
 
@@ -45,51 +44,93 @@ Claude Code 事件
 tmux-claude-status 脚本
     ├─ source lib-tmux-ai-status.sh
     ├─ resolve_tmux_pane()（进程树遍历）
-    ├─ case "$EVENT" → 更新 tool_state map / ask flag
-    ├─ _compute_status → 聚合符号
+    ├─ case "$EVENT" → 维护 pending 集合 + 派生 STATUS 符号
+    │   PreToolUse:        pending-pre += id
+    │   PermissionRequest: 早写 !/? + pending-perm += "id !/?" (优先级最高)
+    │   PostToolUse/Failure: pending-pre/perm -= id
+    │   UserPromptSubmit/Stop/Session*: _clear_pending
+    ├─ _derive_status_from_pending → STATUS
     ├─ 写入 per-pane 状态（@claude_pane_status）
     ├─ build_all_status() → @ai_all_status
     └─ tmux refresh-client
 
+派生规则（per pane）:
+    pending-perm 含 ! → STATUS=!
+    含 ?              → STATUS=?
+    pending-pre 非空  → STATUS=>
+    都空              → 事件自决（>/✓/-/空）
+
 tmux session/client 生命周期 hook
     (session-closed, client-detached, client-attached)
     ↓ _refresh → rebuild @ai_all_status
+
+Esc 键拒绝检测（tmux bind-key -n Escape）:
+    ├─ 全局拦截 Esc，读取 active pane 的 @claude_pane_status
+    ├─ 状态为 ! / ? → 设为 -，rebuild，透传 Esc
+    └─ 其余状态 → 直接透传 Esc（~15ms 开销）
 ```
 
-### tool_state 队列机制
+### Pending 集合机制
 
-每 pane 一个 map 文件 `/tmp/claude-${SESSION_ID}-${PANE_SANITIZED}-toolmap`，每行 `tool_use_id:STATE`：
+per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/`）：
 
-| STATE | 含义 | 何时写入 |
-|-------|------|----------|
-| `P` | PENDING | PreToolUse（未知是否需权限） |
-| `A` | AWAITING_PERM | PermissionRequest（等用户响应） |
-| `C` | COMPLETED | PostToolUse |
+- `pending-pre`：已 PreToolUse 未 PostToolUse 的 `tool_use_id`
+- `pending-perm`：已 PermissionRequest 未配对的 `tool_use_id`（含 `!`/`?` 标记）
+- `.lock/`：mkdir mutex（5s stale 强夺）保护并发写
 
-所有读改写用 `mkdir $file.lock` 原子锁保护，防止并行 hook 冲突。
+**铁律**：只要 `pending-perm` 非空，STATUS 必为 `!`/`?`，不受 PreToolUse/PostToolUse 乱序到达影响。
 
-**Stop 拒绝推断**：Stop 时若 map 有 `:A` 项（从未被 PostToolUse 提升为 `:C`），推断为用户拒绝权限 → 状态 `-`；否则 → `✓`。这消除了对 Notification(denied) 事件的依赖（该事件不保证触发），也消除了 watcher 进程。
+**Stop 拒绝推断**：Stop 时检查 `pending-perm` 文件是否非空 → `-`；否则按 `$PREV_STATUS` 推断 → `✓`。
 
 ### Claude Code 特有
 
 - **Hooks 完整性校验**：SessionStart 时 `_check_hooks_integrity()` 检测 10 个事件是否都注册了本插件的 hook，缺失则自动修复
-- **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`（冗余清理路径，Stop 仍独立推断）
-- **反向竞态保护**：PreToolUse 用 `_toolmap_set_pending_guarded` 写入，不会把已存在的 `A`/`C` 降级为 `P`
-- **tool_use_id 缺失容错**：PreToolUse 无 id 时合成 `synthetic-*`；PostToolUse 无 id 时降级最早 PENDING
+- **Hooks 合并式安装**：`install-claude-hooks.sh` 仅清理 stale tmux-claude-status 条目并追加本插件命令，保留其他工具（masko-desktop 等）注册的 hook
+- **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`
+- **竞态最终保护**：PreToolUse/PostToolUse 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
+
+### ⚠️ 已知限制 / 备忘
+
+**PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
+当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
+状态机仍能正确显示 `!`/`?` 是因为：
+1. PermissionRequest 早写 tmux option 立刻生效
+2. Claude Code 当前 serial 执行工具调用，单次循环内不存在 PermReq 之间的真并发
+3. PostToolUse 配对清空 pending-pre → 派生 `>` 覆盖早写的 `!`
+
+**未来若 Claude Code 改为 parallel 工具调用**，pending-perm 守门机制失效 → 乱序时 `!` 会被 `>` 覆盖。
+届时需重新设计：等 Claude Code 在 PermReq input 中补 `tool_use_id` 字段（最可能），或用 `tool_name + tool_input` 哈希作 surrogate id。
+**触发条件**：日志中观察到 `[PermissionRequest] '>' → '!'` 与 `[PostToolUse] '!' → '>'` 之间夹有其他工具的 `[PreToolUse]` 事件即说明并发已开始。
+
+---
+
+**点 No 拒绝时状态卡 `!`（不会自动转 `-`）**
+
+用户在 Claude Code TUI 中选择 No 拒绝权限时，Claude Code 完全静默：
+- 不发 Notification（无 `denied`/`rejected` 消息）
+- 不发 PostToolUseFailure
+- 不发 Stop
+- 后续 batch 中尚未发起的工具也不再发 PreToolUse
+
+本插件因此无任何 signal 可监听，状态保持 `!` 直到下次 `UserPromptSubmit`（用户输入新提示）。
+
+ESC 拒绝能转 `-` 是因为 tmux 端 `bind-key -n Escape` 拦截了键流；No 是 TUI 选项选择，不经过 tmux 键事件，无法捕获。
+
+**已知此行为，不实现自动恢复**。`!` 语义仍准确（等待人类下一步动作），下次输入自然清。若 Claude Code 未来为 No 操作补 hook 事件（如 PostToolUseFailure），届时再启用 Notification/PTUF handler 兜底。
 
 ## 状态符号
 
 | 事件 | 状态 | 含义 |
 |------|------|------|
 | SessionStart | `-` | 会话空闲 |
-| UserPromptSubmit / PreToolUse / PostToolUse | `>` | 处理中（map 有 PENDING 或过渡态） |
-| PermissionRequest (AskUserQuestion) | `?` | 等待用户输入（ask 标志；优先级低于 `!`） |
-| PermissionRequest (其他工具) | `!` | 等待授权（map 有 AWAITING_PERM） |
-| Stop / StopFailure | `✓` 或 `-` | 无 `:A` 则 `✓`；有 `:A` 则推断拒绝 → `-` |
+| UserPromptSubmit / PreToolUse / PostToolUse | `>` | 处理中 |
+| PermissionRequest (AskUserQuestion) | `?` | 等待用户输入 |
+| PermissionRequest (其他工具) | `!` | 等待授权 |
+| Stop / StopFailure | `✓` 或 `-` | `PREV_STATUS` 为 `!`/`?`/`-` → `-`；否则 → `✓` |
 | SessionEnd | (空) | 会话结束 |
 
-**聚合优先级**：`!` > `?` > `>` > 空。多个工具并发时，只要有一个 AWAITING_PERM 即显示 `!`。
+**聚合优先级**：`!` > `?` > `>` > 空。
 
 ## 开发
 
@@ -116,19 +157,21 @@ jq '.hooks | keys' ~/.claude/settings.json
 
 # 查看日志（每次 hook 事件 = 一个多行块：头行含状态转移，缩进行含 tool/input 摘要）
 tail -f /tmp/tmux-ai-status.log
-# 块头格式: [时间] [claude] [EVENT] [pane]  'prev' → 'curr'  perm=Y/N ask=Y/N
+# 块头格式: [时间] [claude] [EVENT] [pane]  'prev' → 'curr'
 # 示例:
-#   [2026-04-24T11:31:35] [claude] [PermissionRequest] [tmux-claude-hooks-status:1.3]  '>' → '!'  perm=Y ask=N
+#   [2026-04-30T12:00:00] [claude] [PermissionRequest] [session:1.3]  '>' → '!'
 #     tool: Bash  id=toolu_01KwepCiVxbU8eoBYBvwgCxi
 #     input: {"command":"ls -la"}
 
-# 模拟带 tool_use_id 的权限请求流程
+# 模拟权限请求流程
 echo '{"tool_use_id":"t1"}' | bash scripts/tmux-claude-status PreToolUse
 echo '{"tool_use_id":"t1","tool_name":"Bash"}' | bash scripts/tmux-claude-status PermissionRequest
-echo '{"tool_use_id":"t1"}' | bash scripts/tmux-claude-status PostToolUse
 
-# 查看 tool_state map
-cat /tmp/claude-*-toolmap
+# 模拟拒绝流程
+echo '{}' | bash scripts/tmux-claude-status Stop
+
+# 查看 poll 进程
+ls /tmp/claude-status/*/*-poll-pid
 ```
 
 ### 快捷键
@@ -142,12 +185,14 @@ cat /tmp/claude-*-toolmap
 ## 关键设计决策
 
 - **共享库架构**：通过 `lib-tmux-ai-status.sh` 提供通用功能，`TOOL_ID` 区分状态变量和临时文件
-- **Attached-only 显示**：`build_all_status()` 按 `session_last_attached` 降序、`window_index`/`pane_index` 升序排列，仅显示 attached session
+- **Attached-only 显示**：`build_all_status()` 按 `session_last_attached` 升序、`window_index`/`pane_index` 升序排列，仅显示 attached session
 - **进程树解析**：hook 子进程不继承 `$TMUX_PANE`，通过 `ps -o ppid` 向上遍历找到 pane PID
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
+- **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
+- **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
 
 ## 依赖
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、tool_state map、AskUserQuestion 标志
+# lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、pane title 监控
 # 被 tmux-claude-status source
 # 调用方需设置: TOOL_ID ("claude")、SESSION_ID（从 hook input 解析）
 
@@ -14,9 +14,9 @@ source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 # --- Per-pane 目录 ---
 # 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
 #   pane-${SESSION_ID}          session → pane 映射（内容为 pane_id）
-#   ${SESSION_ID}-toolmap       工具状态队列
-#   ${SESSION_ID}-ask           AskUserQuestion 标志
-#   ${SESSION_ID}-perm          PermissionRequest 标志
+#   pending-pre                 已收 PreToolUse、未收 PostToolUse 的 tool_use_id（每行 "id tool ts"）
+#   pending-perm                已收 PermissionRequest、未配对的 tool_use_id（每行 "id !/? tool ts"）
+#   .lock/                      修改 pending-* 时的 per-pane mkdir mutex
 
 _pane_sanitized() {
     echo "${TMUX_PANE//[^a-zA-Z0-9]/_}"
@@ -54,6 +54,10 @@ resolve_tmux_pane() {
 }
 
 # --- Pane ID 持久化（供 SessionEnd 回读）---
+# 注意: SessionStart/SessionEnd 事件不含 session_id，_save_pane_id 在这两事件中不会保存。
+# 映射由后续事件（PreToolUse、PermissionRequest 等）建立。
+# SessionEnd 回退链: resolve_tmux_pane → _load_pane_id → _cleanup_stale_panes。
+# 若 Claude 会话全程无工具调用，pane 状态可能残留最多 60s（直到下次 cleanup）。
 _save_pane_id() {
     [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && { _ensure_pane_dir; echo "$TMUX_PANE" > "$(_pane_dir)/pane-${SESSION_ID}"; }
 }
@@ -93,208 +97,130 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
-# --- Per-pane 状态文件路径 ---
-_toolmap_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-toolmap"
-}
+# --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
+# 状态判定基于两个 per-pane 集合:
+#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id
+#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id (含 ! 或 ?)
+# 派生规则:
+#   perm 含 "!"   → STATUS=!
+#   perm 含 "?"   → STATUS=?
+#   pre 非空      → STATUS=>
+#   都空          → STATUS=""（事件自行决定）
 
-_ask_flag_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-ask"
-}
+_pending_pre_path()  { echo "$(_pane_dir)/pending-pre"; }
+_pending_perm_path() { echo "$(_pane_dir)/pending-perm"; }
+_lock_dir()          { echo "$(_pane_dir)/.lock"; }
 
-_perm_flag_path() {
-    echo "$(_pane_dir)/${SESSION_ID:-unknown}-perm"
-}
-
-# --- mkdir-based 原子锁（与日志模块同策略）---
-# 最多等待 ~1s，超时放弃（单次 hook 冲突概率低）
-_toolmap_lock() {
-    local lock_dir="$1"
-    local attempts=50
-    while ! mkdir "$lock_dir" 2>/dev/null; do
-        attempts=$((attempts - 1))
-        [ "$attempts" -le 0 ] && return 1
-        sleep 0.02 2>/dev/null || sleep 1
-    done
-    return 0
-}
-
-_toolmap_unlock() {
-    rmdir "$1" 2>/dev/null
-}
-
-# --- tool_state map 操作 ---
-# 格式: 每行 "tool_use_id:STATE"，STATE ∈ {P, A, C}
-#   P = PENDING       (PreToolUse 已到，未知是否需权限)
-#   A = AWAITING_PERM (PermissionRequest 已到，等用户响应)
-#   C = COMPLETED     (PostToolUse 已到)
-
-# 设置某 id 的状态（覆盖写入，始终移到文件末尾）
-# $1 = id, $2 = state
-_toolmap_set() {
-    [ -z "$TMUX_PANE" ] && return
-    local id="$1" state="$2"
-    [ -z "$id" ] || [ -z "$state" ] && return
+# Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
+_acquire_lock() {
+    [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    local tmp="${file}.tmp.$$"
-    if [ -f "$file" ]; then
-        grep -v "^${id}:" "$file" > "$tmp" 2>/dev/null || true
-    else
-        : > "$tmp"
-    fi
-    printf '%s:%s\n' "$id" "$state" >> "$tmp"
-    mv "$tmp" "$file"
-    _toolmap_unlock "$lock"
+    local lock; lock=$(_lock_dir)
+    local i
+    for i in $(seq 1 20); do
+        if mkdir "$lock" 2>/dev/null; then
+            return 0
+        fi
+        # stale 检测: 锁目录 mtime > 5s 视为遗弃
+        local mtime
+        mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)
+        if [ -n "$mtime" ]; then
+            local age=$(( $(date +%s) - mtime ))
+            if [ "$age" -ge 5 ]; then
+                rmdir "$lock" 2>/dev/null
+                mkdir "$lock" 2>/dev/null && return 0
+            fi
+        fi
+        sleep 0.01 2>/dev/null || sleep 1
+    done
+    _ai_log "LOCK: acquire timeout on $lock"
+    return 1
 }
 
-# PreToolUse 专用：仅当 id 当前不是 A 或 C 时写入 P（防止反向竞态覆盖已到达的 PermissionRequest）
-_toolmap_set_pending_guarded() {
-    [ -z "$TMUX_PANE" ] && return
+_release_lock() {
+    [ -n "$TMUX_PANE" ] || return
+    rmdir "$(_lock_dir)" 2>/dev/null
+}
+
+# 在锁内追加一行到 pending-pre。$1=tool_use_id $2=tool_name
+_add_pending_pre() {
+    local id="$1" tool="$2"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local f; f=$(_pending_pre_path)
+    # 已存在则不重复
+    if ! grep -q "^${id} " "$f" 2>/dev/null; then
+        echo "${id} ${tool:-?} $(date +%s)" >> "$f"
+    fi
+    _release_lock
+}
+
+# 在锁内追加一行到 pending-perm。$1=tool_use_id $2=! 或 ? $3=tool_name
+_add_pending_perm() {
+    local id="$1" mark="$2" tool="$3"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local f; f=$(_pending_perm_path)
+    if ! grep -q "^${id} " "$f" 2>/dev/null; then
+        echo "${id} ${mark} ${tool:-?} $(date +%s)" >> "$f"
+    fi
+    _release_lock
+}
+
+# 从 pending-pre 和 pending-perm 同时移除 id（配对清除）
+_remove_pending_id() {
     local id="$1"
     [ -z "$id" ] && return
-    _ensure_pane_dir
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    local cur=""
-    if [ -f "$file" ]; then
-        cur=$(grep "^${id}:" "$file" 2>/dev/null | head -1 | cut -d: -f2)
+    _acquire_lock || return
+    local pre; pre=$(_pending_pre_path)
+    local perm; perm=$(_pending_perm_path)
+    # 注意: grep -v 无匹配行时退出 1,不能用 && 串接 mv;改用无条件 mv
+    if [ -f "$pre" ]; then
+        grep -v "^${id} " "$pre" > "${pre}.tmp" 2>/dev/null
+        mv "${pre}.tmp" "$pre" 2>/dev/null || rm -f "${pre}.tmp"
     fi
-    if [ "$cur" != "A" ] && [ "$cur" != "C" ]; then
-        local tmp="${file}.tmp.$$"
-        if [ -f "$file" ]; then
-            grep -v "^${id}:" "$file" > "$tmp" 2>/dev/null || true
-        else
-            : > "$tmp"
+    if [ -f "$perm" ]; then
+        grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
+        mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
+    fi
+    _release_lock
+}
+
+# 清空两个 pending 文件（Stop/SessionStart/SessionEnd/UserPromptSubmit/Esc 用）
+_clear_pending() {
+    [ -n "$TMUX_PANE" ] || return
+    _acquire_lock || return
+    rm -f "$(_pending_pre_path)" "$(_pending_perm_path)" 2>/dev/null
+    _release_lock
+}
+
+# 根据当前 pending-perm / pending-pre 派生 STATUS。结果写入全局 DERIVED
+# return 0 = 派生出非空 STATUS, return 1 = 都空（事件需自行决定）
+_derive_status_from_pending() {
+    DERIVED=""
+    [ -n "$TMUX_PANE" ] || return 1
+    local perm; perm=$(_pending_perm_path)
+    local pre; pre=$(_pending_pre_path)
+    if [ -s "$perm" ]; then
+        if awk '{if ($2=="!") {f=1; exit}} END{exit !f}' "$perm" 2>/dev/null; then
+            DERIVED="!"; return 0
         fi
-        printf '%s:P\n' "$id" >> "$tmp"
-        mv "$tmp" "$file"
+        if awk '{if ($2=="?") {f=1; exit}} END{exit !f}' "$perm" 2>/dev/null; then
+            DERIVED="?"; return 0
+        fi
     fi
-    _toolmap_unlock "$lock"
-}
-
-# PermissionRequest 无 tool_use_id 时的容错：升级最早的 PENDING 为 AWAITING_PERM
-_toolmap_upgrade_oldest_pending_to_awaiting() {
-    [ -z "$TMUX_PANE" ] && return
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    if [ -f "$file" ]; then
-        local tmp="${file}.tmp.$$"
-        awk -F: 'BEGIN{done=0} {
-            if (!done && $2=="P") { printf "%s:A\n", $1; done=1 }
-            else { print }
-        }' "$file" > "$tmp" 2>/dev/null
-        [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
+    if [ -s "$pre" ]; then
+        DERIVED=">"; return 0
     fi
-    _toolmap_unlock "$lock"
+    return 1
 }
 
-# PostToolUse 无 tool_use_id 时的容错：降级最早的 PENDING 或 AWAITING_PERM 为 COMPLETED
-_toolmap_downgrade_oldest_pending() {
-    [ -z "$TMUX_PANE" ] && return
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    if [ -f "$file" ]; then
-        local tmp="${file}.tmp.$$"
-        awk -F: 'BEGIN{done=0} {
-            if (!done && ($2=="P" || $2=="A")) { printf "%s:C\n", $1; done=1 }
-            else { print }
-        }' "$file" > "$tmp" 2>/dev/null
-        [ -s "$tmp" ] && mv "$tmp" "$file" || rm -f "$tmp"
-    fi
-    _toolmap_unlock "$lock"
-}
-
-_toolmap_clear() {
-    [ -z "$TMUX_PANE" ] && return
-    local file; file=$(_toolmap_path)
-    local lock="${file}.lock"
-    _toolmap_lock "$lock" || return
-    rm -f "$file"
-    _toolmap_unlock "$lock"
-}
-
-# 判断 map 是否有 AWAITING_PERM 项（用于 Stop 拒绝推断）
-_toolmap_has_awaiting() {
-    [ -z "$TMUX_PANE" ] && return 1
-    local file; file=$(_toolmap_path)
-    [ -f "$file" ] || return 1
-    grep -qE ':A$' "$file" 2>/dev/null
-}
-
-# 判断 map 是否有 PENDING 项
-_toolmap_has_pending() {
-    [ -z "$TMUX_PANE" ] && return 1
-    local file; file=$(_toolmap_path)
-    [ -f "$file" ] || return 1
-    grep -qE ':P$' "$file" 2>/dev/null
-}
-
-# --- AskUserQuestion 标志（? 状态，与 tool_state map 独立）---
-_set_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    _ensure_pane_dir
-    printf '%s\n' "$(date +%s)" > "$(_ask_flag_path)" 2>/dev/null
-}
-
-_clear_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    rm -f "$(_ask_flag_path)"
-}
-
-_has_ask_flag() {
-    [ -z "$TMUX_PANE" ] && return 1
-    [ -f "$(_ask_flag_path)" ]
-}
-
-# --- PermissionRequest 标志（! 状态，防止 PreToolUse async 竞态覆盖）---
-_set_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    _ensure_pane_dir
-    printf '%s\n' "$(date +%s)" > "$(_perm_flag_path)" 2>/dev/null
-}
-
-_clear_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return
-    rm -f "$(_perm_flag_path)"
-}
-
-_has_perm_flag() {
-    [ -z "$TMUX_PANE" ] && return 1
-    [ -f "$(_perm_flag_path)" ]
-}
-
-# --- 状态聚合计算 ---
-# 优先级: ! > ? > > > (empty)
-# stdout: "!" | "?" | ">" | "" （空表示无活跃状态）
-# A 条目始终视为活跃，由 Stop/PostToolUse 负责清理
-_compute_status() {
-    if _has_perm_flag; then
-        echo "!"
-    elif _has_ask_flag; then
-        echo "?"
-    elif _toolmap_has_awaiting; then
-        echo "!"
-    elif _toolmap_has_pending; then
-        echo ">"
-    else
-        echo ""
-    fi
-}
-
-# 清理所有 per-pane 状态文件（SessionStart/SessionEnd/UserPromptSubmit 用）
+# 兼容旧调用名（Stop/SessionEnd 仍可能引用）
 _clear_all_state() {
-    _toolmap_clear
-    _clear_ask_flag
-    _clear_perm_flag
+    _clear_pending
 }
 
 # --- SessionEnd 竞态保护 ---
@@ -313,7 +239,8 @@ _new_session_owns_pane() {
         stored_pane=$(cat "$f" 2>/dev/null)
         [ "$stored_pane" = "$TMUX_PANE" ] || continue
         local mtime
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -ge 300 ] && ! _pane_has_claude_process "$TMUX_PANE" && continue
         return 0
@@ -331,7 +258,9 @@ _pane_has_claude_process() {
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            ps -o args= -p "$p" 2>/dev/null | grep -qi "claude" && return 0
+            local cmd
+            cmd=$(ps -o comm= -p "$p" 2>/dev/null)
+            [ "$(basename "$cmd" 2>/dev/null)" = "claude" ] && return 0
             local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
@@ -353,7 +282,8 @@ _is_pane_session_dead() {
     for f in "${pane_dir}"/pane-*; do
         [ -f "$f" ] || continue
         local mtime
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
+        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
@@ -388,6 +318,12 @@ _cleanup_stale_panes() {
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
+            "✓"|"-")
+                if ! _pane_has_claude_process "$pane_id"; then
+                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no claude process)"
+                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                fi
+                ;;
         esac
     done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
 
@@ -403,6 +339,13 @@ _cleanup_stale_panes() {
             [ "${pid//[^a-zA-Z0-9]/_}" = "$dir_name" ] && { found=1; break; }
         done <<< "$all_pane_ids"
         if [ "$found" -eq 0 ]; then
+            # 清理孤儿 poll 进程
+            for pid_file in "${pane_dir}"*-poll-pid; do
+                [ -f "$pid_file" ] || continue
+                local pid
+                pid=$(cat "$pid_file" 2>/dev/null)
+                [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            done
             _ai_log "ORPHAN: removing $pane_dir (pane no longer exists)"
             rm -rf "$pane_dir" 2>/dev/null
         fi
@@ -422,4 +365,39 @@ _maybe_cleanup_stale() {
     fi
     _cleanup_stale_panes
     echo "$now" > "$marker"
+}
+
+# Hooks 完整性检查：10 个事件中必须都注册了 tmux-claude-status hook
+# 缺失 → 返回 1（settings.json 被外部应用覆盖时会发生）
+_check_hooks_integrity() {
+    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    [ -f "$settings_file" ] || return 1
+    local registered
+    registered=$(jq '
+        .hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
+        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
+        | length
+    ' "$settings_file" 2>/dev/null)
+    [ "${registered:-0}" -ge 10 ]
+}
+
+# 兜底自修复：tmux 端事件路径调用，settings.json 被外部覆盖时自动重装。
+# 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
+_maybe_repair_hooks() {
+    local marker="${_STATUS_DIR}/.hooks-repair-ts"
+    local now
+    now=$(date +%s)
+    [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
+    if [ -f "$marker" ]; then
+        local last
+        last=$(cat "$marker" 2>/dev/null)
+        [ $((now - ${last:-0})) -lt 60 ] && return
+    fi
+    echo "$now" > "$marker"
+    if ! _check_hooks_integrity; then
+        _ai_log "REPAIR: hooks integrity check failed, reinstalling"
+        "${_LIB_DIR}/install-claude-hooks.sh" >/dev/null 2>&1 || true
+    fi
 }
