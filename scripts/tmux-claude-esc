@@ -7,11 +7,10 @@ PANE_ID=$(tmux display-message -p "#{pane_id}")
 STATUS=$(tmux display-message -pt "$PANE_ID" -p '#{@claude_pane_status}' 2>/dev/null)
 
 case "$STATUS" in
-    "!"|"?")
+    "!"|"?"|">")
         TOOL_ID="claude"
         TMUX_PANE="$PANE_ID"
         source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
-        # 清空 pending-perm + pending-pre (后者是孤儿: 用户取消整批)
         _clear_pending
         tmux set-option -pt "$PANE_ID" @claude_pane_status "-"
         build_all_status
