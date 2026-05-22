@@ -87,6 +87,8 @@ build_all_status() {
         local status_block
         if [ "$pane_status" = "!" ] || [ "$pane_status" = "?" ]; then
             status_block="#[bg=#FF5555,fg=#F8F8F2] ${pane_status} #[bg=default,fg=default]"
+        elif [ "$pane_status" = ">" ]; then
+            status_block="#[bg=#50FA7B,fg=#282A36] ${pane_status} #[bg=default,fg=default]"
         else
             status_block="#[bg=${STATUS_COLOR},fg=#282A36] ${pane_status} #[bg=default,fg=default]"
         fi
