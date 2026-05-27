@@ -13,11 +13,9 @@ IDLE_ICON=$(tmux show-option -gv @claude_hooks_idle_icon 2>/dev/null || echo "�
 BUSY_ICON=$(tmux show-option -gv @claude_hooks_busy_icon 2>/dev/null || echo "⠿")
 AUTH_ICON=$(tmux show-option -gv @claude_hooks_auth_icon 2>/dev/null || echo "🔒")
 
-# --- 通用设置：pane 边框样式 ---
+# --- 通用设置：pane 边框标题（不覆盖颜色样式）---
 tmux set-option -g pane-border-status top 2>/dev/null || true
 tmux set-option -g pane-border-format " #P #{pane_title} " 2>/dev/null || true
-tmux set-option -g pane-active-border-style "fg=#BD93F9" 2>/dev/null || true
-tmux set-option -g pane-border-style "fg=#6272A4" 2>/dev/null || true
 
 # --- 多行状态栏：动态追加 AI 状态行 ---
 # 读取当前行数（其他插件已设置好的），追加到最后一行的下一行
