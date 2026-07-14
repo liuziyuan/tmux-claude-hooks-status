@@ -1,11 +1,11 @@
 #!/bin/bash
 # lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、pane title 监控
-# 被 tmux-claude-status source
-# 调用方需设置: TOOL_ID ("claude")、SESSION_ID（从 hook input 解析）
+# 被 tmux-ai-status source
+# 调用方需设置: TOOL_ID ("claude" | "codex")、SESSION_ID（从 hook input 解析）
 
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_STATUS_DIR="/tmp/claude-status"
+_STATUS_DIR="/tmp/ai-status"
 STATUS_COLOR="#F1FA8C"
 
 # --- 日志模块 ---
@@ -75,7 +75,7 @@ _clear_pane_id() {
 }
 
 # --- 状态聚合 ---
-# 扫描所有 attached session 的 pane，读取 @claude_pane_status，写入 @ai_all_status
+# 扫描所有 attached session 的 pane，读取 @ai_pane_status，写入 @ai_all_status
 build_all_status() {
     ALL=""
     cur_sess=""
@@ -99,7 +99,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
@@ -244,15 +244,15 @@ _new_session_owns_pane() {
         # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
         mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
-        [ "$age" -ge 300 ] && ! _pane_has_claude_process "$TMUX_PANE" && continue
+        [ "$age" -ge 300 ] && ! _pane_has_ai_process "$TMUX_PANE" && continue
         return 0
     done
     return 1
 }
 
 # --- 进程树检查 ---
-# BFS 遍历 pane 的进程树，检查是否有包含 "claude" 的命令
-_pane_has_claude_process() {
+# BFS 遍历 pane 的进程树，检查是否有包含 "claude" 或 "codex" 的命令
+_pane_has_ai_process() {
     local pane_id="$1"
     local pane_pid
     pane_pid=$(tmux list-panes -t "$pane_id" -F "#{pane_pid}" 2>/dev/null)
@@ -260,9 +260,12 @@ _pane_has_claude_process() {
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            local cmd
+            local cmd base
             cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-            [ "$(basename "$cmd" 2>/dev/null)" = "claude" ] && return 0
+            base=$(basename "$cmd" 2>/dev/null)
+            case "$base" in
+                claude|codex) return 0 ;;
+            esac
             local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
@@ -289,7 +292,7 @@ _is_pane_session_dead() {
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
-    ! _pane_has_claude_process "$pane_id"
+    ! _pane_has_ai_process "$pane_id"
 }
 
 # --- 孤儿状态清理（_refresh 用）---
@@ -312,22 +315,22 @@ _cleanup_stale_panes() {
                 local pane_dir="${_STATUS_DIR}/${sanitized}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 elif _is_pane_session_dead "$pane_id"; then
                     _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_claude_process "$pane_id"; then
-                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no claude process)"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                if ! _pane_has_ai_process "$pane_id"; then
+                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                 fi
                 ;;
         esac
-    done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}" 2>/dev/null)
 
     # 清理孤儿目录：目录存在但对应 pane 已不在 tmux 中
     local all_pane_ids
@@ -369,26 +372,41 @@ _maybe_cleanup_stale() {
     echo "$now" > "$marker"
 }
 
-# Hooks 完整性检查：10 个事件中必须都注册了 tmux-claude-status hook
-# 缺失 → 返回 1（settings.json 被外部应用覆盖时会发生）
+# Hooks 完整性检查：按 TOOL_ID 分派
+#   claude → ~/.claude/settings.json 的 10 个事件是否都注册了 tmux-ai-status hook
+#   codex  → ~/.codex/hooks.toml 是否含 6 个 tmux-ai-status command
+# 缺失 → 返回 1（配置被外部应用覆盖时会发生）
 _check_hooks_integrity() {
-    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-    [ -f "$settings_file" ] || return 1
-    local registered
-    registered=$(jq '
-        .hooks as $h |
-        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
-         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
-        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
-        | length
-    ' "$settings_file" 2>/dev/null)
-    [ "${registered:-0}" -ge 10 ]
+    case "${TOOL_ID:-claude}" in
+        codex)
+            local hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.toml"
+            [ -f "$hooks_file" ] || return 1
+            local n
+            n=$(grep -c "tmux-ai-status codex" "$hooks_file" 2>/dev/null)
+            [ "${n:-0}" -ge 6 ]
+            ;;
+        *)
+            local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+            [ -f "$settings_file" ] || return 1
+            local registered
+            registered=$(jq '
+                .hooks as $h |
+                ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+                 "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
+                | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-ai-status"))))
+                | length
+            ' "$settings_file" 2>/dev/null)
+            [ "${registered:-0}" -ge 10 ]
+            ;;
+    esac
 }
 
-# 兜底自修复：tmux 端事件路径调用，settings.json 被外部覆盖时自动重装。
+# 兜底自修复：tmux 端事件路径调用，配置被外部覆盖时自动重装。
 # 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
+# 按 TOOL_ID 选择安装器（_refresh 默认传 claude → 仅自修复 claude；
+# codex hooks 用户手动安装，不自动修复）。
 _maybe_repair_hooks() {
-    local marker="${_STATUS_DIR}/.hooks-repair-ts"
+    local marker="${_STATUS_DIR}/.hooks-repair-${TOOL_ID:-claude}-ts"
     local now
     now=$(date +%s)
     [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
@@ -398,8 +416,13 @@ _maybe_repair_hooks() {
         [ $((now - ${last:-0})) -lt 60 ] && return
     fi
     echo "$now" > "$marker"
+    local installer
+    case "${TOOL_ID:-claude}" in
+        codex) installer="${_LIB_DIR}/install-codex-hooks.sh" ;;
+        *)     installer="${_LIB_DIR}/install-claude-hooks.sh" ;;
+    esac
     if ! _check_hooks_integrity; then
-        _ai_log "REPAIR: hooks integrity check failed, reinstalling"
-        "${_LIB_DIR}/install-claude-hooks.sh" >/dev/null 2>&1 || true
+        _ai_log "REPAIR: hooks integrity check failed, reinstalling (${TOOL_ID:-claude})"
+        [ -x "$installer" ] && "$installer" >/dev/null 2>&1 || true
     fi
 }

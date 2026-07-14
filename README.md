@@ -2,7 +2,7 @@
 
 [中文](README_ZH.md)
 
-A tmux plugin that displays Claude Code status in the tmux status bar. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line.
+A tmux plugin that displays AI CLI (Claude Code / Codex) status in the tmux status bar. It hooks into each tool's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line. Claude Code and Codex share the same hook semantics (event names, stdin JSON fields), so one core script handles both, keyed by `TOOL_ID` (`claude`/`codex`).
 
 ## Quick Start (Auto Install)
 
@@ -99,6 +99,32 @@ prefix + C-u
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 ```
 
+### 6. Install Codex Hooks (Optional)
+
+Requires **codex ≥ v0.117** (lifecycle hooks support).
+
+In tmux, press:
+
+```
+prefix + M-h
+```
+
+The plugin registers 6 hooks in `~/.codex/hooks.toml`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`.
+
+To uninstall:
+
+```
+prefix + M-u
+```
+
+Manual install:
+
+```bash
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
+```
+
+> Codex has no `SessionEnd`/`Notification` events — when a codex session exits, its pane status is cleared by the process-tree stale-cleanup fallback. The installer manages only its own sentinel-marked block in `hooks.toml`; any existing content outside that block is preserved.
+
 ## Status Symbols and Events
 
 | Event | Status | Color | Meaning |
@@ -132,11 +158,11 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 
 ```bash
 # 1. Trigger a hook manually
-echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
+echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-ai-status claude SessionStart
 tmux show-option -g @ai_all_status
 
 # 2. Check pane status
-tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status}"
+tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@ai_pane_status}"
 
 # 3. Verify hooks registered
 jq '.hooks | keys' ~/.claude/settings.json
@@ -153,5 +179,7 @@ Prefix is `Ctrl+a` (press and release, then press the key).
 |----------|--------|
 | `prefix + C-h` | Install Claude Code hooks |
 | `prefix + C-u` | Uninstall Claude Code hooks |
+| `prefix + M-h` | Install Codex hooks |
+| `prefix + M-u` | Uninstall Codex hooks |
 | `prefix + I` | TPM install all plugins |
 | `prefix + r` | Reload config |

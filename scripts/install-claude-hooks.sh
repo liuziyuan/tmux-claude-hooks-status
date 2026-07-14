@@ -9,7 +9,8 @@ set -o errexit
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-HOOK_SCRIPT="${SCRIPT_DIR}/tmux-claude-status"
+HOOK_SCRIPT="${SCRIPT_DIR}/tmux-ai-status"
+TOOL_CMD="${HOOK_SCRIPT} claude"
 SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 # 原子写入：mktemp 与目标同目录 → 同文件系统 → mv 原子
@@ -54,34 +55,36 @@ fi
 
 # 清理 + 安装：合并式更新,保留其他工具(masko 等)注册的 hook 条目。
 # 仅在 10 个目标事件中:
-#   1) 删除指向其他路径的旧 tmux-claude-status / tmux-powerline-claude-status 条目（stale）
-#   2) 若当前 $dev_script 尚未注册,追加（不覆盖）
+#   1) 删除旧 tmux-claude-status / tmux-powerline-claude-status 条目（legacy 名，已重命名为 tmux-ai-status）
+#   2) 删除指向其他路径的 tmux-ai-status 条目（stale）
+#   3) 若当前 $TOOL_CMD 尚未注册,追加（不覆盖）
 # 不动其他事件键(ConfigChange/PreCompact/SubagentStart 等)。
-UPDATED=$(jq --arg dev_script "$HOOK_SCRIPT" '
+UPDATED=$(jq --arg dev_script "$HOOK_SCRIPT" --arg tool_cmd "$TOOL_CMD" '
     ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
      "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
     ["PermissionRequest"] as $sync_events |
 
     reduce $events[] as $event (
         .;
-        ($dev_script + " " + $event) as $hook_cmd |
+        ($tool_cmd + " " + $event) as $hook_cmd |
         .hooks //= {} |
         .hooks[$event] //= [] |
-        # 清理 stale:删除 legacy 名称 + 删除指向其他路径的 tmux-claude-status
+        # 清理 stale:删除 legacy 名称 + 删除指向其他路径的 tmux-ai-status
         .hooks[$event] |= (
             map(
                 .hooks = [
                     .hooks[]
                     | select(.command | contains("tmux-powerline-claude-status") | not)
+                    | select(.command | contains("tmux-claude-status") | not)
                     | select(
-                        (.command | contains("tmux-claude-status") | not)
+                        (.command | contains("tmux-ai-status") | not)
                         or (.command | startswith($dev_script))
                     )
                 ]
                 | select(.hooks | length > 0)
             )
         ) |
-        # 若本 dev_script 尚未注册则追加
+        # 若本 $tool_cmd 尚未注册则追加
         if ([.hooks[$event][]?.hooks[]?.command] | index($hook_cmd)) == null then
             .hooks[$event] += [{
                 "hooks": [{

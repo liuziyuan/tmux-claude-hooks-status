@@ -1,6 +1,6 @@
 # tmux-claude-hooks-status
 
-一个 tmux 插件，在 tmux 状态栏中显示 Claude Code 的实时状态。通过 Claude Code 的 hook 系统实现，支持按 pane 显示状态（空闲、处理中、等待授权、等待用户输入）。
+一个 tmux 插件，在 tmux 状态栏中显示 AI CLI（Claude Code / Codex）的实时状态。通过各工具的 hook 系统实现，支持按 pane 显示状态（空闲、处理中、等待授权、等待用户输入）。Claude Code 与 Codex 的 hook 语义同构（事件名、stdin JSON 字段一致），共用一套核心脚本，以 `TOOL_ID`（`claude`/`codex`）区分。
 
 [English](README.md)
 
@@ -96,8 +96,34 @@ prefix + C-u
 ### 手动安装 Hooks（可选）
 
 ```bash
-bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-hooks.sh
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 ```
+
+### 6. 安装 Codex Hooks（可选）
+
+需 **codex ≥ v0.117**（lifecycle hooks 支持）。
+
+在 tmux 内按快捷键：
+
+```
+prefix + M-h
+```
+
+插件会将 6 个 hooks 注册到 `~/.codex/hooks.toml`：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`。
+
+卸载：
+
+```
+prefix + M-u
+```
+
+手动安装：
+
+```bash
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
+```
+
+> Codex 没有 `SessionEnd`/`Notification` 事件——codex 会话退出后，其 pane 状态由进程树 stale 清理机制兜底清除。安装器仅管理自己在 `hooks.toml` 中的 sentinel 标记块，块外的已有内容原样保留。
 
 ## 状态符号与事件
 
@@ -131,11 +157,11 @@ Notification 事件在内部处理——特定消息（权限相关、已取消�
 
 ```bash
 # 1. 手动触发一次 hook
-echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
-tmux show-option -g @claude_all_status
+echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-ai-status claude SessionStart
+tmux show-option -g @ai_all_status
 
 # 2. 检查 pane 状态
-tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status}"
+tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@ai_pane_status}"
 
 # 3. 检查 hooks 是否已注册
 jq '.hooks | keys' ~/.claude/settings.json
@@ -152,5 +178,7 @@ Prefix 为 `Ctrl+a`（按下后松开，再按对应键）。
 |--------|------|
 | `prefix + C-h` | 安装 Claude Code hooks |
 | `prefix + C-u` | 卸载 Claude Code hooks |
+| `prefix + M-h` | 安装 Codex hooks |
+| `prefix + M-u` | 卸载 Codex hooks |
 | `prefix + I` | TPM 安装所有插件 |
 | `prefix + r` | 重载配置 |
