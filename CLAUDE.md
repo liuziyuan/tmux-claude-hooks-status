@@ -73,7 +73,8 @@ tmux-ai-status <TOOL_ID> <EVENT> 脚本
     ├─ case "$EVENT" → 维护 pending 集合 + 派生 STATUS 符号
     │   PreToolUse:        pending-pre += id
     │   PermissionRequest: 早写 !/? + pending-perm += "id !/?" (优先级最高)
-    │   PostToolUse/Failure: pending-pre/perm -= id
+    │   PermissionResolved: pending-perm -= request_id（OpenCode）
+    │   PostToolUse/Failure: pending-pre/perm -= tool_use_id
     │   UserPromptSubmit/Stop/Session*: _clear_pending
     ├─ _derive_status_from_pending → STATUS
     ├─ 写入 per-pane 状态（@ai_pane_status）
@@ -119,7 +120,7 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 - **Hooks 完整性校验**：SessionStart 时 `_check_hooks_integrity()` 检测 10 个事件是否都注册了本插件的 hook，缺失则自动修复
 - **Hooks 合并式安装**：`install-claude-hooks.sh` 仅清理 stale tmux-ai-status 条目并追加本插件命令，保留其他工具（masko-desktop 等）注册的 hook
 - **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`
-- **竞态最终保护**：PreToolUse/PostToolUse 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态
+- **竞态最终保护**：PreToolUse/PostToolUse/PermissionResolved 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
 ### ⚠️ 已知限制 / 备忘
@@ -131,9 +132,14 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 2. Claude Code 当前 serial 执行工具调用，单次循环内不存在 PermReq 之间的真并发
 3. PostToolUse 配对清空 pending-pre → 派生 `>` 覆盖早写的 `!`
 
-**未来若 Claude Code 改为 parallel 工具调用**，pending-perm 守门机制失效 → 乱序时 `!` 会被 `>` 覆盖。
+**Claude Code 未来若改为 parallel 工具调用**，pending-perm 守门机制仍会因缺少 ID 失效。
 届时需重新设计：等 Claude Code 在 PermReq input 中补 `tool_use_id` 字段（最可能），或用 `tool_name + tool_input` 哈希作 surrogate id。
 **触发条件**：日志中观察到 `[PermissionRequest] '>' → '!'` 与 `[PostToolUse] '!' → '>'` 之间夹有其他工具的 `[PreToolUse]` 事件即说明并发已开始。
+
+Codex 同样不提供 `tool_use_id`，但支持并行工具调用。Codex adapter 因此写入一个无法由
+`PostToolUse` 配对删除的 sentinel，保守保持 `!` 到 `Stop`、`UserPromptSubmit` 或
+`SessionStart` 清理。OpenCode 的 `permission.asked.id` 与 `permission.replied.requestID`
+则会精确维护多个 pending 请求。
 
 ---
 

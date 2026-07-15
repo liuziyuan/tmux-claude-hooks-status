@@ -1,8 +1,8 @@
 #!/bin/bash
 # AI CLI → tmux 状态栏 hook
 # 用法: tmux-ai-status <TOOL_ID> <EVENT_TYPE>
-#   TOOL_ID: claude | codex
-# stdin: 工具传入的 JSON 数据（claude/codex 字段同构）
+#   TOOL_ID: claude | codex | opencode
+# stdin: adapter 归一化后的 JSON 数据
 #
 # 状态机: per-pane 状态 + PreToolUse/PostToolUse 配对集合
 # 详见 lib-tmux-ai-status.sh 中 pending 集合管理注释
@@ -18,6 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
 resolve_tmux_pane
+# 同 pane 的并发 hooks 必须完整串行化，否则一个事件可能用过期派生结果覆盖另一个
+# PermissionRequest 已写入的审批态。
+if [ -n "$TMUX_PANE" ]; then
+    _acquire_event_lock || exit 0
+    trap '_release_event_lock' EXIT
+fi
+
 _save_pane_id
 _maybe_cleanup_stale
 
@@ -75,15 +82,31 @@ case "$EVENT" in
     # 铁律: PermissionRequest 立即写入,优先级最高。同时记入 pending-perm,
     # 保证后续乱序到达的 PreToolUse/PostToolUse 派生时仍守住 !/?
     [ -n "$TMUX_PANE" ] && tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$STATUS" 2>/dev/null || true
-    _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
+    if [ -n "$TOOL_USE_ID" ]; then
+        _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
+    elif [ "${ADAPTER_HOLD_UNMATCHED_PERMISSION:-false}" = "true" ]; then
+        # Codex 的 PermissionRequest 无请求 ID。sentinel 不与任何 PostToolUse ID 配对，
+        # 因而保守保持审批态，直到 turn/session 边界统一清理。
+        _add_pending_perm "__unmatched_permission__" "$STATUS" "$TOOL"
+    fi
+    ;;
+  PermissionResolved)
+    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.request_id // ""' 2>/dev/null)
+    INPUT_DIGEST=$(echo "$INPUT" | jq -c '{request_id, reply}' 2>/dev/null)
+    _remove_pending_perm_id "$TOOL_USE_ID"
+    if _derive_status_from_pending; then
+        STATUS="$DERIVED"
+    else
+        STATUS=">"
+    fi
     ;;
   PreToolUse)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
     _add_pending_pre "$TOOL_USE_ID" "$TOOL"
-    # PermReq hook input 不带 tool_use_id → pending-perm 实际未写入,
-    # 派生看不到审批态。回退用 LIVE_STATUS 兜底: !/? 永不降级。
+    # Claude 的 PermReq 不带 tool_use_id，派生看不到审批态；用 LIVE_STATUS 兜底。
+    # Codex sentinel 和 OpenCode request ID 则会直接从 pending 集合派生。
     LIVE_STATUS=$(_current_pane_status)
     case "$LIVE_STATUS" in
         "!"|"?") STATUS="$LIVE_STATUS" ;;
@@ -100,10 +123,12 @@ case "$EVENT" in
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     _remove_pending_id "$TOOL_USE_ID"
-    # PostToolUse 表示该工具已批准且完成 → !/? 必须解除(否则 AUQ 后卡 ?)。
-    # 直接降级 ">"; Bash chain 中下一工具的 PermReq 会立刻覆盖回 !,
-    # serial 模式下 Race 影响极短 (~ms 级闪烁,可接受)。
-    STATUS=">"
+    # 只解除当前工具对应项；其他权限请求仍 pending 时必须保持 !/?。
+    if _derive_status_from_pending; then
+        STATUS="$DERIVED"
+    else
+        STATUS=">"
+    fi
     ;;
   UserPromptSubmit)
     _clear_pending
@@ -191,18 +216,23 @@ fi
 _ai_log_event "$PREV_STATUS" "$STATUS" "" "$_log_tool_line" "$_log_input_line"
 
 if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; then
-    # 竞态最终保护: 仅 PreToolUse — PermReq 早写的 !/? 不允许被 Pre 降级。
-    # PostToolUse 不保护 (工具已批准完成,!/? 必须解除)。
+    # 写入前重新读取 pending，避免并发事件用过期结果覆盖仍有效的审批态。
     case "$EVENT" in
         PreToolUse)
-            _live_final=$(tmux display-message -pt "$TMUX_PANE" -p '#{@ai_pane_status}' 2>/dev/null)
-            case "$_live_final" in
-                "!"|"?")
-                    case "$STATUS" in
-                        ">"|"-"|"") STATUS="$_live_final" ;;
-                    esac
-                    ;;
-            esac
+            if _derive_status_from_pending; then
+                STATUS="$DERIVED"
+            else
+                # Claude PermissionRequest 没有 ID，继续用 live 状态保护串行审批窗口。
+                _live_final=$(tmux display-message -pt "$TMUX_PANE" -p '#{@ai_pane_status}' 2>/dev/null)
+                case "$_live_final" in
+                    "!"|"?") STATUS="$_live_final" ;;
+                esac
+            fi
+            ;;
+        PostToolUse|PostToolUseFailure|PermissionResolved)
+            if _derive_status_from_pending; then
+                STATUS="$DERIVED"
+            fi
             ;;
     esac
     tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$STATUS" 2>/dev/null || true
