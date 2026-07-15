@@ -98,8 +98,8 @@ async function pickTool(message) {
 }
 
 async function runHookAction(action, verb) {
-  const sel = await pickTool(`选择要${verb}的工具`);
-  if (!sel) return;
+  const sel = await pickTool(`选择要${verb}的工具（Esc 返回）`);
+  if (!sel) { p.log.info('返回主菜单'); return; }
   const ids = sel === '__all__' ? TOOLS.map((t) => t.id) : [sel];
   for (const id of ids) {
     const s = p.spinner();
@@ -153,7 +153,7 @@ async function main() {
 
   while (true) {
     const choice = await p.select({
-      message: '选择操作',
+      message: '选择操作（Esc 在子菜单返回主页面）',
       options: [
         { value: 'doctor', label: '环境检查', hint: 'tmux / jq / bash / node' },
         { value: 'detect', label: '侦测 AI CLI', hint: '版本 + hooks 状态' },
@@ -164,7 +164,12 @@ async function main() {
         { value: 'exit', label: '退出' },
       ],
     });
-    if (p.isCancel(choice) || choice === 'exit') break;
+    // 主菜单是顶层：Esc（isCancel）不退出程序，留在主菜单；退出仅走「退出」项。
+    if (p.isCancel(choice)) {
+      p.log.info('已在主菜单（退出请选「退出」项）');
+      continue;
+    }
+    if (choice === 'exit') break;
 
     try {
       if (choice === 'doctor') await doctor();
