@@ -1,8 +1,13 @@
-// symlink.js — TPM 软链校验/创建 + .tmux.conf 引用检查
-import { existsSync, lstatSync, readlinkSync, symlinkSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+// symlink.js — TPM 软链校验（历史遗留兼容） + .tmux.conf 集成状态检查
+//
+// 主加载路径已改为 tmuxconf.js 的 run-shell（见该文件），不再依赖本文件的软链
+// 创建。checkSymlink() 仅用于 TUI「tmux 集成」菜单里检测/清理历史遗留的
+// ~/.tmux/plugins/ 软链；checkTmuxConf() 供 tmuxconf.js 判断 .tmux.conf 集成状态
+// （含旧式 TPM @plugin 声明的宽松探测，以及是否已指向"当前 source"的精确匹配）。
+import { existsSync, lstatSync, readlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { PLUGIN_LINK, REPO_ROOT } from './adapters-meta.js';
+import { PLUGIN_LINK, REPO_ROOT, TMUX_ENTRY } from './adapters-meta.js';
 
 const PLUGINS_DIR = dirname(PLUGIN_LINK);
 
@@ -46,28 +51,24 @@ export function checkSymlink() {
   }
 }
 
-// 创建软链 PLUGIN_LINK → REPO_ROOT
-export function createSymlink() {
-  try {
-    mkdirSync(dirname(PLUGIN_LINK), { recursive: true });
-    // 已存在悬空软链先删
-    try { lstatSync(PLUGIN_LINK); } catch { /* not exist, ok */ }
-    symlinkSync(REPO_ROOT, PLUGIN_LINK, 'dir');
-    return { ok: true, from: PLUGIN_LINK, to: REPO_ROOT };
-  } catch (err) {
-    return { ok: false, output: err.code === 'EEXIST' ? '软链已存在' : String(err) };
-  }
+// 构造本插件在 .tmux.conf 中的标准 run-shell 声明行
+export function runShellDeclarationLine(tmuxEntry = TMUX_ENTRY) {
+  return `run-shell '${tmuxEntry}'`;
 }
 
-// 检查 ~/.tmux.conf 是否引用本插件
-export function checkTmuxConf() {
+// 检查 ~/.tmux.conf 对本插件的集成状态：
+//   referenced      是否存在任何指向本插件的声明（新式 run-shell 或旧式 TPM @plugin，
+//                   任意路径/任意来源，宽松子串匹配，兼容历史安装）
+//   pointsToCurrent 是否已存在指向"当前 source"tmux 入口绝对路径的精确 run-shell 行
+export function checkTmuxConf({ tmuxEntry = TMUX_ENTRY } = {}) {
   const conf = join(homedir(), '.tmux.conf');
-  if (!existsSync(conf)) return { exists: false, referenced: false };
+  if (!existsSync(conf)) return { exists: false, referenced: false, pointsToCurrent: false };
   try {
     const raw = readFileSync(conf, 'utf8');
     const referenced = /tmux-ai-hooks-status|tmux-claude-hooks-status/.test(raw);
-    return { exists: true, referenced };
+    const pointsToCurrent = raw.includes(runShellDeclarationLine(tmuxEntry));
+    return { exists: true, referenced, pointsToCurrent };
   } catch {
-    return { exists: true, referenced: false };
+    return { exists: true, referenced: false, pointsToCurrent: false };
   }
 }

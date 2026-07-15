@@ -1,2 +1,7 @@
 .DS_Store
 node_modules/
+
+# npm prepack 打包时从仓库根复制进 installer/ 的临时产物（postpack 自动清理）
+installer/scripts/
+installer/tmux-ai-hooks-status.tmux
+

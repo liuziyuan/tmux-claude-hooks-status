@@ -1,4 +1,10 @@
-// purge.js — 完整卸载编排：monitor stop + 清聚合状态 + 删软链（不删仓库/不动 conf/不 kill-server）
+// purge.js — 完整卸载编排：monitor stop + 清聚合状态 + 清理历史遗留软链
+// （不删仓库/不动 .tmux.conf/不 kill-server）
+//
+// 主加载路径已改为 .tmux.conf 的 run-shell（见 tmuxconf.js），不再依赖软链；
+// removeSymlinks() 仅用于清理旧版本遗留在 ~/.tmux/plugins/ 下的软链
+// （canonical 名 + 历史遗留的 tmux-claude-hooks-status 旧名）。
+// 移除 .tmux.conf 里的声明属破坏性操作，与 kill-server 一样只在 TUI 打印手动指引。
 import { execa } from 'execa';
 import { rmSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';

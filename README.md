@@ -6,28 +6,34 @@ A tmux plugin that displays AI CLI (Claude Code / Codex) status in the tmux stat
 
 ## Quick Start (Interactive CLI)
 
-For a full repository-backed installation, clone the plugin and start its TUI (Node.js 18+ is required to launch the TUI):
+Install the published TUI globally with npm (Node.js 18+ required to run it; the plugin's `scripts/` and tmux entry point are bundled inside the npm package, so no repository checkout is required for this path):
 
 ```bash
-git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git ~/.local/share/tmux-ai-hooks-status
-cd ~/.local/share/tmux-ai-hooks-status/installer
-npm install
-npm start
+npm install -g tmuxclihook
+tmuxclihook
 ```
 
-Use the menus to check or repair environment dependencies, create the tmux plugin symlink, and install Claude Code / Codex hooks. After the plugin is loaded in tmux, reopen the same TUI with:
+Use the menus to check or repair environment dependencies, install/uninstall/repair Claude Code / Codex / opencode hooks, and integrate the plugin into `~/.tmux.conf` (a `run-shell` line pointing at the globally installed package — no TPM symlink needed). After tmux has loaded the plugin, reopen the same TUI with:
 
 ```text
 prefix + I
 ```
 
-The published `npx tmuxclihook` entry can run environment and AI CLI checks, but repository-backed hook and symlink operations require a checkout containing the root `scripts/` directory.
+`npx tmuxclihook` only runs environment and AI CLI checks reliably: its temporary cache directory is cleaned up after each invocation, so any hooks or tmux integration written during that run would point at a path that no longer exists. Use `npm install -g` for anything persistent.
+
+**Developing locally?** Point the TUI at a repository checkout instead of the bundled copy, either via the "source management" menu or:
+
+```bash
+TMUXCLIHOOK_SOURCE=/path/to/your/checkout tmuxclihook
+```
+
+Hook installation and tmux integration will then write paths under that checkout, so edits take effect immediately without republishing. Switching the source does not retroactively rewrite already-installed hooks or `.tmux.conf` — rerun "Install hooks" / "tmux integration" after switching.
 
 The environment Doctor can install missing Homebrew formulas and upgrade outdated formulas that are already managed by Homebrew. It never installs Homebrew, never changes unmanaged installations, and does not automatically install or upgrade Claude Code or Codex CLI. Every repair requires selection and is followed by a full re-check.
 
 ## Quick Hook Uninstall
 
-Open the TUI with `prefix + I` (or `npm start` in `installer/`) and choose **Uninstall hooks**. For complete plugin removal, including tmux configuration and the plugin link, see [`AI_UNINSTALL.md`](AI_UNINSTALL.md). The compatibility document is retained for non-interactive and recovery workflows.
+Open the TUI with `prefix + I` (or `tmuxclihook` / `npm start` in `installer/`) and choose **Uninstall hooks**. For complete plugin removal, including tmux configuration and the plugin link, see [`AI_UNINSTALL.md`](AI_UNINSTALL.md). The compatibility document is retained for non-interactive and recovery workflows.
 
 ## Manual Installation
 
@@ -191,5 +197,5 @@ Prefix is `Ctrl+a` (press and release, then press the key).
 | `prefix + M-u` | Uninstall Codex hooks |
 | `prefix + C-p` | Install opencode plugin |
 | `prefix + M-p` | Uninstall opencode plugin |
-| `prefix + I` | TPM install all plugins |
+| `prefix + I` | Open the interactive TUI installer |
 | `prefix + r` | Reload config |
