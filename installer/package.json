@@ -28,6 +28,7 @@
     "tmux",
     "claude-code",
     "codex",
+    "opencode",
     "hooks",
     "installer",
     "tui"

@@ -1,6 +1,6 @@
 # tmux-ai-status 安装器
 
-`tmuxclihook` 是 tmux-ai-hooks-status 的交互式 TUI，负责环境侦测/修复、AI CLI 侦测、hooks 装卸修，以及 TPM 软链校验。启动 TUI 本身需要 Node.js 18+；它不能在 Node.js 缺失时自举运行。
+`tmuxclihook` 是 tmux-ai-hooks-status 的交互式 TUI，负责环境侦测/修复、AI CLI 侦测、hooks 装卸修、TPM 软链校验/创建，以及完整卸载编排。启动 TUI 本身需要 Node.js 18+；它不能在 Node.js 缺失时自举运行。
 
 ## 运行
 
@@ -24,11 +24,12 @@ hooks 和 tmux 软链操作依赖仓库根目录中的 `scripts/` 与插件入�
 | 菜单项 | 说明 |
 |--------|------|
 | 环境检查 | 侦测 tmux(≥3.1) / jq / bash(任意版本) / node(≥18)，显示 `✓ ready`、`✗ missing`、`⚠ outdated`，并在确认后安全修复 |
-| 侦测 AI CLI | 扫描 Claude Code / Codex，显示版本、最低版本和 hooks 状态；不自动安装或升级 AI CLI |
-| 安装 hooks | 选工具（claude/codex/全部）→ 调 `scripts/install-<tool>-hooks.sh` |
+| 侦测 AI CLI | 扫描 Claude Code / Codex / opencode，显示版本、最低版本和 hooks 状态；不自动安装或升级 AI CLI |
+| 安装 hooks | 选工具（claude/codex/opencode/全部）→ 调 `scripts/install-<tool>-hooks.sh` |
 | 卸载 hooks | 对称卸载本插件 hooks，保留其他工具注册的 hook |
 | 修复 hooks | 完整性检查 → 缺失则重装 |
-| tmux 软链 | 校验 `~/.tmux/plugins/` 是否有指向本仓库的软链（含旧名），缺失可创建 |
+| tmux 软链 | 校验 `~/.tmux/plugins/` 是否有指向本仓库的软链（含旧名），缺失可创建；创建后若 `~/.tmux.conf` 未声明插件，可选追加 `@plugin` 并 `tmux source-file` 重载 |
+| 完整卸载插件 | 停止 Codex monitor、清除聚合状态 `@ai_all_status`、删除插件软链（含旧名，不删仓库）；`.tmux.conf` 删声明与 `tmux kill-server` 因破坏性仅打印手动指引 |
 
 ## 环境自动修复规则
 
