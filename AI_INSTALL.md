@@ -1,364 +1,65 @@
-# tmux-claude-hooks-status AI Install Script
+# tmux-ai-hooks-status 安装兼容入口
 
-This file is a step-by-step installation guide designed for AI agents to execute. The AI should run each bash code block in order.
+> 本文件保留是为了兼容已有 raw GitHub URL 和 AI agent 工作流。新的主安装入口是仓库内的交互式命令行工具，而不是让 AI 逐段执行一份大型安装脚本。
 
-> **Prerequisite**: macOS with Homebrew installed.
+## 推荐：交互式 TUI
 
----
-
-## Step 0: Check Dependencies
-
-Check if tmux, jq, and git are installed. Missing dependencies will be installed in Step 1.
+如果仓库尚未下载（clone 到任意目录即可，安装器自行从自身位置推导仓库根）：
 
 ```bash
-ERRORS=0
-
-# Check tmux
-if command -v tmux &>/dev/null; then
-    TMUX_VERSION=$(tmux -V 2>/dev/null | grep -o '[0-9.]*')
-    echo "[OK] tmux $TMUX_VERSION"
-else
-    echo "[MISSING] tmux not installed"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check jq
-if command -v jq &>/dev/null; then
-    echo "[OK] jq $(jq --version 2>/dev/null)"
-else
-    echo "[MISSING] jq not installed"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check git
-if command -v git &>/dev/null; then
-    echo "[OK] git $(git --version 2>/dev/null | grep -o '[0-9.]*')"
-else
-    echo "[MISSING] git not installed"
-    ERRORS=$((ERRORS + 1))
-fi
-
-if [ "$ERRORS" -gt 0 ]; then
-    echo ""
-    echo "$ERRORS dependency(ies) missing, will install in Step 2."
-else
-    echo ""
-    echo "All dependencies ready."
-fi
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git
+cd tmux-claude-hooks-status/installer
+npm install
+npm start
 ```
 
----
+在 TUI 中依次使用：
 
-## Step 1: Install Missing Dependencies
+1. **环境检查**：检测并按需修复 tmux、jq、bash、Node.js；
+2. **tmux 软链校验**：创建指向本仓库的插件软链，并可按需向 `~/.tmux.conf` 追加 `@plugin` 声明并重载；
+3. **侦测 AI CLI**：查看 Claude Code / Codex / opencode 版本与 hooks 状态；
+4. **安装 hooks**：安装 Claude Code、Codex、opencode 或全部 hooks。
 
-Install missing dependencies via Homebrew. `brew install` is idempotent when already installed.
+插件载入 tmux 后，可以直接按：
+
+```text
+prefix + I
+```
+
+环境 Doctor 仅安装缺失的 Homebrew formula，或升级确认由 Homebrew 管理的过旧 formula。它不会安装 Homebrew、不会修改非 Homebrew 管理的软件，也不会自动安装或升级 Claude Code / Codex CLI；修复后会自动复检。
+
+`npx tmuxclihook` 可独立运行环境与 AI CLI 检查。完整 hooks/软链操作需要包含根目录 `scripts/` 的仓库副本。
+
+## 无 TTY / 故障恢复
+
+以下步骤仅在无法启动 TUI 时使用；正常安装请用 `prefix + I` 或 `npm start`。在仓库根目录执行最小安装流程：
 
 ```bash
-# Install missing dependencies
-PACKAGES=""
-command -v tmux &>/dev/null || PACKAGES="$PACKAGES tmux"
-command -v jq &>/dev/null || PACKAGES="$PACKAGES jq"
-command -v git &>/dev/null || PACKAGES="$PACKAGES git"
+# 必需环境（macOS/Homebrew 示例）
+brew install tmux jq
 
-if [ -n "$PACKAGES" ]; then
-    echo "Installing dependencies:$PACKAGES"
-    brew install $PACKAGES
-else
-    echo "All dependencies installed, skipping."
-fi
+# 创建 TPM 可发现的插件软链
+mkdir -p ~/.tmux/plugins
+ln -sfn "$PWD" ~/.tmux/plugins/tmux-ai-hooks-status
+
+# 安装 hooks（对每个已安装的 AI CLI 运行对应 install-<tool>-hooks.sh）
+bash scripts/install-claude-hooks.sh
+bash scripts/install-codex-hooks.sh
+bash scripts/install-opencode-hooks.sh
 ```
 
----
+然后确保 `~/.tmux.conf` 包含：
 
-## Step 2: Install TPM (Tmux Plugin Manager)
+```tmux
+set -g @plugin 'tmux-ai-hooks-status'
+set -g @plugin 'tmux-plugins/tpm'
+run '~/.tmux/plugins/tpm/tpm'
+```
 
-Clone TPM to `~/.tmux/plugins/tpm` if not already installed.
+重新加载 tmux 配置：
 
 ```bash
-TPM_DIR="$HOME/.tmux/plugins/tpm"
-
-if [ -d "$TPM_DIR" ]; then
-    echo "[OK] TPM already installed at $TPM_DIR"
-else
-    echo "Installing TPM..."
-    mkdir -p "$HOME/.tmux/plugins"
-    git clone https://github.com/tmux-plugins/tpm "$TPM_DIR"
-    echo "[OK] TPM installation complete"
-fi
+tmux source-file ~/.tmux.conf
 ```
 
----
-
-## Step 3: Install tmux-claude-hooks-status Plugin
-
-有两种安装方式：
-
-### 方式 A：符号链接（推荐，适合本地开发）
-
-如果已经有项目源码仓库，直接符号链接到 TPM 目录。这样修改源码后只需 `prefix + r` 重载即可生效，无需手动复制。
-
-```bash
-PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-SOURCE_DIR="$HOME/work/home/tmux-claude-hooks-status"  # 替换为实际路径
-
-if [ -L "$PLUGIN_DIR" ]; then
-    echo "[OK] Plugin symlink already exists -> $(readlink "$PLUGIN_DIR")"
-elif [ -d "$PLUGIN_DIR" ]; then
-    echo "Replacing existing plugin directory with symlink..."
-    rm -rf "$PLUGIN_DIR"
-    ln -s "$SOURCE_DIR" "$PLUGIN_DIR"
-    echo "[OK] Symlink created: $PLUGIN_DIR -> $SOURCE_DIR"
-else
-    ln -s "$SOURCE_DIR" "$PLUGIN_DIR"
-    echo "[OK] Symlink created: $PLUGIN_DIR -> $SOURCE_DIR"
-fi
-```
-
-### 方式 B：Git 克隆（适合生产安装）
-
-从 GitHub 克隆到 TPM 目录。
-
-```bash
-PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-PLUGIN_REPO="https://github.com/liuziyuan/tmux-claude-hooks-status.git"
-
-if [ -d "$PLUGIN_DIR" ] && [ ! -L "$PLUGIN_DIR" ]; then
-    echo "[OK] Plugin already installed at $PLUGIN_DIR"
-else
-    if [ -L "$PLUGIN_DIR" ]; then
-        rm "$PLUGIN_DIR"
-    fi
-    echo "Cloning tmux-claude-hooks-status..."
-    git clone "$PLUGIN_REPO" "$PLUGIN_DIR"
-    echo "[OK] Plugin cloned"
-fi
-```
-
----
-
-## Step 4: Configure .tmux.conf
-
-Safely modify `.tmux.conf`: add plugin declarations required for TPM to load the plugin. Step 4d (pane border config) is optional and will not be executed if you have custom pane border settings.
-
-### 4a: Backup Current Config
-
-```bash
-TMUX_CONF="$HOME/.tmux.conf"
-
-if [ -f "$TMUX_CONF" ]; then
-    BACKUP="${TMUX_CONF}.backup.$(date +%Y%m%d%H%M%S)"
-    cp "$TMUX_CONF" "$BACKUP"
-    echo "Backed up: $BACKUP"
-else
-    # Create minimal config
-    cat > "$TMUX_CONF" << 'TMUX_CONF_EOF'
-# tmux basic config
-set -g prefix C-a
-unbind C-b
-set -g mouse on
-set -g base-index 1
-setw -g pane-base-index 1
-TMUX_CONF_EOF
-    echo "Created new .tmux.conf"
-fi
-```
-
-### 4b: Add Plugin Declarations
-
-```bash
-TMUX_CONF="$HOME/.tmux.conf"
-
-# Check if plugin is already declared
-if grep -q "tmux-claude-hooks-status" "$TMUX_CONF"; then
-    echo "[OK] Plugin declaration already exists in .tmux.conf"
-else
-    # Insert before TPM init
-    if grep -q "set -g @plugin 'tmux-plugins/tpm'" "$TMUX_CONF"; then
-        sed -i '' "/set -g @plugin 'tmux-plugins\/tpm'/i\\
-set -g @plugin 'tmux-claude-hooks-status'
-" "$TMUX_CONF"
-        echo "[OK] Added plugin declaration before TPM init"
-    else
-        # No TPM init found, append
-        echo "" >> "$TMUX_CONF"
-        echo "# tmux-claude-hooks-status plugin" >> "$TMUX_CONF"
-        echo "set -g @plugin 'tmux-claude-hooks-status'" >> "$TMUX_CONF"
-        echo "[OK] Appended plugin declaration"
-    fi
-fi
-```
-
-### 4c: Add TPM Init (if missing)
-
-```bash
-TMUX_CONF="$HOME/.tmux.conf"
-
-# Ensure TPM init block exists and is at the end
-if grep -q "run '~/.tmux/plugins/tpm/tpm'" "$TMUX_CONF"; then
-    echo "[OK] TPM init already exists in .tmux.conf"
-else
-    echo "" >> "$TMUX_CONF"
-    echo "# TPM init (must be at the end)" >> "$TMUX_CONF"
-    echo "set -g @plugin 'tmux-plugins/tpm'" >> "$TMUX_CONF"
-    echo "run '~/.tmux/plugins/tpm/tpm'" >> "$TMUX_CONF"
-    echo "[OK] Added TPM init block"
-fi
-```
-
-### 4d: (Optional) Add Pane Border Config at Session Startup
-
-**⚠️ OPTIONAL STEP** — The plugin automatically configures pane borders when loaded (see `tmux-claude-hooks-status.tmux` lines 17-20). Skip this step if:
-- You have existing pane-border settings you want to preserve
-- You don't need pane borders to appear before plugin initialization (they will appear after the plugin loads)
-
-Only execute this step if you want pane border display to be active at tmux session startup, before the plugin loads.
-
-**Note**: The plugin does NOT modify `status-right`. Claude status is displayed on a separate row via multi-line `status-format`. The user's existing `status-right` is preserved as-is.
-
-```bash
-TMUX_CONF="$HOME/.tmux.conf"
-
-# Only add pane-border config if the user explicitly wants it and doesn't already have custom settings
-if grep -q "pane-border-status\|pane-border-format" "$TMUX_CONF"; then
-    echo "[SKIP] pane-border config already exists (user may have custom settings)"
-    echo "       The plugin will apply default settings when loaded."
-else
-    echo "" >> "$TMUX_CONF"
-    echo "# Pane border display (plugin will also set these at startup)" >> "$TMUX_CONF"
-    echo 'set -g pane-border-status top' >> "$TMUX_CONF"
-    echo 'set -g pane-border-format " #P #{pane_title} "' >> "$TMUX_CONF"
-    echo 'set -g pane-active-border-style "fg=#BD93F9"' >> "$TMUX_CONF"
-    echo 'set -g pane-border-style "fg=#6272A4"' >> "$TMUX_CONF"
-    echo "[OK] Added pane-border config (will be active at session startup)"
-fi
-```
-
----
-
-## Step 5: Register Claude Code Hooks
-
-Run the plugin's `install-hooks.sh` to register hooks in `~/.claude/settings.json`. The script is idempotent.
-
-> **Note**: The plugin automatically registers hooks when loaded via TPM (see `tmux-claude-hooks-status.tmux` line 61). This step is typically redundant but provided for manual installation or troubleshooting if auto-registration fails.
-
-```bash
-PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-
-if [ -f "$PLUGIN_DIR/scripts/install-claude-hooks.sh" ]; then
-    bash "$PLUGIN_DIR/scripts/install-claude-hooks.sh"
-else
-    echo "[ERROR] install-claude-hooks.sh not found: $PLUGIN_DIR/scripts/install-claude-hooks.sh"
-    echo "Make sure the plugin is properly installed."
-fi
-```
-
----
-
-## Step 6: Reload tmux and Verify
-
-### 6a: Reload Config
-
-```bash
-# Reload tmux config
-if tmux info &>/dev/null; then
-    tmux source-file ~/.tmux.conf 2>/dev/null && echo "[OK] tmux config reloaded"
-
-    # Run plugin entry point to ensure immediate effect
-    PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-    if [ -f "$PLUGIN_DIR/tmux-claude-hooks-status.tmux" ]; then
-        bash "$PLUGIN_DIR/tmux-claude-hooks-status.tmux" 2>/dev/null && echo "[OK] Plugin initialized"
-    fi
-else
-    echo "[WARN] No tmux server running. Start tmux and run: prefix + I"
-fi
-```
-
-### 6b: Verify Installation
-
-```bash
-PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-ERRORS=0
-
-echo ""
-echo "========== Installation Verification =========="
-
-# 1. Plugin directory
-if [ -d "$PLUGIN_DIR" ]; then
-    echo "[OK] Plugin directory exists"
-else
-    echo "[FAIL] Plugin directory missing: $PLUGIN_DIR"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# 2. Plugin entry point
-if [ -f "$PLUGIN_DIR/tmux-claude-hooks-status.tmux" ]; then
-    echo "[OK] Plugin entry point exists"
-else
-    echo "[FAIL] Plugin entry point missing"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# 3. Hook script
-if [ -f "$PLUGIN_DIR/scripts/tmux-claude-status" ]; then
-    echo "[OK] Hook script exists"
-else
-    echo "[FAIL] Hook script missing"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# 4. Hooks registration
-if [ -f "$SETTINGS_FILE" ] && command -v python3 &>/dev/null; then
-    HOOK_COUNT=$(python3 -c "
-import json
-with open('$SETTINGS_FILE', 'r') as f:
-    data = json.loads(f.read(), strict=False)
-target = '$PLUGIN_DIR/scripts/tmux-claude-status'
-count = sum(1 for groups in data.get('hooks', {}).values() for g in groups for h in g.get('hooks', []) if h.get('command', '').startswith(target))
-print(count)
-")
-    if [ "${HOOK_COUNT:-0}" -gt 0 ]; then
-        echo "[OK] $HOOK_COUNT hooks registered"
-    else
-        echo "[FAIL] No hooks found"
-        ERRORS=$((ERRORS + 1))
-    fi
-else
-    echo "[WARN] Cannot check hooks registration"
-fi
-
-# 5. .tmux.conf declaration
-if grep -q "tmux-claude-hooks-status" ~/.tmux.conf 2>/dev/null; then
-    echo "[OK] Plugin declared in .tmux.conf"
-else
-    echo "[FAIL] Plugin not declared in .tmux.conf"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# 6. Live tmux test
-if tmux info &>/dev/null; then
-    echo '{}' | bash "$PLUGIN_DIR/scripts/tmux-claude-status" SessionStart 2>/dev/null
-    STATUS=$(tmux show-option -g @ai_all_status 2>/dev/null)
-    if [ -n "$STATUS" ]; then
-        echo "[OK] Live tmux status: $STATUS"
-    else
-        echo "[WARN] Cannot get tmux status (may need tmux restart)"
-    fi
-else
-    echo "[SKIP] No running tmux server"
-fi
-
-echo ""
-if [ "$ERRORS" -eq 0 ]; then
-    echo "========== Installation Successful =========="
-    echo ""
-    echo "Keyboard shortcuts:"
-    echo "  prefix + C-h  — Install hooks"
-    echo "  prefix + C-u  — Uninstall hooks"
-    echo "  prefix + I    — TPM install all plugins"
-    echo "  prefix + r    — Reload config"
-else
-    echo "========== $ERRORS check(s) failed =========="
-    echo "Review the output above and fix manually."
-fi
-```
+完整配置说明和验证步骤见 `README.md` / `README_ZH.md`。

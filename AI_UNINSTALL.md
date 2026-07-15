@@ -1,312 +1,68 @@
-# tmux-claude-hooks-status AI Uninstall Script
+# tmux-ai-hooks-status 卸载兼容入口
 
-This file is a step-by-step uninstallation guide designed for AI agents to execute. The AI should run each bash code block in order.
+> 本文件保留是为了兼容已有 raw GitHub URL、无 TTY 环境和故障恢复。日常 hooks 卸载请优先使用交互式 TUI。
 
-> **Note**: This script only removes runtime state and configuration. The plugin directory is preserved.
+## 推荐：通过 TUI 卸载 Hooks
 
----
+在已加载插件的 tmux 中按：
 
-## Step 0: Locate Plugin Directory
-
-Determine the plugin installation path. It may be a TPM clone or a local development copy.
-
-```bash
-# Try TPM path first, then fall back to common locations
-if [ -d "$HOME/.tmux/plugins/tmux-claude-hooks-status" ]; then
-    PLUGIN_DIR="$HOME/.tmux/plugins/tmux-claude-hooks-status"
-elif [ -d "$HOME/work/home/tmux-claude-hooks-status" ]; then
-    PLUGIN_DIR="$HOME/work/home/tmux-claude-hooks-status"
-else
-    echo "[ERROR] Plugin directory not found"
-    echo "Searched:"
-    echo "  - $HOME/.tmux/plugins/tmux-claude-hooks-status"
-    echo "  - $HOME/work/home/tmux-claude-hooks-status"
-fi
-
-echo "Plugin dir: ${PLUGIN_DIR:-NOT FOUND}"
+```text
+prefix + I
 ```
 
----
-
-## Step 1: Unregister Claude Code Hooks
-
-Remove all hook entries pointing to this plugin from `~/.claude/settings.json`.
+或者从仓库运行：
 
 ```bash
-SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-
-if [ -f "$PLUGIN_DIR/scripts/install-claude-hooks.sh" ]; then
-    bash "$PLUGIN_DIR/scripts/install-claude-hooks.sh" uninstall
-else
-    # Fallback: remove hooks manually via jq
-    if command -v jq &>/dev/null && [ -f "$SETTINGS_FILE" ]; then
-        HOOK_SCRIPT="$PLUGIN_DIR/scripts/tmux-claude-status"
-        for EVENT in SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest Notification Stop StopFailure; do
-            UPDATED=$(jq --arg event "$EVENT" --arg hook_script "$HOOK_SCRIPT" '
-                .hooks[$event] = [
-                    .hooks[$event][]?
-                    | .hooks = [.hooks[] | select(.command | startswith($hook_script) | not)]
-                ] | .hooks[$event] = [.hooks[$event][] | select(.hooks | length > 0)]
-            ' "$SETTINGS_FILE")
-            echo "$UPDATED" > "$SETTINGS_FILE"
-        done
-        echo "[OK] Hooks removed manually"
-    else
-        echo "[WARN] Cannot remove hooks (jq or settings.json not found)"
-    fi
-fi
+cd installer
+npm start
 ```
 
----
+选择 **卸载 hooks**，再选择 Claude Code、Codex、opencode 或全部。该操作只移除本插件注册的 hooks，保留其他工具的 hooks。
 
-## Step 2: Kill Background Watcher Processes
+TUI 另有 **完整卸载插件** 项：一步停止 Codex monitor、清除聚合状态 `@ai_all_status`、删除插件软链（不删仓库）；`.tmux.conf` 声明与 `tmux kill-server` 因破坏性仅打印指引，需手动执行。
 
-Terminate any running watcher processes spawned by the plugin.
+## 无 TTY：卸载 Hooks
+
+以下步骤仅在无法启动 TUI 时使用。在仓库根目录执行（对每个已安装的 AI CLI 运行对应 uninstall）：
 
 ```bash
-KILLED=0
-for f in /tmp/claude-watcher-*.pid; do
-    [ -f "$f" ] || continue
-    PID=$(cat "$f" 2>/dev/null | cut -d: -f1)
-    if [ -n "$PID" ] && kill "$PID" 2>/dev/null; then
-        echo "[OK] Killed watcher PID $PID"
-        KILLED=$((KILLED + 1))
-    fi
-    rm -f "$f"
-done
-
-if [ "$KILLED" -eq 0 ]; then
-    echo "[OK] No watcher processes found"
-fi
-
-# Clean up temporary permission mode and pretool-id files
-rm -f /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null
-TEMP_COUNT=$(ls /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null | wc -l)
-if [ "$TEMP_COUNT" -eq 0 ]; then
-    echo "[OK] Cleaned permission mode files"
-fi
-
-# Clean up pane ID persistence files
-rm -f /tmp/claude-pane-* 2>/dev/null
-
-# Clean up temporary bind configuration files (created during plugin reload)
-rm -f /tmp/tmux-claude-bind-*.conf 2>/dev/null
-BIND_COUNT=$(ls /tmp/tmux-claude-bind-*.conf 2>/dev/null | wc -l)
-if [ "$BIND_COUNT" -eq 0 ]; then
-    echo "[OK] Cleaned temporary bind config files"
-fi
+bash scripts/install-claude-hooks.sh uninstall
+bash scripts/install-codex-hooks.sh uninstall
+bash scripts/install-opencode-hooks.sh uninstall
 ```
 
----
+## 完整移除插件（无 TTY）
 
-## Step 3: Clean tmux Options
+以下步骤仅在无法启动 TUI 时使用；正常请用 TUI 的「完整卸载插件」项。TUI 管理 hooks 与运行态，不会擅自删除用户的 tmux 配置或仓库。完成 hooks 卸载后：
 
-Remove all tmux user options and settings set by the plugin. Restore status bar to single line.
+1. 从 `~/.tmux.conf` 删除本插件声明：
 
-```bash
-if tmux info &>/dev/null; then
-    # Remove plugin-specific user options
-    tmux set-option -gu @ai_all_status 2>/dev/null
-    tmux set-option -gu @claude_status 2>/dev/null
-    tmux set-option -gu @claude_hooks_reload_registered 2>/dev/null
-    
-    # Remove custom configuration options (set by plugin at startup)
-    tmux set-option -gu @claude_hooks_status_color 2>/dev/null
-    tmux set-option -gu @claude_hooks_idle_icon 2>/dev/null
-    tmux set-option -gu @claude_hooks_busy_icon 2>/dev/null
-    tmux set-option -gu @claude_hooks_auth_icon 2>/dev/null
+   ```tmux
+   set -g @plugin 'tmux-ai-hooks-status'
+   ```
 
-    # Remove Claude status format row — find which row the plugin occupies
-    STATUS_VAL=$(tmux show-option -gv status 2>/dev/null || echo "on")
-    case "$STATUS_VAL" in
-        on|off) CLAUDE_ROW="" ;;
-        [0-9]*)
-            # status is multi-line, check last row for plugin signature
-            LAST_ROW=$((STATUS_VAL - 1))
-            LAST_FMT=$(tmux show-option -gv "status-format[${LAST_ROW}]" 2>/dev/null || true)
-            if echo "$LAST_FMT" | grep -q "@ai_all_status"; then
-                CLAUDE_ROW=$LAST_ROW
-            fi
-            ;;
-    esac
+   旧配置中如果使用 `tmux-claude-hooks-status`，也一并删除对应声明。
 
-    # Remove the Claude status row and restore single-line status
-    if [ -n "$CLAUDE_ROW" ]; then
-        tmux set-option -gu "status-format[${CLAUDE_ROW}]" 2>/dev/null
-        tmux set-option -g status on 2>/dev/null
-        echo "[OK] Removed Claude status row, restored single-line status bar"
-    fi
+2. 停止 Codex lifecycle monitor，并清除聚合状态：
 
-    # Clear per-pane status options
-    while IFS= read -r pane_id; do
-        tmux set-option -pqt "$pane_id" @claude_pane_status 2>/dev/null
-    done < <(tmux list-panes -a -F "#{pane_id}" 2>/dev/null)
+   ```bash
+   scripts/tmux-ai-monitor stop 2>/dev/null || true
+   tmux set-option -gu @ai_all_status 2>/dev/null || true
+   ```
 
-    echo "[OK] tmux options cleaned"
-else
-    echo "[SKIP] No running tmux server"
-fi
-```
+3. 删除插件软链（不会删除实际仓库）：
 
----
+   ```bash
+   rm -f ~/.tmux/plugins/tmux-ai-hooks-status
+   rm -f ~/.tmux/plugins/tmux-claude-hooks-status
+   ```
 
-## Step 4: Remove Plugin Configuration from ~/.tmux.conf
+4. 重新启动 tmux server，使插件注册的状态行、hooks 和按键完全卸载：
 
-Remove all lines related to this plugin from `.tmux.conf`.
+   ```bash
+   tmux kill-server
+   ```
 
-```bash
-TMUX_CONF="$HOME/.tmux.conf"
+   `tmux kill-server` 会关闭当前 tmux 中的所有 session；请先保存工作。如果不希望立即关闭，删除配置后可等到下次自然重启 tmux 时生效。
 
-if [ ! -f "$TMUX_CONF" ]; then
-    echo "[SKIP] No .tmux.conf found"
-else
-    CHANGES=0
-
-    # Remove plugin declaration line: set -g @plugin 'tmux-claude-hooks-status'
-    if grep -q "tmux-claude-hooks-status" "$TMUX_CONF"; then
-        sed -i '' '/tmux-claude-hooks-status/d' "$TMUX_CONF"
-        CHANGES=$((CHANGES + 1))
-        echo "[OK] Removed plugin declaration"
-    fi
-
-    # Remove pane-border config (if user added from Step 4d of installation)
-    # This section removes all 4 lines of pane-border configuration if they exist
-    if grep -q "pane-border-status\|pane-border-format\|pane-active-border-style\|pane-border-style" "$TMUX_CONF"; then
-        sed -i '' '/^[[:space:]]*set -g pane-border-status\|^[[:space:]]*set -g pane-border-format\|^[[:space:]]*set -g pane-active-border-style\|^[[:space:]]*set -g pane-border-style/d' "$TMUX_CONF"
-        CHANGES=$((CHANGES + 1))
-        echo "[OK] Removed pane-border configuration"
-    fi
-
-    # Remove plugin comment line if it exists (e.g., "# Pane border display")
-    if grep -q "# Pane border display" "$TMUX_CONF"; then
-        sed -i '' '/# Pane border display/d' "$TMUX_CONF"
-        CHANGES=$((CHANGES + 1))
-        echo "[OK] Removed pane-border comment"
-    fi
-
-    # Clean up consecutive blank lines (max 1 blank line between sections)
-    awk 'BEGIN{blank=0} /^[[:space:]]*$/{blank++; if(blank<=1) print; next} {blank=0; print}' "$TMUX_CONF" > "${TMUX_CONF}.tmp" && mv "${TMUX_CONF}.tmp" "$TMUX_CONF"
-
-    if [ "$CHANGES" -eq 0 ]; then
-        echo "[OK] No plugin-related lines found in .tmux.conf"
-    fi
-fi
-```
-
----
-
-## Step 5: Reload tmux Configuration
-
-Apply the cleaned configuration to the running tmux server.
-
-```bash
-if tmux info &>/dev/null; then
-    tmux source-file ~/.tmux.conf 2>/dev/null && echo "[OK] tmux config reloaded"
-else
-    echo "[SKIP] No running tmux server, config will take effect on next start"
-fi
-```
-
----
-
-## Step 6: Verify Uninstallation
-
-Confirm all plugin traces have been removed.
-
-```bash
-SETTINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-ERRORS=0
-
-echo ""
-echo "========== Uninstallation Verification =========="
-
-# 1. Hooks removed from settings.json
-if [ -f "$SETTINGS_FILE" ] && command -v jq &>/dev/null; then
-    REMAINING=$(jq --arg prefix "$PLUGIN_DIR" '
-        [.hooks // {} | to_entries[] | select(.value != null)]
-        | map(select(.value | flatten | map(.command // "") | map(startswith($prefix)) | any))
-        | length
-    ' "$SETTINGS_FILE" 2>/dev/null || echo "0")
-    if [ "${REMAINING:-0}" -eq 0 ]; then
-        echo "[OK] No plugin hooks remaining in settings.json"
-    else
-        echo "[FAIL] $REMAINING hook(s) still registered"
-        ERRORS=$((ERRORS + 1))
-    fi
-else
-    echo "[WARN] Cannot verify hooks (jq or settings.json missing)"
-fi
-
-# 2. No watcher processes
-WATCHER_COUNT=$(ls /tmp/claude-watcher-*.pid 2>/dev/null | wc -l | tr -d ' ')
-if [ "$WATCHER_COUNT" -eq 0 ]; then
-    echo "[OK] No watcher processes"
-else
-    echo "[FAIL] $WATCHER_COUNT watcher PID file(s) remain"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# 3. tmux user options cleared
-if tmux info &>/dev/null; then
-    OPT_STATUS=$(tmux show-option -g @ai_all_status 2>/dev/null)
-    if [ -z "$OPT_STATUS" ]; then
-        echo "[OK] @ai_all_status cleared"
-    else
-        echo "[FAIL] @ai_all_status still set: $OPT_STATUS"
-        ERRORS=$((ERRORS + 1))
-    fi
-
-    STATUS_VAL=$(tmux show-option -gv status 2>/dev/null)
-    case "$STATUS_VAL" in
-        on|1) echo "[OK] Status bar is single-line" ;;
-        *)   echo "[WARN] Status bar value: $STATUS_VAL (may need manual fix)" ;;
-    esac
-else
-    echo "[SKIP] No running tmux server"
-fi
-
-# 4. .tmux.conf cleaned
-TMUX_CONF="$HOME/.tmux.conf"
-if [ -f "$TMUX_CONF" ]; then
-    if grep -q "tmux-claude-hooks-status\|pane-border-status.*top\|pane-border-format.*@claude" "$TMUX_CONF" 2>/dev/null; then
-        echo "[FAIL] Plugin references still in .tmux.conf"
-        grep -n "tmux-claude-hooks-status\|pane-border" "$TMUX_CONF"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo "[OK] No plugin references in .tmux.conf"
-    fi
-fi
-
-# 5. Temporary files cleaned
-TEMP_PERMISSION=$(ls /tmp/claude-*-permission /tmp/claude-*-pretool-ids 2>/dev/null | wc -l | tr -d ' ')
-TEMP_BIND=$(ls /tmp/tmux-claude-bind-*.conf 2>/dev/null | wc -l | tr -d ' ')
-TEMP_PANE=$(ls /tmp/claude-pane-* 2>/dev/null | wc -l | tr -d ' ')
-if [ "$TEMP_PERMISSION" -eq 0 ] && [ "$TEMP_BIND" -eq 0 ] && [ "$TEMP_PANE" -eq 0 ]; then
-    echo "[OK] No temporary plugin files remaining"
-else
-    echo "[WARN] Some temporary files remain: permission=$TEMP_PERMISSION, bind=$TEMP_BIND, pane=$TEMP_PANE"
-fi
-
-# 6. Custom tmux options cleaned
-if tmux info &>/dev/null; then
-    CUSTOM_OPTS=""
-    [ -n "$(tmux show-option -g @claude_hooks_status_color 2>/dev/null)" ] && CUSTOM_OPTS="@claude_hooks_status_color "
-    [ -n "$(tmux show-option -g @claude_hooks_idle_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_idle_icon "
-    [ -n "$(tmux show-option -g @claude_hooks_busy_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_busy_icon "
-    [ -n "$(tmux show-option -g @claude_hooks_auth_icon 2>/dev/null)" ] && CUSTOM_OPTS="${CUSTOM_OPTS}@claude_hooks_auth_icon "
-    
-    if [ -z "$CUSTOM_OPTS" ]; then
-        echo "[OK] No custom tmux options remaining"
-    else
-        echo "[WARN] Custom options still set: $CUSTOM_OPTS"
-    fi
-fi
-
-echo ""
-if [ "$ERRORS" -eq 0 ]; then
-    echo "========== Uninstallation Successful =========="
-else
-    echo "========== $ERRORS check(s) failed =========="
-    echo "Review the output above and fix manually."
-fi
-```
+实际仓库目录由用户自行决定是否删除。本卸载流程不会自动删除仓库或其他工具配置。

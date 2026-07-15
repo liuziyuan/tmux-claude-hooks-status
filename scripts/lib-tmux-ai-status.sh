@@ -1,15 +1,50 @@
 #!/bin/bash
 # lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、pane title 监控
-# 被 tmux-claude-status source
-# 调用方需设置: TOOL_ID ("claude")、SESSION_ID（从 hook input 解析）
+# 被 tmux-ai-status source
+# 调用方需设置: TOOL_ID ("claude" | "codex")、SESSION_ID（从 hook input 解析）
 
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_STATUS_DIR="/tmp/claude-status"
+_STATUS_DIR="/tmp/ai-status"
 STATUS_COLOR="#F1FA8C"
 
 # --- 日志模块 ---
 source "${_LIB_DIR}/lib-tmux-ai-log.sh"
+
+# --- 工具适配器加载 ---
+# 每个 AI CLI 的差异（事件集/hooks路径/格式/完整性/进程名/SessionEnd/SessionStart时机）
+# 抽到 adapters/<TOOL_ID>.sh，核心引擎读 adapter 暴露的变量/函数分派，不再写 case "$TOOL_ID"。
+# 加新 CLI = 加一个 adapters/<tool>.sh，核心零改动。
+_ADAPTER_DIR="${_LIB_DIR}/adapters"
+_load_adapter() {
+    local tool="${TOOL_ID:-claude}"
+    local adapter="${_ADAPTER_DIR}/${tool}.sh"
+    if [ -f "$adapter" ]; then
+        source "$adapter"
+    else
+        _ai_log "ADAPTER: 未找到 ${adapter}，回退默认（claude）"
+        [ -f "${_ADAPTER_DIR}/claude.sh" ] && source "${_ADAPTER_DIR}/claude.sh"
+    fi
+}
+_load_adapter
+
+# 跨 adapter 汇总所有 AI CLI 的进程名（供 _pane_has_ai_process 识别聚合场景下的
+# 任意工具进程——聚合/清理路径需认全部工具，不止当前 TOOL_ID）。扫 adapters/*.sh
+# 提取 ADAPTER_PROCESS_NAMES。惰性求值，缓存到 _ALL_AI_PROCESS_NAMES。
+_ALL_AI_PROCESS_NAMES=""
+_collect_ai_process_names() {
+    [ -n "$_ALL_AI_PROCESS_NAMES" ] && { echo "$_ALL_AI_PROCESS_NAMES"; return; }
+    local names="" f n
+    for f in "${_ADAPTER_DIR}"/*.sh; do
+        [ -f "$f" ] || continue
+        # 提取 ADAPTER_PROCESS_NAMES="..." 的值（不 source，避免副作用）
+        n=$(sed -n 's/^ADAPTER_PROCESS_NAMES="\([^"]*\)".*/\1/p' "$f" 2>/dev/null)
+        [ -n "$n" ] && names="$names $n"
+    done
+    # 去重
+    _ALL_AI_PROCESS_NAMES=$(echo "$names" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    echo "$_ALL_AI_PROCESS_NAMES"
+}
 
 # --- Per-pane 目录 ---
 # 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
@@ -75,13 +110,31 @@ _clear_pane_id() {
 }
 
 # --- 状态聚合 ---
-# 扫描所有 attached session 的 pane，读取 @claude_pane_status，写入 @ai_all_status
+# 扫描所有 attached session 的 pane，读取 @ai_pane_status，写入 @ai_all_status
+#
+# 空窗期补 idle：codex 的 SessionStart hook 延迟到首个 turn 才触发（上游 run_pending_
+# session_start_hooks 设计），空闲蹲在提示符时插件收不到任何事件 → 无 @ai_pane_status。
+# 用 pane_current_command 兜底：前台命令是 codex/claude 但无显式状态时，显示 idle `-`。
+# 纯显示，不落 @ai_pane_status（避免污染 pending/cleanup 逻辑）。零进程扫描。
 build_all_status() {
     ALL=""
     cur_sess=""
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached; do
+    local _ai_names
+    _ai_names=$(_collect_ai_process_names)
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _last cur_cmd; do
         local pane_status="$claude_status"
-        [ -n "$pane_status" ] || continue
+        if [ -z "$pane_status" ]; then
+            # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle。
+            # 进程名集合从所有 adapter 汇总，前缀匹配（codex-aarch64-* 等）。
+            local _cmd_base _n _is_ai=0
+            _cmd_base=$(basename "$cur_cmd" 2>/dev/null)
+            for _n in $_ai_names; do
+                case "$_cmd_base" in
+                    "$_n"|"$_n"-*|"$_n"_*) _is_ai=1; break ;;
+                esac
+            done
+            [ "$_is_ai" = "1" ] && pane_status="-" || continue
+        fi
         local session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
         local panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
         local status_block
@@ -99,7 +152,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@claude_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_last_attached}|#{pane_current_command}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
@@ -244,25 +297,38 @@ _new_session_owns_pane() {
         # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
         mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
-        [ "$age" -ge 300 ] && ! _pane_has_claude_process "$TMUX_PANE" && continue
+        [ "$age" -ge 300 ] && ! _pane_has_ai_process "$TMUX_PANE" && continue
         return 0
     done
     return 1
 }
 
 # --- 进程树检查 ---
-# BFS 遍历 pane 的进程树，检查是否有包含 "claude" 的命令
-_pane_has_claude_process() {
+# BFS 遍历 pane 的进程树，检查是否有 AI CLI 进程。
+# 进程名集合从所有 adapter 的 ADAPTER_PROCESS_NAMES 汇总（_collect_ai_process_names），
+# 前缀匹配（codex 二进制常为 codex-aarch64-* 等带后缀名）。
+_pane_has_ai_process() {
     local pane_id="$1"
     local pane_pid
-    pane_pid=$(tmux list-panes -t "$pane_id" -F "#{pane_pid}" 2>/dev/null)
+    # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
+    # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
+    # 邻近 pane 的 AI 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
+    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
+        | awk -v id="$pane_id" '$1==id{print $2; exit}')
     [ -z "$pane_pid" ] && return 1
+    local ai_names
+    ai_names=$(_collect_ai_process_names)
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            local cmd
+            local cmd base name
             cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-            [ "$(basename "$cmd" 2>/dev/null)" = "claude" ] && return 0
+            base=$(basename "$cmd" 2>/dev/null)
+            for name in $ai_names; do
+                case "$base" in
+                    "$name"|"$name"-*|"$name"_*) return 0 ;;
+                esac
+            done
             local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
@@ -289,7 +355,7 @@ _is_pane_session_dead() {
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
-    ! _pane_has_claude_process "$pane_id"
+    ! _pane_has_ai_process "$pane_id"
 }
 
 # --- 孤儿状态清理（_refresh 用）---
@@ -312,22 +378,22 @@ _cleanup_stale_panes() {
                 local pane_dir="${_STATUS_DIR}/${sanitized}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 elif _is_pane_session_dead "$pane_id"; then
                     _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_claude_process "$pane_id"; then
-                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no claude process)"
-                    tmux set-option -pt "$pane_id" @claude_pane_status "" 2>/dev/null || true
+                if ! _pane_has_ai_process "$pane_id"; then
+                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                 fi
                 ;;
         esac
-    done < <(tmux list-panes -a -F "#{pane_id}|#{@claude_pane_status}" 2>/dev/null)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}" 2>/dev/null)
 
     # 清理孤儿目录：目录存在但对应 pane 已不在 tmux 中
     local all_pane_ids
@@ -369,26 +435,23 @@ _maybe_cleanup_stale() {
     echo "$now" > "$marker"
 }
 
-# Hooks 完整性检查：10 个事件中必须都注册了 tmux-claude-status hook
-# 缺失 → 返回 1（settings.json 被外部应用覆盖时会发生）
+# Hooks 完整性检查：委托给当前 adapter（adapter_check_integrity）。
+# 各工具的路径/格式/事件数判定在 adapters/<tool>.sh 中声明，核心不再 case 分派。
+# 缺失 → 返回 1（配置被外部应用覆盖时会发生）。
 _check_hooks_integrity() {
-    local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-    [ -f "$settings_file" ] || return 1
-    local registered
-    registered=$(jq '
-        .hooks as $h |
-        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
-         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
-        | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-claude-status"))))
-        | length
-    ' "$settings_file" 2>/dev/null)
-    [ "${registered:-0}" -ge 10 ]
+    if declare -f adapter_check_integrity >/dev/null 2>&1; then
+        adapter_check_integrity
+    else
+        # adapter 未加载（异常）→ 保守视为完整，避免误触发重装
+        return 0
+    fi
 }
 
-# 兜底自修复：tmux 端事件路径调用，settings.json 被外部覆盖时自动重装。
+# 兜底自修复：tmux 端事件路径调用，配置被外部覆盖时自动重装。
 # 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
+# 安装器由 adapter 声明（ADAPTER_INSTALLER）。
 _maybe_repair_hooks() {
-    local marker="${_STATUS_DIR}/.hooks-repair-ts"
+    local marker="${_STATUS_DIR}/.hooks-repair-${TOOL_ID:-claude}-ts"
     local now
     now=$(date +%s)
     [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
@@ -398,8 +461,9 @@ _maybe_repair_hooks() {
         [ $((now - ${last:-0})) -lt 60 ] && return
     fi
     echo "$now" > "$marker"
+    local installer="${ADAPTER_INSTALLER}"
     if ! _check_hooks_integrity; then
-        _ai_log "REPAIR: hooks integrity check failed, reinstalling"
-        "${_LIB_DIR}/install-claude-hooks.sh" >/dev/null 2>&1 || true
+        _ai_log "REPAIR: hooks integrity check failed, reinstalling (${TOOL_ID:-claude})"
+        [ -x "$installer" ] && "$installer" >/dev/null 2>&1 || true
     fi
 }

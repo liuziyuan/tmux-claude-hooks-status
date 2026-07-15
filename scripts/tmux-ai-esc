@@ -1,18 +1,19 @@
 #!/bin/bash
-# tmux-claude-esc: Esc 拒绝检测 — 激活态 pane 状态为 !/? 时设为 -
+# tmux-ai-esc: Esc 拒绝检测 — 激活态 pane 状态为 !/? 时设为 -
 # 被 tmux bind-key -n Escape 调用
+# pending 路径只基于 pane_id（与工具无关），TOOL_ID 仅作日志标签
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANE_ID=$(tmux display-message -p "#{pane_id}")
-STATUS=$(tmux display-message -pt "$PANE_ID" -p '#{@claude_pane_status}' 2>/dev/null)
+STATUS=$(tmux display-message -pt "$PANE_ID" -p '#{@ai_pane_status}' 2>/dev/null)
 
 case "$STATUS" in
     "!"|"?"|">")
-        TOOL_ID="claude"
+        TOOL_ID="ai"
         TMUX_PANE="$PANE_ID"
         source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
         _clear_pending
-        tmux set-option -pt "$PANE_ID" @claude_pane_status "-"
+        tmux set-option -pt "$PANE_ID" @ai_pane_status "-"
         build_all_status
         tmux set-option -g @ai_all_status "$ALL"
         tmux refresh-client -S

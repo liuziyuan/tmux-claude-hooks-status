@@ -2,27 +2,32 @@
 
 [中文](README_ZH.md)
 
-A tmux plugin that displays Claude Code status in the tmux status bar. It hooks into Claude Code's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line.
+A tmux plugin that displays AI CLI (Claude Code / Codex) status in the tmux status bar. It hooks into each tool's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line. Claude Code and Codex share the same hook semantics (event names, stdin JSON fields), so one core script handles both, keyed by `TOOL_ID` (`claude`/`codex`).
 
-## Quick Start (Auto Install)
+## Quick Start (Interactive CLI)
 
-To install automatically with Claude Code, run:
+For a full repository-backed installation, clone the plugin and start its TUI (Node.js 18+ is required to launch the TUI):
 
-```
-ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_INSTALL.md
-```
-
-This will guide you through the installation step by step.
-
-## Quick Uninstall (AI Auto Uninstall)
-
-To uninstall automatically with Claude Code, run:
-
-```
-ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```bash
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git ~/.local/share/tmux-ai-hooks-status
+cd ~/.local/share/tmux-ai-hooks-status/installer
+npm install
+npm start
 ```
 
-This will remove all plugin configuration, hooks, and temporary files step by step. The plugin directory itself is preserved.
+Use the menus to check or repair environment dependencies, create the tmux plugin symlink, and install Claude Code / Codex hooks. After the plugin is loaded in tmux, reopen the same TUI with:
+
+```text
+prefix + I
+```
+
+The published `npx tmuxclihook` entry can run environment and AI CLI checks, but repository-backed hook and symlink operations require a checkout containing the root `scripts/` directory.
+
+The environment Doctor can install missing Homebrew formulas and upgrade outdated formulas that are already managed by Homebrew. It never installs Homebrew, never changes unmanaged installations, and does not automatically install or upgrade Claude Code or Codex CLI. Every repair requires selection and is followed by a full re-check.
+
+## Quick Hook Uninstall
+
+Open the TUI with `prefix + I` (or `npm start` in `installer/`) and choose **Uninstall hooks**. For complete plugin removal, including tmux configuration and the plugin link, see [`AI_UNINSTALL.md`](AI_UNINSTALL.md). The compatibility document is retained for non-interactive and recovery workflows.
 
 ## Manual Installation
 
@@ -99,6 +104,34 @@ prefix + C-u
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 ```
 
+### 6. Install Codex Hooks (Optional)
+
+Requires **codex ≥ v0.144** (`hooks.json` lifecycle hooks and hook trust).
+
+In tmux, press:
+
+```
+prefix + M-h
+```
+
+The plugin registers 6 synchronous hooks in `~/.codex/hooks.json`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`.
+
+To uninstall:
+
+```
+prefix + M-u
+```
+
+Manual install:
+
+```bash
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
+```
+
+> Codex has no `SessionEnd` event and defers `SessionStart` until the first turn. A tmux-server monitor therefore refreshes once per second: a newly opened Codex pane displays `-`, and `/exit` clears the pane status after the Codex process disappears. `/new` intentionally keeps the previous `✓` until the next prompt because the same Codex process remains alive.
+>
+> The installer only replaces hook groups whose command contains `tmux-ai-status`, preserves all other `hooks.json` content, and may require selecting **Hooks need review → Trust all and continue** on the next Codex launch.
+
 ## Status Symbols and Events
 
 | Event | Status | Color | Meaning |
@@ -126,17 +159,18 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 
 - tmux >= 3.1 (user options, pane-border-status, set-hook, multi-line status-format)
 - jq (for hook installation)
-- bash >= 4.0
+- bash (any version; scripts use no bash-4-only features, macOS built-in 3.2 works. Your interactive shell — zsh/fish/etc. — is irrelevant: hooks run under `#!/bin/bash`, invoked by the AI CLI)
+- Node.js >= 18 (only for the interactive installer; the shell hooks do not require Node.js)
 
 ## Verification
 
 ```bash
 # 1. Trigger a hook manually
-echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-claude-status SessionStart
+echo '{}' | bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/tmux-ai-status claude SessionStart
 tmux show-option -g @ai_all_status
 
 # 2. Check pane status
-tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@claude_pane_status}"
+tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@ai_pane_status}"
 
 # 3. Verify hooks registered
 jq '.hooks | keys' ~/.claude/settings.json
@@ -153,5 +187,9 @@ Prefix is `Ctrl+a` (press and release, then press the key).
 |----------|--------|
 | `prefix + C-h` | Install Claude Code hooks |
 | `prefix + C-u` | Uninstall Claude Code hooks |
+| `prefix + M-h` | Install Codex hooks |
+| `prefix + M-u` | Uninstall Codex hooks |
+| `prefix + C-p` | Install opencode plugin |
+| `prefix + M-p` | Uninstall opencode plugin |
 | `prefix + I` | TPM install all plugins |
 | `prefix + r` | Reload config |
