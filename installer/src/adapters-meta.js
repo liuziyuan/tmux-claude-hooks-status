@@ -42,6 +42,23 @@ export const TOOLS = [
     hookMarker: 'tmux-ai-status codex',
     minHookCount: 6,
   },
+  {
+    id: 'opencode',
+    label: 'opencode',
+    bin: 'opencode',
+    versionArgs: ['--version'],
+    versionRe: /(\d+\.\d+\.\d+)/,
+    minVersion: null,                        // plugin 系统本地文件跳过版本兼容检查
+    // hooksFile 实为 JS/TS plugin 文件（非 JSON hooks 配置），install/uninstall 整文件写入/删除
+    hooksFile: join(
+      process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(HOME, '.config'), 'opencode'),
+      'plugins',
+      'tmux-ai-status.ts'
+    ),
+    installer: join(SCRIPTS_DIR, 'install-opencode-hooks.sh'),
+    hookMarker: 'tmux-ai-status (managed by tmux-ai-hooks-status)',
+    minHookCount: 1,
+  },
 ];
 
 export function toolById(id) {

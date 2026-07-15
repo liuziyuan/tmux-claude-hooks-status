@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tmux-ai-hooks-status: AI CLI (Claude Code / Codex) hooks status for tmux
+# tmux-ai-hooks-status: AI CLI (Claude Code / Codex / opencode) hooks status for tmux
 # TPM entry point
 
 set -o errexit
@@ -58,12 +58,13 @@ if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ];
 fi
 
 # --- 自动注册 Claude hooks（幂等，每次插件加载时确保 hooks 存在）---
-# 注：codex hooks 不自动安装（codex 非人人安装），用 prefix+M-h 手动装。
+# 注：codex/opencode hooks 不自动安装（非人人安装），用 prefix+M-h / prefix+C-p 手动装。
 "${CURRENT_DIR}/scripts/install-claude-hooks.sh" >/dev/null 2>&1 || true
 
 # --- 启动 tmux server 级状态监控器 ---
-# Codex 无 SessionEnd 且 SessionStart 延迟；monitor 负责检测前台 codex 启动和 /exit。
-# 每次 reload 发布新 generation，旧 monitor 自动退出，始终只保留一个有效实例。
+# Codex/opencode 均无 SessionEnd（codex 的 SessionStart 还延迟到首个 turn）；
+# monitor 负责检测前台工具启动和退出。每次 reload 发布新 generation，旧 monitor
+# 自动退出，始终只保留一个有效实例。
 "${CURRENT_DIR}/scripts/tmux-ai-monitor" start >/dev/null 2>&1 || true
 
 # --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
@@ -92,6 +93,10 @@ tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh unin
 tmux bind-key M-h run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh && tmux display 'Codex hooks installed'"
 # prefix + M-u: 卸载 Codex hooks
 tmux bind-key M-u run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh uninstall && tmux display 'Codex hooks removed'"
+# prefix + C-p: 安装 opencode plugin 到 ~/.config/opencode/plugins/
+tmux bind-key C-p run-shell "${CURRENT_DIR}/scripts/install-opencode-hooks.sh && tmux display 'opencode plugin installed'"
+# prefix + M-p: 卸载 opencode plugin
+tmux bind-key M-p run-shell "${CURRENT_DIR}/scripts/install-opencode-hooks.sh uninstall && tmux display 'opencode plugin removed'"
 # prefix + I: 打开交互式 TUI 安装器（环境检查/侦测CLI/装卸修hooks/软链校验）
 # 用 new-window 以获得真实终端（TUI 需交互，不能走后台 run-shell）
 tmux bind-key I new-window -c "${CURRENT_DIR}/installer" "node bin/cli.js"

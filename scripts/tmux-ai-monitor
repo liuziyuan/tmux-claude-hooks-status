@@ -1,15 +1,18 @@
 #!/bin/bash
 # tmux-ai-monitor — tmux server 级单例监控器
 #
-# Codex 没有 SessionEnd hook，且 SessionStart 会延迟到首个 turn。
-# 本监控器每秒根据 pane_current_command / 进程树刷新聚合状态：
-#   - 前台启动 codex、尚无 hook 状态时，显示 idle `-`
-#   - /exit 返回 shell 后，清除残留 pane 状态
-# `/new` 不改变前台进程，因此不会改写已有 `✓`。
+# 部分 AI CLI（codex、opencode）没有 SessionEnd hook，退出无法主动清空状态；codex 的
+# SessionStart 还会延迟到首个 turn。本监控器每秒根据 pane_current_command / 进程树刷新：
+#   - 前台启动此类工具、尚无 hook 状态时，显示 idle `-`
+#   - 退出返回 shell 后，清除残留 pane 状态
+# 泛化实现：扫描 adapters/*.sh 找出 ADAPTER_HAS_SESSION_END="false" 的工具及其
+# ADAPTER_PROCESS_NAMES，逐个工具做生命周期检测——新增同类工具的 adapter 无需改本文件。
+# `/new`（codex）等同工具内会话切换不改变前台进程，因此不会改写已有 `✓`。
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_ADAPTER_DIR="${SCRIPT_DIR}/adapters"
 MODE="${1:-start}"
 MONITOR_INTERVAL="${TMUX_AI_MONITOR_INTERVAL:-1}"
 
@@ -23,33 +26,56 @@ _pane_current_command() {
         | awk -F'|' -v id="$pane_id" '$1==id{print $2; exit}'
 }
 
-_is_codex_command() {
-    local cmd="$1"
-    [ -n "$cmd" ] || return 1
-    local base
-    base=$(basename "$cmd" 2>/dev/null)
+# 无 SessionEnd 的工具名集合（惰性求值缓存）。扫 adapters/*.sh 提取
+# ADAPTER_HAS_SESSION_END="false" 的文件对应的 ADAPTER_PROCESS_NAMES，不 source（避免副作用）。
+_NO_SESSION_END_TOOLS=""
+_collect_no_session_end_tools() {
+    [ -n "$_NO_SESSION_END_TOOLS" ] && { echo "$_NO_SESSION_END_TOOLS"; return; }
+    local names="" f has_end names_in_f
+    for f in "${_ADAPTER_DIR}"/*.sh; do
+        [ -f "$f" ] || continue
+        has_end=$(sed -n 's/^ADAPTER_HAS_SESSION_END="\([^"]*\)".*/\1/p' "$f" 2>/dev/null)
+        [ "$has_end" = "false" ] || continue
+        names_in_f=$(sed -n 's/^ADAPTER_PROCESS_NAMES="\([^"]*\)".*/\1/p' "$f" 2>/dev/null)
+        [ -n "$names_in_f" ] && names="$names $names_in_f"
+    done
+    _NO_SESSION_END_TOOLS=$(echo "$names" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    echo "$_NO_SESSION_END_TOOLS"
+}
+
+# $1=basename 命令 $2=工具进程名（如 codex/opencode）→ 是否前缀匹配
+_is_tool_command() {
+    local base="$1" name="$2"
     case "$base" in
-        codex|codex-*|codex_*) return 0 ;;
+        "$name"|"$name"-*|"$name"_*) return 0 ;;
     esac
     return 1
 }
 
-_pane_has_codex_process() {
-    local pane_id="$1"
-    local current_command
+# 判定 pane 前台命令是否属于给定工具名
+_pane_command_is_tool() {
+    local pane_id="$1" name="$2" current_command
     current_command=$(_pane_current_command "$pane_id")
-    _is_codex_command "$current_command" && return 0
+    [ -n "$current_command" ] || return 1
+    _is_tool_command "$(basename "$current_command" 2>/dev/null)" "$name"
+}
+
+# 判定 pane 进程树内是否仍有该工具进程（前台命令优先，再 BFS 遍历进程树）
+_pane_has_tool_process() {
+    local pane_id="$1" name="$2"
+    _pane_command_is_tool "$pane_id" "$name" && return 0
 
     local pane_pid
     pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
         | awk -v id="$pane_id" '$1==id{print $2; exit}')
     [ -n "$pane_pid" ] || return 1
 
-    local pids="$pane_pid" next="" depth=0 p cmd children
+    local pids="$pane_pid" next="" depth=0 p cmd base children
     while [ "$depth" -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
             cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-            _is_codex_command "$cmd" && return 0
+            base=$(basename "$cmd" 2>/dev/null)
+            _is_tool_command "$base" "$name" && return 0
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
         done
@@ -60,25 +86,30 @@ _pane_has_codex_process() {
     return 1
 }
 
-_monitor_codex_lifecycle() {
-    local pane_id current_command seen sanitized pane_dir
-    while IFS='|' read -r pane_id current_command seen; do
-        if _is_codex_command "$current_command"; then
-            # 只记录“本 monitor 确实见过 Codex”的 pane，避免改变其他 AI CLI 的清理语义。
-            [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" @ai_codex_monitor_seen 1 2>/dev/null || true
-        elif [ "$seen" = "1" ] && ! _pane_has_codex_process "$pane_id"; then
-            # Codex /exit 无 SessionEnd：仅清理由 Codex 生命周期标记过的 pane。
-            tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
-            tmux set-option -pu -t "$pane_id" @ai_codex_monitor_seen 2>/dev/null || true
-            sanitized="${pane_id//[^a-zA-Z0-9]/_}"
-            pane_dir="${_STATUS_DIR}/${sanitized}"
-            rm -rf "$pane_dir" 2>/dev/null
-        fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_codex_monitor_seen}" 2>/dev/null)
+# 对每个无 SessionEnd 的工具名做生命周期检测：前台命令匹配 → 标记见过；
+# 曾标记但前台已切走且进程树也无该工具 → 清空 pane 状态（该工具已退出）。
+# seen 标记按工具名区分（@ai_monitor_seen_<name>），避免多工具互相踩踏清理语义。
+_monitor_no_session_end_lifecycle() {
+    local tools name pane_id current_command sanitized pane_dir
+    tools=$(_collect_no_session_end_tools)
+    [ -n "$tools" ] || return 0
+    for name in $tools; do
+        while IFS='|' read -r pane_id current_command seen; do
+            if [ -n "$current_command" ] && _is_tool_command "$(basename "$current_command" 2>/dev/null)" "$name"; then
+                [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
+            elif [ "$seen" = "1" ] && ! _pane_has_tool_process "$pane_id" "$name"; then
+                tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
+                tmux set-option -pu -t "$pane_id" "@ai_monitor_seen_${name}" 2>/dev/null || true
+                sanitized="${pane_id//[^a-zA-Z0-9]/_}"
+                pane_dir="${_STATUS_DIR}/${sanitized}"
+                rm -rf "$pane_dir" 2>/dev/null
+            fi
+        done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_monitor_seen_${name}}" 2>/dev/null)
+    done
 }
 
 _monitor_tick() {
-    _monitor_codex_lifecycle
+    _monitor_no_session_end_lifecycle
     build_all_status
 
     local previous
