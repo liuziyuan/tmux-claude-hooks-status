@@ -5,7 +5,7 @@
 #
 # ⚠️ Codex 0.144 与 Claude 的关键差异（本 adapter 声明的语义）：
 #   - 无 SessionEnd 事件：codex 退出无任何 hook，pane 内 shell 仍活时 pane-exited 也不触发。
-#     退出残留状态只能靠 _cleanup_stale_panes 的进程树检测（codex 进程消失即清）。
+#     退出状态由 tmux-ai-monitor 跟踪已见 Codex 的 pane，进程消失后精确清除。
 #   - SessionStart 延迟：codex 的 SessionStart hook 延迟到首个 turn 才发（上游
 #     run_pending_session_start_hooks），空闲蹲提示符时无事件。空窗期靠 build_all_status
 #     用 pane_current_command 补 idle `-`。
@@ -22,7 +22,7 @@ ADAPTER_PROCESS_NAMES="codex"
 # hooks 配置：~/.codex/hooks.json（CODEX_HOME 可覆盖）
 ADAPTER_HOOKS_FILE="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 
-# Codex 无 SessionEnd → 退出靠进程检测兜底
+# Codex 无 SessionEnd → 退出由 tmux-ai-monitor 做进程检测
 ADAPTER_HAS_SESSION_END="false"
 # SessionStart 延迟到首个 turn
 ADAPTER_SESSION_START_TIMING="deferred"

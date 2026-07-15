@@ -59,11 +59,18 @@ fi
 
 ---
 
-## Step 2: Kill Background Watcher Processes
+## Step 2: Stop Background Monitor and Watcher Processes
 
-Terminate any running watcher processes spawned by the plugin.
+Stop the tmux-server Codex monitor, then terminate any legacy watcher processes spawned by the plugin.
 
 ```bash
+if tmux info &>/dev/null; then
+    tmux set-option -gu @ai_monitor_generation 2>/dev/null
+    sleep 2
+    tmux set-option -gu @ai_monitor_pid 2>/dev/null
+    echo "[OK] Codex lifecycle monitor stopped"
+fi
+
 KILLED=0
 for f in /tmp/claude-watcher-*.pid; do
     [ -f "$f" ] || continue
@@ -107,6 +114,8 @@ Remove all tmux user options and settings set by the plugin. Restore status bar 
 if tmux info &>/dev/null; then
     # Remove plugin-specific user options
     tmux set-option -gu @ai_all_status 2>/dev/null
+    tmux set-option -gu @ai_monitor_generation 2>/dev/null
+    tmux set-option -gu @ai_monitor_pid 2>/dev/null
     tmux set-option -gu @claude_status 2>/dev/null
     tmux set-option -gu @claude_hooks_reload_registered 2>/dev/null
     
@@ -139,7 +148,8 @@ if tmux info &>/dev/null; then
 
     # Clear per-pane status options
     while IFS= read -r pane_id; do
-        tmux set-option -pqt "$pane_id" @claude_pane_status 2>/dev/null
+        tmux set-option -pqu -t "$pane_id" @ai_pane_status 2>/dev/null
+        tmux set-option -pqu -t "$pane_id" @ai_codex_monitor_seen 2>/dev/null
     done < <(tmux list-panes -a -F "#{pane_id}" 2>/dev/null)
 
     echo "[OK] tmux options cleaned"
@@ -237,7 +247,15 @@ else
     echo "[WARN] Cannot verify hooks (jq or settings.json missing)"
 fi
 
-# 2. No watcher processes
+# 2. No registered Codex monitor or watcher processes
+MONITOR_PID=$(tmux show-option -gv @ai_monitor_pid 2>/dev/null || true)
+if [ -z "$MONITOR_PID" ]; then
+    echo "[OK] No Codex lifecycle monitor registered"
+else
+    echo "[FAIL] Codex lifecycle monitor still registered: $MONITOR_PID"
+    ERRORS=$((ERRORS + 1))
+fi
+
 WATCHER_COUNT=$(ls /tmp/claude-watcher-*.pid 2>/dev/null | wc -l | tr -d ' ')
 if [ "$WATCHER_COUNT" -eq 0 ]; then
     echo "[OK] No watcher processes"

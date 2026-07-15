@@ -101,7 +101,7 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 
 ### 6. 安装 Codex Hooks（可选）
 
-需 **codex ≥ v0.117**（lifecycle hooks 支持）。
+需 **codex ≥ v0.144**（`hooks.json` lifecycle hooks 与 hook trust）。
 
 在 tmux 内按快捷键：
 
@@ -109,7 +109,7 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 prefix + M-h
 ```
 
-插件会将 6 个 hooks 注册到 `~/.codex/hooks.toml`：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`。
+插件会将 6 个同步 hooks 注册到 `~/.codex/hooks.json`：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`。
 
 卸载：
 
@@ -123,7 +123,9 @@ prefix + M-u
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
 ```
 
-> Codex 没有 `SessionEnd`/`Notification` 事件——codex 会话退出后，其 pane 状态由进程树 stale 清理机制兜底清除。安装器仅管理自己在 `hooks.toml` 中的 sentinel 标记块，块外的已有内容原样保留。
+> Codex 没有 `SessionEnd`，且 `SessionStart` 延迟到首个 turn。插件因此启动 tmux server 级 monitor，每秒刷新一次：新打开 Codex 时补显示 `-`，执行 `/exit` 且 Codex 进程消失后清空 pane 状态。`/new` 仍在同一 Codex 进程内，故刻意保留上一轮 `✓`，直到下一次提交 prompt。
+>
+> 安装器只替换 command 包含 `tmux-ai-status` 的 hook group，保留 `hooks.json` 中其他内容。下次启动 Codex 时可能需要选择 **Hooks need review → Trust all and continue** 完成一次性授信。
 
 ## 状态符号与事件
 

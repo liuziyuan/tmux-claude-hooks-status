@@ -1,0 +1,159 @@
+#!/bin/bash
+# tmux-ai-monitor — tmux server 级单例监控器
+#
+# Codex 没有 SessionEnd hook，且 SessionStart 会延迟到首个 turn。
+# 本监控器每秒根据 pane_current_command / 进程树刷新聚合状态：
+#   - 前台启动 codex、尚无 hook 状态时，显示 idle `-`
+#   - /exit 返回 shell 后，清除残留 pane 状态
+# `/new` 不改变前台进程，因此不会改写已有 `✓`。
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODE="${1:-start}"
+MONITOR_INTERVAL="${TMUX_AI_MONITOR_INTERVAL:-1}"
+
+_tmux_server_pid() {
+    tmux display-message -p '#{pid}' 2>/dev/null
+}
+
+_pane_current_command() {
+    local pane_id="$1"
+    tmux list-panes -a -F "#{pane_id}|#{pane_current_command}" 2>/dev/null \
+        | awk -F'|' -v id="$pane_id" '$1==id{print $2; exit}'
+}
+
+_is_codex_command() {
+    local cmd="$1"
+    [ -n "$cmd" ] || return 1
+    local base
+    base=$(basename "$cmd" 2>/dev/null)
+    case "$base" in
+        codex|codex-*|codex_*) return 0 ;;
+    esac
+    return 1
+}
+
+_pane_has_codex_process() {
+    local pane_id="$1"
+    local current_command
+    current_command=$(_pane_current_command "$pane_id")
+    _is_codex_command "$current_command" && return 0
+
+    local pane_pid
+    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
+        | awk -v id="$pane_id" '$1==id{print $2; exit}')
+    [ -n "$pane_pid" ] || return 1
+
+    local pids="$pane_pid" next="" depth=0 p cmd children
+    while [ "$depth" -lt 10 ] && [ -n "$pids" ]; do
+        for p in $pids; do
+            cmd=$(ps -o comm= -p "$p" 2>/dev/null)
+            _is_codex_command "$cmd" && return 0
+            children=$(pgrep -P "$p" 2>/dev/null)
+            [ -n "$children" ] && next="$next $children"
+        done
+        pids="${next# }"
+        next=""
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+_monitor_codex_lifecycle() {
+    local pane_id current_command seen sanitized pane_dir
+    while IFS='|' read -r pane_id current_command seen; do
+        if _is_codex_command "$current_command"; then
+            # 只记录“本 monitor 确实见过 Codex”的 pane，避免改变其他 AI CLI 的清理语义。
+            [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" @ai_codex_monitor_seen 1 2>/dev/null || true
+        elif [ "$seen" = "1" ] && ! _pane_has_codex_process "$pane_id"; then
+            # Codex /exit 无 SessionEnd：仅清理由 Codex 生命周期标记过的 pane。
+            tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
+            tmux set-option -pu -t "$pane_id" @ai_codex_monitor_seen 2>/dev/null || true
+            sanitized="${pane_id//[^a-zA-Z0-9]/_}"
+            pane_dir="${_STATUS_DIR}/${sanitized}"
+            rm -rf "$pane_dir" 2>/dev/null
+        fi
+    done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_codex_monitor_seen}" 2>/dev/null)
+}
+
+_monitor_tick() {
+    _monitor_codex_lifecycle
+    build_all_status
+
+    local previous
+    previous=$(tmux show-option -gv @ai_all_status 2>/dev/null || true)
+    if [ "$previous" != "$ALL" ]; then
+        tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || return 1
+        tmux refresh-client -S 2>/dev/null || true
+    fi
+    return 0
+}
+
+case "$MODE" in
+    start)
+        server_pid=$(_tmux_server_pid)
+        [ -n "$server_pid" ] || exit 0
+
+        # 每次插件加载都发布新 generation。旧 monitor 看到 generation 变化后自行退出，
+        # 因而无需冒险 kill 一个可能已被系统复用的 PID，也不会长期存在重复 monitor。
+        generation="$(date +%s)-$$-${RANDOM:-0}"
+        tmux set-option -g @ai_monitor_generation "$generation" 2>/dev/null || exit 0
+
+        nohup "$0" run "$server_pid" "$generation" >/dev/null 2>&1 &
+        monitor_pid=$!
+        tmux set-option -g @ai_monitor_pid "$monitor_pid" 2>/dev/null || true
+        ;;
+
+    run)
+        expected_server_pid="${2:-}"
+        generation="${3:-}"
+        [ -n "$expected_server_pid" ] && [ -n "$generation" ] || exit 1
+
+        # monitor 自身不处理 hook，仅复用现有状态聚合函数。
+        TOOL_ID="claude"
+        EVENT="_monitor"
+        source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
+
+        cleanup_monitor_option() {
+            local registered_pid
+            registered_pid=$(tmux show-option -gv @ai_monitor_pid 2>/dev/null || true)
+            [ "$registered_pid" = "$$" ] && tmux set-option -gu @ai_monitor_pid 2>/dev/null || true
+        }
+        stop_monitor() {
+            exit 0
+        }
+        trap cleanup_monitor_option EXIT
+        trap stop_monitor INT TERM
+
+        while :; do
+            current_server_pid=$(_tmux_server_pid)
+            [ "$current_server_pid" = "$expected_server_pid" ] || break
+
+            current_generation=$(tmux show-option -gv @ai_monitor_generation 2>/dev/null || true)
+            [ "$current_generation" = "$generation" ] || break
+
+            # 单次 tmux 查询失败不应永久杀死 monitor；server/generation 检查负责终止。
+            _monitor_tick || true
+            sleep "$MONITOR_INTERVAL"
+        done
+        ;;
+
+    stop)
+        # 令当前 monitor 在下一 tick 自行退出。
+        tmux set-option -gu @ai_monitor_generation 2>/dev/null || true
+        ;;
+
+    tick)
+        # 诊断/测试用的一次性刷新。
+        TOOL_ID="claude"
+        EVENT="_monitor"
+        source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
+        _monitor_tick
+        ;;
+
+    *)
+        echo "Usage: $0 [start|run|stop|tick]" >&2
+        exit 2
+        ;;
+esac

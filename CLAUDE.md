@@ -23,6 +23,7 @@ tmux-ai-hooks-status.tmux              # TPM 入口
 scripts/
   lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、pane title 监控、日志
   tmux-ai-status                       # 事件处理器（参数化：<TOOL_ID> <EVENT>，claude/codex 共用）
+  tmux-ai-monitor                      # tmux server 级 Codex 生命周期监控（启动补 -、/exit 清空）
   tmux-ai-esc                          # Esc 键拒绝检测（!/? → -）
   lib-install-hooks.sh                 # 安装公共骨架（依赖检查 + 原子写）
   adapters/
@@ -41,7 +42,7 @@ scripts/
 - `ADAPTER_EVENTS` — 该工具触发的事件集合（claude 10 个 / codex 6 个）
 - `ADAPTER_PROCESS_NAMES` — 进程名（basename），供 `_pane_has_ai_process` 前缀匹配（`codex` 匹配 `codex-aarch64-*`）
 - `ADAPTER_HOOKS_FILE` — hooks 配置绝对路径
-- `ADAPTER_HAS_SESSION_END` — 是否有 SessionEnd（codex 无 → 退出靠进程检测兜底）
+- `ADAPTER_HAS_SESSION_END` — 是否有 SessionEnd（codex 无 → 退出由 `tmux-ai-monitor` 检测进程消失）
 - `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
@@ -88,6 +89,12 @@ tmux-ai-status <TOOL_ID> <EVENT> 脚本
 tmux session/client 生命周期 hook
     (session-closed, client-detached, client-attached)
     ↓ _refresh → rebuild @ai_all_status
+
+Codex 生命周期 monitor（每秒）
+    ├─ pane_current_command=codex* 且无显式状态 → rebuild 时补 `-`
+    ├─ 对见过 Codex 的 pane 写 @ai_codex_monitor_seen=1
+    ├─ `/exit` 后确认进程树无 Codex → 清 @ai_pane_status + marker
+    └─ `/new` 进程仍在 → 不改写已有 `✓`
 
 Esc 键拒绝检测（tmux bind-key -n Escape）:
     ├─ 全局拦截 Esc，读取 active pane 的 @ai_pane_status
@@ -230,6 +237,7 @@ ls /tmp/ai-status/*/*-poll-pid
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
+- **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
 - **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
@@ -254,7 +262,7 @@ SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop
 
 ### Codex 与 Claude 的差异（备忘）
 
-- Codex **无** `SessionEnd / Notification / PostToolUseFailure / StopFailure` 事件。Codex 的 `Stop` 是「turn 完成」而非 session 结束；session 真正退出时无任何 hook。→ pane 状态清理只能靠 `_cleanup_stale_panes` 的进程树检测（codex 进程消失即清）。
+- Codex **无** `SessionEnd / Notification / PostToolUseFailure / StopFailure` 事件。Codex 的 `Stop` 是「turn 完成」而非 session 结束；session 真正退出时无任何 hook。→ `tmux-ai-monitor` 记录实际见过 Codex 的 pane，并在 `/exit` 后确认进程树无 Codex 再清空状态。
 - **Codex 0.144 hook 系统重写（相对旧 0.117 的三处 breaking change）**：
   1. **不再读取独立 `hooks.toml`** —— 仅认 `config.toml` 的 `[hooks]` 表，或 config 文件夹里的 `hooks.json`。本插件改用 `~/.codex/hooks.json`。
   2. **`async=true` 的 hook 被静默跳过**（源码 `if r#async { skip "async hooks are not supported yet" }`）—— 故本插件所有 codex hook 均同步（无 async 字段，默认 false）。
@@ -262,3 +270,18 @@ SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop
 - Codex hooks 配置在 `~/.codex/hooks.json`（JSON），结构 `{"hooks":{"<Event>":[{"hooks":[{"type":"command","command":...,"timeout":5}]}]}}`。`install-codex-hooks.sh` 用 jq 读改写：仅剔除/替换 command 含 `tmux-ai-status` 的 group，保留用户/其他工具自有 hook（依赖 jq）。
 - Codex 与 Claude 的 stdin JSON 字段同构（`session_id`/`tool_name`/`tool_use_id`/`tool_input`/`hook_event_name`）；`PermissionRequest` 均不带 `tool_use_id`，现有兜底逻辑通用。
 - Codex hooks 同步执行，脚本正常退出 0 且 stdout 为空即视为 no-op 透传——本插件只读状态、不写 stdout，天然安全。
+
+---
+
+**Codex `/new` 后 pane 卡上一轮 `✓`（不自动转 `-`）**
+
+用户在 codex 中 `/new` 已开新 session，但 pane 状态行仍显示上一轮遗留的 `✓`，语义上应为 `-`（空闲）。这是 codex hook 语义的**结构性空窗**，非 bug：
+
+1. **无 `SessionEnd` 事件**（`ADAPTER_HAS_SESSION_END="false"`）。Claude `/new` 时旧 session 发 `SessionEnd` 清空 `@ai_pane_status`；codex 没有，旧 session `Stop` 留下的 `✓` 残留在 pane option 上。
+2. **`SessionStart` 是 `deferred`**（上游 `run_pending_session_start_hooks` 延迟到首个 turn 才发）。`/new` 那刻不触发，走不到 `tmux-ai-status` 的 `STATUS="-"`。
+3. **`build_all_status` idle 兜底救不了**：仅在 `@ai_pane_status` 为空时补 `-`，此刻值是 `✓`（显式非空），跳过兜底。
+4. **`tmux-ai-monitor` 刻意不清**：`/new` 是同一 codex 进程内换会话，monitor 仍能确认 Codex 存活，因此保留 `✓`；它只精确处理“启动补 `-`”和“`/exit` 清空”。
+
+四重条件恰好绕过所有会把状态改回 `-` 的机制。`✓` 卡到用户在新 session 提交首条 prompt（`UserPromptSubmit` → `>`，延迟的 `SessionStart` 一并 flush → `-`）才刷新。
+
+**已知此结构性限制，不实现自动恢复**。`✓` 语义仍近似准确（上一轮确实完成），下次 `UserPromptSubmit` 自然清。若上游 codex 未来补 `SessionEnd` 或将 `SessionStart` 改为 immediate，届时可去除此限制。

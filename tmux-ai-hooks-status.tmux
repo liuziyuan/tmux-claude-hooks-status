@@ -61,6 +61,11 @@ fi
 # 注：codex hooks 不自动安装（codex 非人人安装），用 prefix+M-h 手动装。
 "${CURRENT_DIR}/scripts/install-claude-hooks.sh" >/dev/null 2>&1 || true
 
+# --- 启动 tmux server 级状态监控器 ---
+# Codex 无 SessionEnd 且 SessionStart 延迟；monitor 负责检测前台 codex 启动和 /exit。
+# 每次 reload 发布新 generation，旧 monitor 自动退出，始终只保留一个有效实例。
+"${CURRENT_DIR}/scripts/tmux-ai-monitor" start >/dev/null 2>&1 || true
+
 # --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
 # session-closed: session 被销毁时清除残留条目
 # client-detached: client 断开连接时排除已变为 detached 的 session
@@ -74,10 +79,8 @@ tmux set-hook -g pane-exited       "run-shell '${CURRENT_DIR}/scripts/tmux-ai-st
 # after-kill-pane: kill-pane 后触发孤儿清理
 tmux set-hook -g after-kill-pane   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 # pane-focus-in: 切换到 pane 时完整刷新（清理 + 重建聚合）。
-# codex 无 SessionEnd 事件，退出后状态残留只能靠 _cleanup_stale_panes 的进程树检测清除；
-# 且 SessionStart hook 延迟到首个 turn，空闲蹲提示符时无事件。借 focus 事件一并处理：
-# 退出残留 ✓/- → cleanup 清空；空闲无状态 → build_all_status 补 idle -。与 claude 靠
-# 生命周期 hook 维护状态一致。
+# Codex 的持续刷新由 tmux-ai-monitor 负责；focus hook 仍作为立即刷新路径，避免等待
+# 下一个 1s tick。空闲无显式状态时 build_all_status 会按前台 codex 进程补 idle `-`。
 tmux set-hook -g pane-focus-in     "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 
 # --- 快捷键绑定 ---

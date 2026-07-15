@@ -101,7 +101,7 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-claude-hooks.sh
 
 ### 6. Install Codex Hooks (Optional)
 
-Requires **codex ≥ v0.117** (lifecycle hooks support).
+Requires **codex ≥ v0.144** (`hooks.json` lifecycle hooks and hook trust).
 
 In tmux, press:
 
@@ -109,7 +109,7 @@ In tmux, press:
 prefix + M-h
 ```
 
-The plugin registers 6 hooks in `~/.codex/hooks.toml`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`.
+The plugin registers 6 synchronous hooks in `~/.codex/hooks.json`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`.
 
 To uninstall:
 
@@ -123,7 +123,9 @@ Manual install:
 bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
 ```
 
-> Codex has no `SessionEnd`/`Notification` events — when a codex session exits, its pane status is cleared by the process-tree stale-cleanup fallback. The installer manages only its own sentinel-marked block in `hooks.toml`; any existing content outside that block is preserved.
+> Codex has no `SessionEnd` event and defers `SessionStart` until the first turn. A tmux-server monitor therefore refreshes once per second: a newly opened Codex pane displays `-`, and `/exit` clears the pane status after the Codex process disappears. `/new` intentionally keeps the previous `✓` until the next prompt because the same Codex process remains alive.
+>
+> The installer only replaces hook groups whose command contains `tmux-ai-status`, preserves all other `hooks.json` content, and may require selecting **Hooks need review → Trust all and continue** on the next Codex launch.
 
 ## Status Symbols and Events
 
