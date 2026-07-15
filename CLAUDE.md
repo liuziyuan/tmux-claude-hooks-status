@@ -225,9 +225,11 @@ ls /tmp/ai-status/*/*-poll-pid
 
 ### Node TUI 安装器（installer/）
 
-交互式安装器（@clack/prompts + execa），承接所有安装前置环节：环境侦测（tmux/jq/bash/node）、依赖 brew 代装、AI CLI 侦测（版本+minVersion+hooks状态）、hooks 装/卸/修、TPM 软链校验/创建。
+交互式安装器（@clack/prompts + execa），承接安装前置环节：环境侦测/修复（tmux/jq/bash/node）、AI CLI 侦测（版本+minVersion+hooks状态）、hooks 装/卸/修、TPM 软链校验/创建。
 
-不重实现 bash 逻辑——hooks 装/卸经 execa 调薄 wrapper `install-<tool>-hooks.sh`。工具元数据在 `installer/src/adapters-meta.js`，与 bash adapter 一一对应。运行：`cd installer && npm install && node bin/cli.js`，或 `prefix + I`。详见 `installer/README.md`。
+环境检测结果分为 `ready` / `missing` / `outdated`。Doctor 对缺失依赖使用 `brew install`；只有过旧 formula 确认由 Homebrew 管理时才使用 `brew upgrade`；未安装 Homebrew 或非 Homebrew 管理的软件只给手动建议。bash 只检查存在性，AI CLI 不自动安装/升级。逐项执行后完整复检，单项失败不阻塞后续项。
+
+不重实现 bash hooks 逻辑——hooks 装/卸经 execa 调薄 wrapper `install-<tool>-hooks.sh`。工具元数据在 `installer/src/adapters-meta.js`，与 bash adapter 一一对应。完整操作从仓库运行 `cd installer && npm install && npm start`，或使用 `prefix + I`。npm 包不包含根目录脚本，`npx tmuxclihook` 主要用于环境/CLI 检查。详见 `installer/README.md`。
 
 ## 关键设计决策
 

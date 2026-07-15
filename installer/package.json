@@ -1,10 +1,10 @@
 {
-  "name": "tmux-ai-status-installer",
+  "name": "tmuxclihook",
   "version": "0.1.0",
   "description": "交互式 TUI 安装器：环境侦测、AI CLI 侦测、tmux-ai-status hooks 装/卸/修、TPM 软链校验",
   "type": "module",
   "bin": {
-    "tmux-ai-status-installer": "bin/cli.js"
+    "tmuxclihook": "bin/cli.js"
   },
   "files": [
     "bin",
@@ -13,14 +13,16 @@
   ],
   "scripts": {
     "check": "for f in bin/cli.js src/*.js; do node --check \"$f\"; done && echo 'all js syntax OK'",
-    "start": "node bin/cli.js"
+    "start": "node bin/cli.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "@clack/prompts": "^0.7.0",
-    "execa": "^9.0.0"
+    "execa": "^9.0.0",
+    "picocolors": "^1.1.1"
   },
   "keywords": [
     "tmux",

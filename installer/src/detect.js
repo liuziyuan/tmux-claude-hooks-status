@@ -14,54 +14,71 @@ async function probe(bin, args, re) {
   }
 }
 
+function envResult({ name, found, meetsMinimum, detail, min, fixCmd, pkg }) {
+  const status = !found ? 'missing' : meetsMinimum ? 'ready' : 'outdated';
+  return {
+    name,
+    status,
+    ok: status === 'ready',
+    detail,
+    min,
+    fixCmd,
+    pkg,
+  };
+}
+
 // 环境依赖检查（Doctor）。返回逐项结果。
-export async function checkEnv() {
+export async function checkEnv({ probeCommand = probe } = {}) {
   const results = [];
 
   // tmux ≥ 3.1
-  const tmux = await probe('tmux', ['-V'], /(\d+\.\d+)/);
-  results.push({
+  const tmux = await probeCommand('tmux', ['-V'], /(\d+\.\d+)/);
+  results.push(envResult({
     name: 'tmux',
-    ok: tmux.found && versionGte((tmux.version || '0') + '.0', '3.1.0'),
+    found: tmux.found,
+    meetsMinimum: versionGte((tmux.version || '0') + '.0', '3.1.0'),
     detail: tmux.found ? `v${tmux.version}` : '未安装',
     min: '≥ 3.1',
     fixCmd: 'brew install tmux',
     pkg: 'tmux',
-  });
+  }));
 
   // jq（唯一硬依赖）
-  const jq = await probe('jq', ['--version'], /(\d+\.\d+)/);
-  results.push({
+  const jq = await probeCommand('jq', ['--version'], /(\d+\.\d+)/);
+  results.push(envResult({
     name: 'jq',
-    ok: jq.found,
+    found: jq.found,
+    meetsMinimum: jq.found,
     detail: jq.found ? (jq.raw || '已安装') : '未安装',
     min: '任意版本',
     fixCmd: 'brew install jq',
     pkg: 'jq',
-  });
+  }));
 
   // bash：脚本 shebang 为 #!/bin/bash，实测零 bash4 专属特性，macOS 自带 3.2 即可运行。
   // 只要存在可执行 bash 即通过（不校验版本）。
-  const bash = await probe('bash', ['--version'], /version (\d+\.\d+)/);
-  results.push({
+  const bash = await probeCommand('bash', ['--version'], /version (\d+\.\d+)/);
+  results.push(envResult({
     name: 'bash',
-    ok: bash.found,
+    found: bash.found,
+    meetsMinimum: bash.found,
     detail: bash.found ? `v${bash.version}` : '未安装',
     min: '任意版本',
     fixCmd: 'brew install bash',
     pkg: 'bash',
-  });
+  }));
 
   // node（TUI 自身运行环境，必在）
-  const node = await probe('node', ['-v'], /v?(\d+\.\d+\.\d+)/);
-  results.push({
+  const node = await probeCommand('node', ['-v'], /v?(\d+\.\d+\.\d+)/);
+  results.push(envResult({
     name: 'node',
-    ok: node.found && versionGte(node.version || '0.0.0', '18.0.0'),
+    found: node.found,
+    meetsMinimum: versionGte(node.version || '0.0.0', '18.0.0'),
     detail: node.found ? `v${node.version}` : '未安装',
     min: '≥ 18',
     fixCmd: 'brew install node',
     pkg: 'node',
-  });
+  }));
 
   return results;
 }

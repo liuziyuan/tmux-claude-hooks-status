@@ -4,25 +4,30 @@
 
 [English](README.md)
 
-## 快速安装（自动）
+## 快速安装（交互式命令行）
 
-使用 Claude Code 自动安装，运行：
+完整安装需要 Node.js 18+，以及一个包含根目录 `scripts/` 的仓库副本：
 
-```
-ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_INSTALL.md
-```
-
-Claude Code 将逐步引导你完成安装。
-
-## 快速卸载（自动）
-
-使用 Claude Code 自动卸载，运行：
-
-```
-ai https://raw.githubusercontent.com/liuziyuan/tmux-claude-hooks-status/main/AI_UNINSTALL.md
+```bash
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git ~/.local/share/tmux-ai-hooks-status
+cd ~/.local/share/tmux-ai-hooks-status/installer
+npm install
+npm start
 ```
 
-Claude Code 将逐步清除插件配置、hooks 和临时文件。插件目录本身会保留。
+在 TUI 中可完成环境检查/修复、tmux 插件软链创建，以及 Claude Code / Codex hooks 的安装、卸载和修复。插件载入 tmux 后，也可以随时使用：
+
+```text
+prefix + I
+```
+
+已发布的 `npx tmuxclihook` 入口可用于环境和 AI CLI 检查；hooks 与软链操作需要仓库根目录中的脚本，因此完整操作应从仓库副本或 `prefix + I` 启动。
+
+环境 Doctor 会安装缺失的 Homebrew formula，并且只升级已经由 Homebrew 管理的过旧 formula。它不会自动安装 Homebrew，不会修改非 Homebrew 管理的软件，也不会自动安装或升级 Claude Code / Codex CLI。所有修复均需用户选择，执行后会自动完整复检。
+
+## 快速卸载 Hooks
+
+通过 `prefix + I`（或在 `installer/` 中运行 `npm start`）进入 TUI，选择“卸载 hooks”。如需连同 tmux 配置和插件软链一起完整移除，请查看 [`AI_UNINSTALL.md`](AI_UNINSTALL.md)；该兼容文档继续用于无 TTY 和故障恢复场景。
 
 ## 手动安装
 
@@ -153,7 +158,8 @@ Notification 事件在内部处理——特定消息（权限相关、已取消�
 
 - tmux >= 3.1（user options、pane-border-status、set-hook、多行 status-format）
 - jq（用于 hook 安装）
-- bash >= 4.0
+- bash（任意版本；macOS 自带 3.2 即可，交互 shell 使用 zsh/fish 不影响 hooks）
+- Node.js >= 18（仅交互式安装器需要，shell hooks 不依赖 Node.js）
 
 ## 验证
 
@@ -182,5 +188,7 @@ Prefix 为 `Ctrl+a`（按下后松开，再按对应键）。
 | `prefix + C-u` | 卸载 Claude Code hooks |
 | `prefix + M-h` | 安装 Codex hooks |
 | `prefix + M-u` | 卸载 Codex hooks |
+| `prefix + C-p` | 安装 opencode plugin |
+| `prefix + M-p` | 卸载 opencode plugin |
 | `prefix + I` | TPM 安装所有插件 |
 | `prefix + r` | 重载配置 |
