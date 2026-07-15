@@ -89,6 +89,9 @@ tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh unin
 tmux bind-key M-h run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh && tmux display 'Codex hooks installed'"
 # prefix + M-u: 卸载 Codex hooks
 tmux bind-key M-u run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh uninstall && tmux display 'Codex hooks removed'"
+# prefix + I: 打开交互式 TUI 安装器（环境检查/侦测CLI/装卸修hooks/软链校验）
+# 用 new-window 以获得真实终端（TUI 需交互，不能走后台 run-shell）
+tmux bind-key I new-window -c "${CURRENT_DIR}/installer" "node bin/cli.js"
 
 # Esc 拒绝检测：! / ? 状态下 Esc → -
 tmux bind-key -n Escape run-shell "${CURRENT_DIR}/scripts/tmux-ai-esc"

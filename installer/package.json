@@ -1,0 +1,29 @@
+{
+  "name": "tmux-ai-status-installer",
+  "version": "0.1.0",
+  "description": "交互式 TUI 安装器：环境侦测、AI CLI 侦测、tmux-ai-status hooks 装/卸/修、TPM 软链校验",
+  "type": "module",
+  "bin": {
+    "tmux-ai-status-installer": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.7.0",
+    "execa": "^9.0.0"
+  },
+  "keywords": [
+    "tmux",
+    "claude-code",
+    "codex",
+    "hooks",
+    "installer",
+    "tui"
+  ],
+  "license": "MIT"
+}
