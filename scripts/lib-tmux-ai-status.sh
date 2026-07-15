@@ -11,6 +11,41 @@ STATUS_COLOR="#F1FA8C"
 # --- 日志模块 ---
 source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 
+# --- 工具适配器加载 ---
+# 每个 AI CLI 的差异（事件集/hooks路径/格式/完整性/进程名/SessionEnd/SessionStart时机）
+# 抽到 adapters/<TOOL_ID>.sh，核心引擎读 adapter 暴露的变量/函数分派，不再写 case "$TOOL_ID"。
+# 加新 CLI = 加一个 adapters/<tool>.sh，核心零改动。
+_ADAPTER_DIR="${_LIB_DIR}/adapters"
+_load_adapter() {
+    local tool="${TOOL_ID:-claude}"
+    local adapter="${_ADAPTER_DIR}/${tool}.sh"
+    if [ -f "$adapter" ]; then
+        source "$adapter"
+    else
+        _ai_log "ADAPTER: 未找到 ${adapter}，回退默认（claude）"
+        [ -f "${_ADAPTER_DIR}/claude.sh" ] && source "${_ADAPTER_DIR}/claude.sh"
+    fi
+}
+_load_adapter
+
+# 跨 adapter 汇总所有 AI CLI 的进程名（供 _pane_has_ai_process 识别聚合场景下的
+# 任意工具进程——聚合/清理路径需认全部工具，不止当前 TOOL_ID）。扫 adapters/*.sh
+# 提取 ADAPTER_PROCESS_NAMES。惰性求值，缓存到 _ALL_AI_PROCESS_NAMES。
+_ALL_AI_PROCESS_NAMES=""
+_collect_ai_process_names() {
+    [ -n "$_ALL_AI_PROCESS_NAMES" ] && { echo "$_ALL_AI_PROCESS_NAMES"; return; }
+    local names="" f n
+    for f in "${_ADAPTER_DIR}"/*.sh; do
+        [ -f "$f" ] || continue
+        # 提取 ADAPTER_PROCESS_NAMES="..." 的值（不 source，避免副作用）
+        n=$(sed -n 's/^ADAPTER_PROCESS_NAMES="\([^"]*\)".*/\1/p' "$f" 2>/dev/null)
+        [ -n "$n" ] && names="$names $n"
+    done
+    # 去重
+    _ALL_AI_PROCESS_NAMES=$(echo "$names" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    echo "$_ALL_AI_PROCESS_NAMES"
+}
+
 # --- Per-pane 目录 ---
 # 结构: ${_STATUS_DIR}/${PANE_SANITIZED}/
 #   pane-${SESSION_ID}          session → pane 映射（内容为 pane_id）
@@ -84,14 +119,21 @@ _clear_pane_id() {
 build_all_status() {
     ALL=""
     cur_sess=""
+    local _ai_names
+    _ai_names=$(_collect_ai_process_names)
     while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _last cur_cmd; do
         local pane_status="$claude_status"
         if [ -z "$pane_status" ]; then
-            # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle
-            case "$(basename "$cur_cmd" 2>/dev/null)" in
-                claude*|codex*) pane_status="-" ;;
-                *) continue ;;
-            esac
+            # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle。
+            # 进程名集合从所有 adapter 汇总，前缀匹配（codex-aarch64-* 等）。
+            local _cmd_base _n _is_ai=0
+            _cmd_base=$(basename "$cur_cmd" 2>/dev/null)
+            for _n in $_ai_names; do
+                case "$_cmd_base" in
+                    "$_n"|"$_n"-*|"$_n"_*) _is_ai=1; break ;;
+                esac
+            done
+            [ "$_is_ai" = "1" ] && pane_status="-" || continue
         fi
         local session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
         local panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
@@ -262,25 +304,31 @@ _new_session_owns_pane() {
 }
 
 # --- 进程树检查 ---
-# BFS 遍历 pane 的进程树，检查是否有包含 "claude" 或 "codex" 的命令
+# BFS 遍历 pane 的进程树，检查是否有 AI CLI 进程。
+# 进程名集合从所有 adapter 的 ADAPTER_PROCESS_NAMES 汇总（_collect_ai_process_names），
+# 前缀匹配（codex 二进制常为 codex-aarch64-* 等带后缀名）。
 _pane_has_ai_process() {
     local pane_id="$1"
     local pane_pid
     # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
     # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
-    # 邻近 pane 的 codex/claude 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
+    # 邻近 pane 的 AI 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
     pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
         | awk -v id="$pane_id" '$1==id{print $2; exit}')
     [ -z "$pane_pid" ] && return 1
+    local ai_names
+    ai_names=$(_collect_ai_process_names)
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            local cmd base
+            local cmd base name
             cmd=$(ps -o comm= -p "$p" 2>/dev/null)
             base=$(basename "$cmd" 2>/dev/null)
-            case "$base" in
-                claude|codex) return 0 ;;
-            esac
+            for name in $ai_names; do
+                case "$base" in
+                    "$name"|"$name"-*|"$name"_*) return 0 ;;
+                esac
+            done
             local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
@@ -387,41 +435,21 @@ _maybe_cleanup_stale() {
     echo "$now" > "$marker"
 }
 
-# Hooks 完整性检查：按 TOOL_ID 分派
-#   claude → ~/.claude/settings.json 的 10 个事件是否都注册了 tmux-ai-status hook
-#   codex  → ~/.codex/hooks.json 是否含 6 个 tmux-ai-status command（0.144+）
-# 缺失 → 返回 1（配置被外部应用覆盖时会发生）
+# Hooks 完整性检查：委托给当前 adapter（adapter_check_integrity）。
+# 各工具的路径/格式/事件数判定在 adapters/<tool>.sh 中声明，核心不再 case 分派。
+# 缺失 → 返回 1（配置被外部应用覆盖时会发生）。
 _check_hooks_integrity() {
-    case "${TOOL_ID:-claude}" in
-        codex)
-            local hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
-            [ -f "$hooks_file" ] || return 1
-            local n
-            n=$(jq '[.hooks[]?[]?.hooks[]?.command // empty
-                     | select(contains("tmux-ai-status codex"))] | length' \
-                "$hooks_file" 2>/dev/null)
-            [ "${n:-0}" -ge 6 ]
-            ;;
-        *)
-            local settings_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-            [ -f "$settings_file" ] || return 1
-            local registered
-            registered=$(jq '
-                .hooks as $h |
-                ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
-                 "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"]
-                | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-ai-status"))))
-                | length
-            ' "$settings_file" 2>/dev/null)
-            [ "${registered:-0}" -ge 10 ]
-            ;;
-    esac
+    if declare -f adapter_check_integrity >/dev/null 2>&1; then
+        adapter_check_integrity
+    else
+        # adapter 未加载（异常）→ 保守视为完整，避免误触发重装
+        return 0
+    fi
 }
 
 # 兜底自修复：tmux 端事件路径调用，配置被外部覆盖时自动重装。
 # 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
-# 按 TOOL_ID 选择安装器（_refresh 默认传 claude → 仅自修复 claude；
-# codex hooks 用户手动安装，不自动修复）。
+# 安装器由 adapter 声明（ADAPTER_INSTALLER）。
 _maybe_repair_hooks() {
     local marker="${_STATUS_DIR}/.hooks-repair-${TOOL_ID:-claude}-ts"
     local now
@@ -433,11 +461,7 @@ _maybe_repair_hooks() {
         [ $((now - ${last:-0})) -lt 60 ] && return
     fi
     echo "$now" > "$marker"
-    local installer
-    case "${TOOL_ID:-claude}" in
-        codex) installer="${_LIB_DIR}/install-codex-hooks.sh" ;;
-        *)     installer="${_LIB_DIR}/install-claude-hooks.sh" ;;
-    esac
+    local installer="${ADAPTER_INSTALLER}"
     if ! _check_hooks_integrity; then
         _ai_log "REPAIR: hooks integrity check failed, reinstalling (${TOOL_ID:-claude})"
         [ -x "$installer" ] && "$installer" >/dev/null 2>&1 || true

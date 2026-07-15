@@ -24,19 +24,38 @@ scripts/
   lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、pane title 监控、日志
   tmux-ai-status                       # 事件处理器（参数化：<TOOL_ID> <EVENT>，claude/codex 共用）
   tmux-ai-esc                          # Esc 键拒绝检测（!/? → -）
+  adapters/
+    claude.sh                          # Claude Code 差异声明 + 完整性检查
+    codex.sh                           # Codex 差异声明（无SessionEnd/延迟SessionStart/trust）
   install-claude-hooks.sh              # Claude Code hooks 注册/卸载（~/.claude/settings.json）
   install-codex-hooks.sh               # Codex hooks 注册/卸载（~/.codex/hooks.json，需 jq）
 ```
 
+### 工具适配器架构（adapters/）
+
+**核心引擎工具无关（一份），工具个性抽成薄 adapter（每工具一个文件）。** 加新 CLI = 加一个 `adapters/<tool>.sh`，核心零改动。
+
+`lib-tmux-ai-status.sh` 被 source 后调 `_load_adapter` 载入 `adapters/${TOOL_ID}.sh`。每个 adapter 声明契约：
+
+- `ADAPTER_EVENTS` — 该工具触发的事件集合（claude 10 个 / codex 6 个）
+- `ADAPTER_PROCESS_NAMES` — 进程名（basename），供 `_pane_has_ai_process` 前缀匹配（`codex` 匹配 `codex-aarch64-*`）
+- `ADAPTER_HOOKS_FILE` — hooks 配置绝对路径
+- `ADAPTER_HAS_SESSION_END` — 是否有 SessionEnd（codex 无 → 退出靠进程检测兜底）
+- `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
+- `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
+- `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
+
+核心引擎不再写 `case "$TOOL_ID"`：`_check_hooks_integrity` 委托 `adapter_check_integrity`；`_maybe_repair_hooks` 用 `ADAPTER_INSTALLER`；`_pane_has_ai_process`/`build_all_status` 用 `_collect_ai_process_names`（扫所有 `adapters/*.sh` 汇总进程名，聚合/清理路径认全部工具）。
+
 ### 共享库 `lib-tmux-ai-status.sh`
 
-被 `tmux-ai-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"`/`"codex"`）、`SESSION_ID`。提供：
+被 `tmux-ai-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"`/`"codex"`）、`SESSION_ID`。source 后自动 `_load_adapter` 载入对应适配器。提供：
 
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`
-- **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配 `claude` **或** `codex` 命令
-- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 按 `TOOL_ID` 分派：claude 查 `~/.claude/settings.json`（10 事件）、codex 查 `~/.codex/hooks.json`（6 事件）
+- **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配所有 adapter 汇总的进程名（前缀匹配）
+- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 委托当前 adapter 的 `adapter_check_integrity` / `ADAPTER_INSTALLER`
 
 ### 数据流
 

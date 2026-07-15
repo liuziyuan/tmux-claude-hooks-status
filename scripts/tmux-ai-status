@@ -135,7 +135,7 @@ case "$EVENT" in
     STATUS="-"
     _clear_pending
     if ! _check_hooks_integrity; then
-        "${SCRIPT_DIR}/install-${TOOL_ID}-hooks.sh" >/dev/null 2>&1
+        "${ADAPTER_INSTALLER}" >/dev/null 2>&1
         tmux display-message "⚠ ${TOOL_ID} hooks 已自动修复（检测到缺失）" 2>/dev/null || true
     fi
     ;;
