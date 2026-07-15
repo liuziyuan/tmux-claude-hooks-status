@@ -27,6 +27,7 @@ import {
 } from '../src/adapters-meta.js';
 import { setSource, clearSource, getPersistedSource, originLabel } from '../src/source.js';
 import { note, padDisplay } from '../src/tui.js';
+import { updatePackage } from '../src/update.js';
 
 const OK = '✓';
 const NO = '✗';
@@ -364,7 +365,16 @@ async function main() {
   p.outro('完成');
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[2] === 'update') {
+  updatePackage().then((ok) => {
+    if (!ok) process.exitCode = 1;
+  }).catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+} else {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

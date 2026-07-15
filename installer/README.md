@@ -9,6 +9,9 @@
 npm install -g tmuxclihook
 tmuxclihook
 
+# 检查 npm registry 并将全局安装更新到最新版
+tmuxclihook update
+
 # 插件已经载入 tmux 后
 prefix + I
 
@@ -22,6 +25,8 @@ npm start
 ```
 
 hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `TMUXCLIHOOK_SOURCE` > 持久化配置 `~/.config/tmuxclihook/config.json`（TUI「source 管理」菜单写入）> 包内自带 scripts/（生产默认）> 仓库根 scripts/（`cd installer && npm start` 时的开发回落）。见下方「source 管理」一节。
+
+`tmuxclihook update` 会显示当前版本，通过 `npm view tmuxclihook version` 查询最新版；版本不同时直接执行 `npm install -g tmuxclihook@latest`，版本相同则不做修改。网络查询或安装失败时命令以非零状态退出。
 
 ## 功能
 
