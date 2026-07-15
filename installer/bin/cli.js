@@ -9,6 +9,8 @@ import { checkEnv, detectClis, interactiveShell } from '../src/detect.js';
 import { planBrewRemediation, runBrewAction } from '../src/env.js';
 import { installHooks, uninstallHooks, repairHooks } from '../src/hooks.js';
 import { checkSymlink, createSymlink, checkTmuxConf } from '../src/symlink.js';
+import { appendPluginDeclaration, reloadTmux } from '../src/tmuxconf.js';
+import { stopMonitor, clearAggregateStatus, removeSymlinks } from '../src/purge.js';
 import { TOOLS, repoExists, REPO_ROOT } from '../src/adapters-meta.js';
 import { note, padDisplay } from '../src/tui.js';
 
@@ -127,7 +129,7 @@ async function pickTool(message) {
     const hint = !row?.installed ? '未安装' : row.hooksInstalled ? '已装 hooks' : '未装 hooks';
     return { value: t.id, label: t.label, hint };
   });
-  opts.push({ value: '__all__', label: '全部', hint: 'claude + codex' });
+  opts.push({ value: '__all__', label: '全部', hint: TOOLS.map((t) => t.id).join(' + ') });
   opts.push({ value: '__back__', label: '← 返回主菜单' });
   const sel = await p.select({ message, options: opts });
   return p.isCancel(sel) || sel === '__back__' ? null : sel;
@@ -160,15 +162,57 @@ async function symlinkMenu() {
   ];
   note(lines.join('\n'), 'tmux 软链');
 
-  if (st.status === 'ok') {
+  // 步骤 1：软链缺失/错误则询问创建
+  if (st.status !== 'ok') {
+    const go = await p.confirm({ message: `创建软链 ${PLUGIN_LINK_PATH()} → 仓库？` });
+    if (p.isCancel(go) || !go) return;
+    const r = createSymlink();
+    if (r.ok) p.log.success(`${OK} 软链已创建：${r.from} → ${r.to}`);
+    else { p.log.error(`${NO} 创建失败：${r.output}`); return; }
+  } else {
     p.log.success('软链正常');
-    return;
   }
-  const go = await p.confirm({ message: `创建软链 ${PLUGIN_LINK_PATH()} → 仓库？` });
-  if (p.isCancel(go) || !go) return;
-  const r = createSymlink();
-  if (r.ok) p.log.success(`${OK} 软链已创建：${r.from} → ${r.to}`);
-  else p.log.error(`${NO} 创建失败：${r.output}`);
+
+  // 步骤 2：.tmux.conf 未引用插件则询问追加声明 + reload（闭合"软链建好但没加载"）
+  if (!conf.referenced) {
+    const decl = await p.confirm({
+      message: `.tmux.conf 未声明插件，追加 set -g @plugin 'tmux-ai-hooks-status' 并重载？`,
+    });
+    if (p.isCancel(decl) || !decl) return;
+    const a = appendPluginDeclaration();
+    if (!a.ok) { p.log.error(`${NO} 写入 .tmux.conf 失败：${a.output}`); return; }
+    if (a.appended) p.log.success(`${OK} 已追加插件声明到 ${a.path}`);
+    else p.log.info('已引用插件，跳过写入');
+    const rl = await reloadTmux();
+    if (rl.ok) p.log.success(`${OK} 已重载 tmux 配置`);
+    else p.log.warn(`重载失败（tmux 可能未运行）：${rl.output}\n请手动执行 tmux source-file ~/.tmux.conf`);
+  }
+}
+
+async function purgeMenu() {
+  p.log.warn('完整卸载：停止 monitor、清聚合状态、删软链。hooks 请先在「卸载 hooks」菜单移除。');
+  const go = await p.confirm({ message: '继续完整卸载插件运行态？（不删仓库、不改 .tmux.conf、不 kill-server）' });
+  if (p.isCancel(go) || !go) { p.log.info('已取消'); return; }
+
+  const mon = await stopMonitor();
+  if (mon.ok) p.log.success(`${OK} 已停止 Codex monitor`);
+  else p.log.warn(`monitor stop 失败（可能未运行）：${mon.output}`);
+
+  const clr = await clearAggregateStatus();
+  if (clr.ok) p.log.success(`${OK} 已清除 @ai_all_status`);
+  else p.log.warn(`清除聚合状态失败（tmux 可能未运行）：${clr.output}`);
+
+  const rm = removeSymlinks();
+  if (rm.removed.length > 0) p.log.success(`${OK} 已删除软链：${rm.removed.join(', ')}`);
+  else p.log.info('无软链可删除');
+
+  note(
+    "  以下破坏性步骤请手动执行：\n" +
+    "  1. 从 ~/.tmux.conf 删除：set -g @plugin 'tmux-ai-hooks-status'\n" +
+    "  2. 重启 tmux server 使状态行/hooks/按键完全卸载：tmux kill-server\n" +
+    "     （kill-server 会关闭当前所有 session，请先保存工作）",
+    '手动收尾',
+  );
 }
 
 function PLUGIN_LINE(st) {
@@ -197,6 +241,7 @@ async function main() {
         { value: 'uninstall', label: '卸载 hooks' },
         { value: 'repair', label: '修复 hooks', hint: '完整性检查 + 缺失重装' },
         { value: 'symlink', label: 'tmux 软链校验' },
+        { value: 'purge', label: '完整卸载插件', hint: 'monitor stop + 清状态 + 删软链' },
         { value: 'exit', label: '退出' },
       ],
     });
@@ -214,6 +259,7 @@ async function main() {
       else if (choice === 'uninstall') await runHookAction(uninstallHooks, '卸载');
       else if (choice === 'repair') await runHookAction(repairHooks, '修复');
       else if (choice === 'symlink') await symlinkMenu();
+      else if (choice === 'purge') await purgeMenu();
     } catch (err) {
       p.log.error(String(err));
     }

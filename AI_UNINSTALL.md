@@ -17,20 +17,23 @@ cd installer
 npm start
 ```
 
-选择 **卸载 hooks**，再选择 Claude Code、Codex 或全部。该操作只移除本插件注册的 hooks，保留其他工具的 hooks。
+选择 **卸载 hooks**，再选择 Claude Code、Codex、opencode 或全部。该操作只移除本插件注册的 hooks，保留其他工具的 hooks。
+
+TUI 另有 **完整卸载插件** 项：一步停止 Codex monitor、清除聚合状态 `@ai_all_status`、删除插件软链（不删仓库）；`.tmux.conf` 声明与 `tmux kill-server` 因破坏性仅打印指引，需手动执行。
 
 ## 无 TTY：卸载 Hooks
 
-在仓库根目录执行：
+以下步骤仅在无法启动 TUI 时使用。在仓库根目录执行（对每个已安装的 AI CLI 运行对应 uninstall）：
 
 ```bash
 bash scripts/install-claude-hooks.sh uninstall
 bash scripts/install-codex-hooks.sh uninstall
+bash scripts/install-opencode-hooks.sh uninstall
 ```
 
-## 完整移除插件
+## 完整移除插件（无 TTY）
 
-TUI 当前管理 hooks，不会擅自删除用户的 tmux 配置或仓库。完成 hooks 卸载后：
+以下步骤仅在无法启动 TUI 时使用；正常请用 TUI 的「完整卸载插件」项。TUI 管理 hooks 与运行态，不会擅自删除用户的 tmux 配置或仓库。完成 hooks 卸载后：
 
 1. 从 `~/.tmux.conf` 删除本插件声明：
 

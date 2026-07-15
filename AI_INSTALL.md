@@ -4,11 +4,11 @@
 
 ## 推荐：交互式 TUI
 
-如果仓库尚未下载：
+如果仓库尚未下载（clone 到任意目录即可，安装器自行从自身位置推导仓库根）：
 
 ```bash
-git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git ~/.local/share/tmux-ai-hooks-status
-cd ~/.local/share/tmux-ai-hooks-status/installer
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git
+cd tmux-claude-hooks-status/installer
 npm install
 npm start
 ```
@@ -16,9 +16,9 @@ npm start
 在 TUI 中依次使用：
 
 1. **环境检查**：检测并按需修复 tmux、jq、bash、Node.js；
-2. **tmux 软链校验**：创建指向本仓库的插件软链；
-3. **侦测 AI CLI**：查看 Claude Code / Codex 版本与 hooks 状态；
-4. **安装 hooks**：安装 Claude Code、Codex 或全部 hooks。
+2. **tmux 软链校验**：创建指向本仓库的插件软链，并可按需向 `~/.tmux.conf` 追加 `@plugin` 声明并重载；
+3. **侦测 AI CLI**：查看 Claude Code / Codex / opencode 版本与 hooks 状态；
+4. **安装 hooks**：安装 Claude Code、Codex、opencode 或全部 hooks。
 
 插件载入 tmux 后，可以直接按：
 
@@ -32,7 +32,7 @@ prefix + I
 
 ## 无 TTY / 故障恢复
 
-无法启动 TUI 时，可在仓库根目录执行最小安装流程：
+以下步骤仅在无法启动 TUI 时使用；正常安装请用 `prefix + I` 或 `npm start`。在仓库根目录执行最小安装流程：
 
 ```bash
 # 必需环境（macOS/Homebrew 示例）
@@ -42,9 +42,10 @@ brew install tmux jq
 mkdir -p ~/.tmux/plugins
 ln -sfn "$PWD" ~/.tmux/plugins/tmux-ai-hooks-status
 
-# 安装 hooks（只运行已安装的 AI CLI 对应项）
+# 安装 hooks（对每个已安装的 AI CLI 运行对应 install-<tool>-hooks.sh）
 bash scripts/install-claude-hooks.sh
 bash scripts/install-codex-hooks.sh
+bash scripts/install-opencode-hooks.sh
 ```
 
 然后确保 `~/.tmux.conf` 包含：
