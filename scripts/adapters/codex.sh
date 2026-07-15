@@ -39,3 +39,73 @@ adapter_check_integrity() {
         "$ADAPTER_HOOKS_FILE" 2>/dev/null)
     [ "${n:-0}" -ge 6 ]
 }
+
+# Codex 6 事件（全部同步——0.144 静默跳过 async=true 的 hook）
+_CODEX_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop"
+_CODEX_LEGACY_TOML="${CODEX_HOME:-$HOME/.codex}/hooks.toml"
+
+# 从每个事件数组剔除本插件 group（command 含 tmux-ai-status），事件/hooks 清空后删键。
+_codex_strip_managed() {
+    jq '
+      def clean_event:
+        map(select(
+          (.hooks // []) | any(.type == "command" and (.command // "" | contains("tmux-ai-status"))) | not
+        ));
+      if .hooks then
+        .hooks |= (with_entries(.value |= clean_event) | with_entries(select(.value | length > 0)))
+      else . end
+      | if (.hooks // {}) == {} then del(.hooks) else . end
+    '
+}
+
+_codex_read_existing() {
+    if [ -f "$ADAPTER_HOOKS_FILE" ] && jq empty "$ADAPTER_HOOKS_FILE" >/dev/null 2>&1; then
+        cat "$ADAPTER_HOOKS_FILE"
+    else
+        echo '{}'
+    fi
+}
+
+# 安装：改写 hooks.json（剥离旧 managed group 后为每事件追加本插件 group），保留他人 hook。
+# 清理旧 hooks.toml（0.144 不再读取）。trust 无法在 bash 复现，靠用户首启 codex TUI 授信。
+adapter_install_hooks() {
+    _install_require_jq
+    mkdir -p "$(dirname "$ADAPTER_HOOKS_FILE")" 2>/dev/null || true
+    [ -f "$_CODEX_LEGACY_TOML" ] && rm -f "$_CODEX_LEGACY_TOML" && echo "移除旧 hooks.toml（0.144 不再读取）"
+    local hook_script="${_LIB_DIR}/tmux-ai-status"
+    local new_json
+    new_json=$(_codex_read_existing | _codex_strip_managed | jq \
+        --arg script "$hook_script" \
+        --arg events "$_CODEX_EVENTS" '
+          .hooks //= {}
+          | reduce ($events | split(" ")[]) as $ev (.;
+              .hooks[$ev] = ((.hooks[$ev] // []) + [{
+                hooks: [{ type: "command", command: ($script + " codex " + $ev), timeout: 5 }]
+              }])
+            )
+        ')
+    _install_atomic_write "$new_json" "$ADAPTER_HOOKS_FILE"
+    echo "Codex hooks installed to $ADAPTER_HOOKS_FILE"
+    echo "Events: $_CODEX_EVENTS"
+    echo ""
+    echo "⚠️  下次启动 codex 时 TUI 会提示 \"Hooks need review\"，选择 \"Trust all and continue\" 授信一次即可永久生效。"
+}
+
+# 卸载：剥离本插件 group，剩空对象则删文件，否则写回。清理旧 toml。
+adapter_uninstall_hooks() {
+    _install_require_jq
+    [ -f "$_CODEX_LEGACY_TOML" ] && rm -f "$_CODEX_LEGACY_TOML" && echo "移除旧 hooks.toml"
+    if [ -f "$ADAPTER_HOOKS_FILE" ]; then
+        local stripped
+        stripped=$(_codex_read_existing | _codex_strip_managed)
+        if [ "$(printf '%s' "$stripped" | jq -c .)" = "{}" ]; then
+            rm -f "$ADAPTER_HOOKS_FILE"
+            echo "Codex hooks uninstalled (removed empty $ADAPTER_HOOKS_FILE)"
+        else
+            _install_atomic_write "$stripped" "$ADAPTER_HOOKS_FILE"
+            echo "Codex hooks uninstalled from $ADAPTER_HOOKS_FILE (preserved external content)"
+        fi
+    else
+        echo "Codex hooks: nothing to uninstall ($ADAPTER_HOOKS_FILE not found)"
+    fi
+}

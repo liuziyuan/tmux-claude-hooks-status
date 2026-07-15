@@ -12,6 +12,11 @@
 #   ADAPTER_SESSION_START_TIMING  "immediate"|"deferred" SessionStart 时机
 #   ADAPTER_INSTALLER         install 脚本绝对路径（供自修复/TUI 调用）
 #   adapter_check_integrity() hooks 是否完整注册本插件（返回 0=完整）
+#   adapter_install_hooks()   安装 hooks（合并式，保留他人 hook）
+#   adapter_uninstall_hooks() 卸载本插件 hooks
+#
+# install/uninstall 依赖 lib-install-hooks.sh 的 _install_require_jq/_install_atomic_write，
+# 仅在被 install wrapper source 时可用；事件路径 source 本文件只定义函数不调用，零开销。
 
 # Claude Code 注册 10 个事件，全部 async（PermissionRequest 例外 sync）。
 ADAPTER_EVENTS="SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest Notification Stop StopFailure"
@@ -43,4 +48,77 @@ adapter_check_integrity() {
         | length
     ' "$ADAPTER_HOOKS_FILE" 2>/dev/null)
     [ "${registered:-0}" -ge 10 ]
+}
+
+# Claude 事件集合（含同步事件 PermissionRequest）。install/uninstall 用。
+_CLAUDE_EVENTS="SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest Notification Stop StopFailure"
+
+# 安装：合并式更新 settings.json，保留他人（masko 等）注册的 hook。
+# 清理 legacy 名（tmux-claude-status / tmux-powerline-claude-status）+ 指向其他路径的
+# stale tmux-ai-status 条目，$TOOL_CMD 未注册则追加。PermissionRequest 为 sync（async=false）。
+adapter_install_hooks() {
+    _install_require_jq
+    [ -f "$ADAPTER_HOOKS_FILE" ] || _install_atomic_write '{}' "$ADAPTER_HOOKS_FILE"
+    local hook_script="${_LIB_DIR}/tmux-ai-status"
+    local tool_cmd="${hook_script} claude"
+    local updated
+    updated=$(jq --arg dev_script "$hook_script" --arg tool_cmd "$tool_cmd" '
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
+        ["PermissionRequest"] as $sync_events |
+        reduce $events[] as $event (
+            .;
+            ($tool_cmd + " " + $event) as $hook_cmd |
+            .hooks //= {} |
+            .hooks[$event] //= [] |
+            .hooks[$event] |= (
+                map(
+                    .hooks = [
+                        .hooks[]
+                        | select(.command | contains("tmux-powerline-claude-status") | not)
+                        | select(.command | contains("tmux-claude-status") | not)
+                        | select(
+                            (.command | contains("tmux-ai-status") | not)
+                            or (.command | startswith($dev_script))
+                        )
+                    ]
+                    | select(.hooks | length > 0)
+                )
+            ) |
+            if ([.hooks[$event][]?.hooks[]?.command] | index($hook_cmd)) == null then
+                .hooks[$event] += [{
+                    "hooks": [{
+                        "async": (($event | IN($sync_events[])) | not),
+                        "command": $hook_cmd,
+                        "type": "command"
+                    }],
+                    "matcher": ""
+                }]
+            else . end
+        )
+    ' "$ADAPTER_HOOKS_FILE")
+    _install_atomic_write "$updated" "$ADAPTER_HOOKS_FILE"
+    echo "Claude hooks installed to $ADAPTER_HOOKS_FILE"
+    echo "Events: $_CLAUDE_EVENTS"
+}
+
+# 卸载：单次 jq pipeline 移除所有指向本插件的 hooks，保留他人条目。
+adapter_uninstall_hooks() {
+    _install_require_jq
+    [ -f "$ADAPTER_HOOKS_FILE" ] || { echo "Claude hooks: nothing to uninstall"; return 0; }
+    local hook_script="${_LIB_DIR}/tmux-ai-status"
+    local updated
+    updated=$(jq --arg hook_script "$hook_script" '
+        .hooks |= if . then
+            [. | to_entries[] |
+                .value |= [
+                    .[] | .hooks = [.hooks[] | select(.command | startswith($hook_script) | not)]
+                    | select(.hooks | length > 0)
+                ]
+                | select(.value | length > 0)
+            ] | from_entries
+        else . end
+    ' "$ADAPTER_HOOKS_FILE")
+    _install_atomic_write "$updated" "$ADAPTER_HOOKS_FILE"
+    echo "Claude hooks uninstalled from $ADAPTER_HOOKS_FILE"
 }

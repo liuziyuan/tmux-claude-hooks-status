@@ -24,11 +24,12 @@ scripts/
   lib-tmux-ai-status.sh                # 共享库：TMUX_PANE 解析、状态聚合、pane title 监控、日志
   tmux-ai-status                       # 事件处理器（参数化：<TOOL_ID> <EVENT>，claude/codex 共用）
   tmux-ai-esc                          # Esc 键拒绝检测（!/? → -）
+  lib-install-hooks.sh                 # 安装公共骨架（依赖检查 + 原子写）
   adapters/
-    claude.sh                          # Claude Code 差异声明 + 完整性检查
-    codex.sh                           # Codex 差异声明（无SessionEnd/延迟SessionStart/trust）
-  install-claude-hooks.sh              # Claude Code hooks 注册/卸载（~/.claude/settings.json）
-  install-codex-hooks.sh               # Codex hooks 注册/卸载（~/.codex/hooks.json，需 jq）
+    claude.sh                          # Claude Code 差异声明 + 完整性检查 + install/uninstall
+    codex.sh                           # Codex 差异声明 + install/uninstall（无SessionEnd/延迟SessionStart/trust）
+  install-claude-hooks.sh              # 薄 wrapper → adapters/claude.sh
+  install-codex-hooks.sh               # 薄 wrapper → adapters/codex.sh
 ```
 
 ### 工具适配器架构（adapters/）
@@ -44,6 +45,9 @@ scripts/
 - `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
+- `adapter_install_hooks()` / `adapter_uninstall_hooks()` — 安装/卸载 hooks（合并式，保留他人 hook）
+
+install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
 
 核心引擎不再写 `case "$TOOL_ID"`：`_check_hooks_integrity` 委托 `adapter_check_integrity`；`_maybe_repair_hooks` 用 `ADAPTER_INSTALLER`；`_pane_has_ai_process`/`build_all_status` 用 `_collect_ai_process_names`（扫所有 `adapters/*.sh` 汇总进程名，聚合/清理路径认全部工具）。
 
