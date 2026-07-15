@@ -7,12 +7,14 @@
 #   - 无独立 hooks 配置文件：opencode 用 JS/TS **plugin** 模型（~/.config/opencode/plugins/），
 #     不是 Claude 的 settings.json / Codex 的 hooks.json。ADAPTER_HOOKS_FILE 指向本插件生成的
 #     单个 plugin 文件（.ts），install/uninstall 是整文件写入/删除，不做 jq 合并。
-#   - plugin 内部订阅 opencode 的命名 hook（chat.message / tool.execute.before/after /
-#     permission.ask）+ 通用 event 流（session.created/idle），拼成 Claude 规范 JSON 后
+#   - plugin 内部订阅 opencode 的命名 hook（chat.message / tool.execute.before/after）+ 通用
+#     event 流（session.created/idle、permission.*、question.*），拼成 Claude 规范 JSON 后
 #     pipe 给本仓库 tmux-ai-status，核心引擎（tmux-ai-status 的事件 case）零改动。
-#   - opencode 无法区分「等待普通授权」与「AskUserQuestion」，permission.asked 统一映射
-#     PermissionRequest，故派生状态固定为 `!`（不出现 `?`）。请求 ID 与
-#     permission.replied.requestID 用于精确维护多个 pending 请求。
+#   - opencode 有两套独立「问用户」系统，均经 event 流（非命名 hook，见 issue #7006
+#     permission.ask hook 从不触发）：Permission（bash/edit 授权）发 permission.asked/replied
+#     → `!`；Question（AskUserQuestion 选项弹窗）发 question.asked/replied/rejected，adapter
+#     把 tool_name 填 "AskUserQuestion" → core 派生 `?`。两套的 request_id 用事件 .id/.requestID
+#     精确配对解除。
 #   - 无 SessionEnd：退出无 hook，由 tmux-ai-monitor 做进程检测清理（同 codex）。
 #   - SessionStart 即时：session.created 在会话建立时立即触发（不同于 codex 的 deferred）。
 
@@ -29,7 +31,7 @@ ADAPTER_HOOKS_FILE="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ope
 ADAPTER_HAS_SESSION_END="false"
 # session.created 即时触发
 ADAPTER_SESSION_START_TIMING="immediate"
-# permission.asked 始终携带请求 ID，不需要无 ID sentinel。
+# permission.asked / question.asked 均携带请求 ID（.id），不需要无 ID sentinel。
 ADAPTER_HOLD_UNMATCHED_PERMISSION="false"
 
 # 自修复/TUI 调用的安装脚本
@@ -42,8 +44,10 @@ adapter_check_integrity() {
     [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
     grep -q "$_OPENCODE_MARKER" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
     grep -q "${_LIB_DIR}/tmux-ai-status" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
+    grep -q 'case "permission.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
+    grep -q 'case "question.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
     grep -q 'case "permission.replied"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
-    grep -q 'tool_use_id: p.id' "$ADAPTER_HOOKS_FILE" 2>/dev/null
+    grep -q 'request_id: p.requestID' "$ADAPTER_HOOKS_FILE" 2>/dev/null
 }
 
 # 生成 plugin 文件内容。$1 = tmux-ai-status 绝对路径。
@@ -62,8 +66,9 @@ export const TmuxAiStatus = async ({ \$ }) => {
     return \$\`printf '%s' \${json} | \${HOOK_SCRIPT} opencode \${eventName}\`.quiet().nothrow()
   }
 
-  // opencode 用「命名 hook」派发大多数生命周期点（chat.message / tool.execute.* /
-  // permission.ask），仅 session 级用通用 event 流（session.idle）。分开映射：
+  // opencode 用「命名 hook」派发消息/工具执行点（chat.message / tool.execute.*），
+  // 权限与提问走通用 event 流（permission.* / question.*），会话生命周期也走 event 流
+  // （session.created/idle）。分开映射：
   return {
     // 用户提交提示词
     "chat.message": async (input) => {
@@ -85,16 +90,23 @@ export const TmuxAiStatus = async ({ \$ }) => {
         tool_use_id: input.callID || "",
       })
     },
-    // 权限询问命名 hook（部分场景由 permission.ask 触发；opencode 无法区分普通授权
-    // 与 AskUserQuestion，统一 → \`!\`）
-    "permission.ask": async (input) => {
-      await fire("PermissionRequest", {
-        session_id: input.sessionID || "",
-        tool_name: input.type || input.permission || "",
-      })
-    },
-    // 通用事件流：会话建立即时 SessionStart，会话空闲 → Stop（turn 完成），
-    // permission.asked（弹窗通知，字段 permission=工具名 / sessionID）→ PermissionRequest
+    // 通用事件流。opencode 有两套独立「问用户」系统，各发各的事件（均经 event 流，
+    // 不经命名 hook —— permission.ask 命名 hook 上游从不触发，见 issue #7006）：
+    //
+    //   1. Permission（bash/edit 等授权）：
+    //      permission.asked   → PermissionRequest（tool_name≠AskUserQuestion → \`!\`）
+    //        properties: {id, sessionID, permission=工具名, tool:{callID}}
+    //      permission.replied → PermissionResolved
+    //        properties: {sessionID, requestID, reply: once|always|reject}
+    //
+    //   2. Question（AskUserQuestion 选项弹窗）：
+    //      question.asked    → PermissionRequest（tool_name=AskUserQuestion → \`?\`）
+    //        properties: {id, sessionID, questions[], tool:{callID}}
+    //      question.replied  → PermissionResolved（用户作答）
+    //      question.rejected → PermissionResolved（用户 dismiss）
+    //        properties: {sessionID, requestID, ...}
+    //
+    // 两套的 request_id 均取事件的 .id（ask）/.requestID（reply），core 精确配对解除。
     event: async ({ event }) => {
       const p = event.properties || {}
       switch (event.type) {
@@ -104,13 +116,21 @@ export const TmuxAiStatus = async ({ \$ }) => {
           return fire("Stop", { session_id: p.sessionID || p.id || "" })
         case "permission.asked":
           return fire("PermissionRequest", {
-            session_id: p.sessionID || p.session_id || "",
-            tool_name: p.permission || p.type || p.tool || "",
+            session_id: p.sessionID || "",
+            tool_name: p.permission || "",
+            tool_use_id: p.id || "",
+          })
+        case "question.asked":
+          return fire("PermissionRequest", {
+            session_id: p.sessionID || "",
+            tool_name: "AskUserQuestion",
             tool_use_id: p.id || "",
           })
         case "permission.replied":
+        case "question.replied":
+        case "question.rejected":
           return fire("PermissionResolved", {
-            session_id: p.sessionID || p.session_id || "",
+            session_id: p.sessionID || "",
             request_id: p.requestID || "",
             reply: p.reply || "",
           })
