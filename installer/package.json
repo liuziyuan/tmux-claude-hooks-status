@@ -8,8 +8,13 @@
   },
   "files": [
     "bin",
-    "src"
+    "src",
+    "README.md"
   ],
+  "scripts": {
+    "check": "for f in bin/cli.js src/*.js; do node --check \"$f\"; done && echo 'all js syntax OK'",
+    "start": "node bin/cli.js"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -25,5 +30,19 @@
     "installer",
     "tui"
   ],
-  "license": "MIT"
+  "author": "liu ziyuan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liuziyuan/tmux-claude-hooks-status",
+    "directory": "installer"
+  },
+  "homepage": "https://github.com/liuziyuan/tmux-claude-hooks-status/tree/main/installer#readme",
+  "bugs": {
+    "url": "https://github.com/liuziyuan/tmux-claude-hooks-status/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

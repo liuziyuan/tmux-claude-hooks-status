@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: installer (node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: installer/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check
+      - name: Smoke-load all modules
+        run: node --input-type=module -e 'import "./src/detect.js"; import "./src/env.js"; import "./src/hooks.js"; import "./src/symlink.js"; import "./src/adapters-meta.js"; console.log("modules load OK")'
+
+  scripts:
+    name: bash scripts (syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n on all shell scripts
+        run: |
+          set -e
+          for f in scripts/tmux-ai-status scripts/tmux-ai-esc scripts/*.sh scripts/adapters/*.sh; do
+            [ -f "$f" ] || continue
+            bash -n "$f" && echo "OK  $f"
+          done

@@ -5,7 +5,10 @@
 ## 运行
 
 ```bash
-# 仓库内
+# npm（发布后）
+npx tmux-ai-status-installer
+
+# 仓库内开发
 cd installer && npm install && node bin/cli.js
 
 # 或 tmux 内快捷键
@@ -28,6 +31,15 @@ prefix + I
 TUI 不重实现 bash 逻辑——hooks 装/卸经 `execa` 调薄 wrapper `scripts/install-<tool>-hooks.sh`（内部走 `scripts/adapters/<tool>.sh`）。工具元数据（bin/minVersion/hooksFile）在 `src/adapters-meta.js`，与 bash adapter 一一对应。
 
 新增 CLI：`src/adapters-meta.js` 加一条 + 加对应 bash adapter/wrapper。
+
+## 发布（npm）
+
+由 GitHub Actions 自动发布：push 到 `main` 且 `installer/package.json` 的 `version`
+比 npm 上已发布版本新时，`.github/workflows/publish-installer.yml` 自动
+`npm publish --provenance --access public` + 打 tag `installer-v<version>` + 建 Release。
+
+发布前置：仓库 Settings → Secrets 配 `NPM_TOKEN`（npm automation token）。
+手动发布版本：改 `package.json` 的 `version` → 提交 push main 即触发。
 
 ```
 installer/
