@@ -6,28 +6,34 @@
 
 ## 快速安装（交互式命令行）
 
-完整安装需要 Node.js 18+，以及一个包含根目录 `scripts/` 的仓库副本：
+用 npm 全局安装已发布的 TUI（需要 Node.js 18+；插件的 `scripts/` 与 tmux 入口已打包进 npm 包内，这条路径无需仓库 checkout）：
 
 ```bash
-git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git ~/.local/share/tmux-ai-hooks-status
-cd ~/.local/share/tmux-ai-hooks-status/installer
-npm install
-npm start
+npm install -g tmuxclihook
+tmuxclihook
 ```
 
-在 TUI 中可完成环境检查/修复、tmux 插件软链创建，以及 Claude Code / Codex hooks 的安装、卸载和修复。插件载入 tmux 后，也可以随时使用：
+在 TUI 中可完成环境检查/修复、Claude Code / Codex / opencode hooks 的安装/卸载/修复，以及把插件集成进 `~/.tmux.conf`（写入一行指向全局安装路径的 `run-shell` 声明，不再需要 TPM 软链）。插件载入 tmux 后，也可以随时使用：
 
 ```text
 prefix + I
 ```
 
-已发布的 `npx tmuxclihook` 入口可用于环境和 AI CLI 检查；hooks 与软链操作需要仓库根目录中的脚本，因此完整操作应从仓库副本或 `prefix + I` 启动。
+`npx tmuxclihook` 只适合运行环境和 AI CLI 检查：它的临时缓存目录每次运行后都会被清理，若在这条路径上写入 hooks 或 tmux 集成，写入的路径运行完就会失效。需要持久生效的操作请用 `npm install -g`。
+
+**本地开发调试？** 用"source 管理"菜单或环境变量把 TUI 指向仓库副本，而非包内自带的代码：
+
+```bash
+TMUXCLIHOOK_SOURCE=/path/to/your/checkout tmuxclihook
+```
+
+之后安装 hooks / 集成 tmux 都会写入该仓库副本的路径，改代码立即生效，无需重新发布。切换 source 不会自动重写已经安装好的 hooks 或 `.tmux.conf`——切换后需重新执行一次"安装 hooks"/"tmux 集成"。
 
 环境 Doctor 会安装缺失的 Homebrew formula，并且只升级已经由 Homebrew 管理的过旧 formula。它不会自动安装 Homebrew，不会修改非 Homebrew 管理的软件，也不会自动安装或升级 Claude Code / Codex CLI。所有修复均需用户选择，执行后会自动完整复检。
 
 ## 快速卸载 Hooks
 
-通过 `prefix + I`（或在 `installer/` 中运行 `npm start`）进入 TUI，选择“卸载 hooks”。如需连同 tmux 配置和插件软链一起完整移除，请查看 [`AI_UNINSTALL.md`](AI_UNINSTALL.md)；该兼容文档继续用于无 TTY 和故障恢复场景。
+通过 `prefix + I`（或 `tmuxclihook` / 在 `installer/` 中运行 `npm start`）进入 TUI，选择“卸载 hooks”。如需连同 tmux 配置和插件软链一起完整移除，请查看 [`AI_UNINSTALL.md`](AI_UNINSTALL.md)；该兼容文档继续用于无 TTY 和故障恢复场景。
 
 ## 手动安装
 
@@ -190,5 +196,5 @@ Prefix 为 `Ctrl+a`（按下后松开，再按对应键）。
 | `prefix + M-u` | 卸载 Codex hooks |
 | `prefix + C-p` | 安装 opencode plugin |
 | `prefix + M-p` | 卸载 opencode plugin |
-| `prefix + I` | TPM 安装所有插件 |
+| `prefix + I` | 打开交互式 TUI 安装器 |
 | `prefix + r` | 重载配置 |

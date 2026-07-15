@@ -97,9 +97,18 @@ tmux bind-key M-u run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh unins
 tmux bind-key C-p run-shell "${CURRENT_DIR}/scripts/install-opencode-hooks.sh && tmux display 'opencode plugin installed'"
 # prefix + M-p: 卸载 opencode plugin
 tmux bind-key M-p run-shell "${CURRENT_DIR}/scripts/install-opencode-hooks.sh uninstall && tmux display 'opencode plugin removed'"
-# prefix + I: 打开交互式 TUI 安装器（环境检查/侦测CLI/装卸修hooks/软链校验）
-# 用 new-window 以获得真实终端（TUI 需交互，不能走后台 run-shell）
-tmux bind-key I new-window -c "${CURRENT_DIR}/installer" "node bin/cli.js"
+# prefix + I: 打开交互式 TUI 安装器（环境检查/侦测CLI/装卸修hooks/tmux集成/source管理）
+# 用 new-window 以获得真实终端（TUI 需交互，不能走后台 run-shell）。
+# 优先用全局命令 tmuxclihook（npm i -g 后可用，跟随当前 source 自动解析路径）；
+# 找不到则回落本地开发布局（installer/ 子目录存在则用之，否则用 CURRENT_DIR 自身，
+# 覆盖"scripts/ 与 tmux 入口已被 npm 打包进同一目录"的场景）。
+if command -v tmuxclihook >/dev/null 2>&1; then
+    tmux bind-key I new-window "tmuxclihook"
+elif [ -d "${CURRENT_DIR}/installer" ]; then
+    tmux bind-key I new-window -c "${CURRENT_DIR}/installer" "node bin/cli.js"
+else
+    tmux bind-key I new-window -c "${CURRENT_DIR}" "node bin/cli.js"
+fi
 
 # Esc 拒绝检测：! / ? 状态下 Esc → -
 tmux bind-key -n Escape run-shell "${CURRENT_DIR}/scripts/tmux-ai-esc"

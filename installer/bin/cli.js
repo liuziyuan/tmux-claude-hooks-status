@@ -1,17 +1,31 @@
 #!/usr/bin/env node
 // cli.js — tmux-ai-status 交互式安装 TUI（@clack/prompts）
 //
-// 主菜单：环境检查 / 侦测 CLI / 安装 / 卸载 / 修复 hooks / tmux 软链。
+// 主菜单：环境检查 / 侦测 CLI / 安装 / 卸载 / 修复 hooks / tmux 集成 / source 管理。
 // 实际 hooks 逻辑委托 bash wrapper（scripts/install-<tool>-hooks.sh）。
+//
+// "source" 决定 scripts/ 与 tmux 入口来自哪里：环境变量 TMUXCLIHOOK_SOURCE >
+// 持久化配置 ~/.config/tmuxclihook/config.json > 包内自带（生产默认）> 仓库根
+// （开发回落）。见 src/source.js 与 docs/2026-07-15-npm-global-install-plan.md。
 
+import { homedir } from 'node:os';
 import * as p from '@clack/prompts';
 import { checkEnv, detectClis, interactiveShell } from '../src/detect.js';
 import { planBrewRemediation, runBrewAction } from '../src/env.js';
 import { installHooks, uninstallHooks, repairHooks } from '../src/hooks.js';
-import { checkSymlink, createSymlink, checkTmuxConf } from '../src/symlink.js';
-import { appendPluginDeclaration, reloadTmux } from '../src/tmuxconf.js';
+import { checkSymlink, checkTmuxConf } from '../src/symlink.js';
+import { ensureTmuxIntegration, reloadTmux } from '../src/tmuxconf.js';
 import { stopMonitor, clearAggregateStatus, removeSymlinks } from '../src/purge.js';
-import { TOOLS, repoExists, REPO_ROOT } from '../src/adapters-meta.js';
+import {
+  TOOLS,
+  repoExists,
+  REPO_ROOT,
+  TMUX_ENTRY,
+  SOURCE_ORIGIN,
+  SOURCE_WARNINGS,
+  refreshSource,
+} from '../src/adapters-meta.js';
+import { setSource, clearSource, getPersistedSource, originLabel } from '../src/source.js';
 import { note, padDisplay } from '../src/tui.js';
 
 const OK = '✓';
@@ -153,44 +167,128 @@ async function runHookAction(action, verb) {
   }
 }
 
-async function symlinkMenu() {
-  const st = checkSymlink();
+// tmux 集成：不再依赖 TPM 软链，直接检查/修复 .tmux.conf 里指向当前 source
+// 的 run-shell 声明。历史遗留的 ~/.tmux/plugins/ 软链仅作提示，清理走「完整卸载插件」。
+// 确认 + 应用「确保 tmux 集成」，被「tmux 集成」菜单与启动时的主动检测共用。
+async function confirmAndApplyTmuxIntegration(conf) {
+  const go = await p.confirm({
+    message: conf.referenced
+      ? '.tmux.conf 中的声明指向过期路径（例如切换了 source），更新为当前路径并重载？'
+      : '.tmux.conf 未集成本插件，追加 run-shell 声明并重载？',
+  });
+  if (p.isCancel(go) || !go) return false;
+
+  const r = ensureTmuxIntegration();
+  if (!r.ok) { p.log.error(`${NO} 写入 .tmux.conf 失败：${r.output}`); return false; }
+  if (r.action === 'created') p.log.success(`${OK} 已创建 ${r.path} 并写入声明`);
+  else if (r.action === 'appended') p.log.success(`${OK} 已追加声明到 ${r.path}`);
+  else if (r.action === 'replaced') p.log.success(`${OK} 已更新 ${r.path} 中的过期路径`);
+  else p.log.info('无需变更');
+
+  const rl = await reloadTmux();
+  if (rl.ok) p.log.success(`${OK} 已重载 tmux 配置`);
+  else p.log.warn(`重载失败（tmux 可能未运行）：${rl.output}\n请手动执行 tmux source-file ~/.tmux.conf`);
+  return true;
+}
+
+async function tmuxIntegrationMenu() {
+  const symlinkSt = checkSymlink();
   const conf = checkTmuxConf();
   const lines = [
-    `  软链 ${PLUGIN_LINE(st)}`,
-    `  .tmux.conf: ${conf.exists ? (conf.referenced ? `${OK} 已引用插件` : `${NO} 未引用（需手动加 @plugin 或 run）`) : `${NO} 不存在`}`,
+    `  加载方式：run-shell '${TMUX_ENTRY}'`,
+    `  .tmux.conf：${confStatusLine(conf)}`,
   ];
-  note(lines.join('\n'), 'tmux 软链');
+  if (symlinkSt.status === 'ok') {
+    lines.push(`  历史遗留软链：检测到 ${symlinkSt.link}（新加载方式不再需要，可在「完整卸载插件」中一并清理）`);
+  }
+  note(lines.join('\n'), 'tmux 集成');
 
-  // 步骤 1：软链缺失/错误则询问创建
-  if (st.status !== 'ok') {
-    const go = await p.confirm({ message: `创建软链 ${PLUGIN_LINK_PATH()} → 仓库？` });
-    if (p.isCancel(go) || !go) return;
-    const r = createSymlink();
-    if (r.ok) p.log.success(`${OK} 软链已创建：${r.from} → ${r.to}`);
-    else { p.log.error(`${NO} 创建失败：${r.output}`); return; }
-  } else {
-    p.log.success('软链正常');
+  if (conf.pointsToCurrent) {
+    p.log.success('已正确集成，无需操作');
+    return;
   }
 
-  // 步骤 2：.tmux.conf 未引用插件则询问追加声明 + reload（闭合"软链建好但没加载"）
-  if (!conf.referenced) {
-    const decl = await p.confirm({
-      message: `.tmux.conf 未声明插件，追加 set -g @plugin 'tmux-ai-hooks-status' 并重载？`,
+  await confirmAndApplyTmuxIntegration(conf);
+}
+
+// 启动时主动检测：未集成 / 路径过期时主动提示，而非只在「tmux 集成」子菜单里被动
+// 等用户发现。尤其覆盖"全新 .tmux.conf"场景——`npm i -g` 装完不会自动写入任何东西
+// （没有 postinstall 钩子），必须经这一步或手动进「tmux 集成」菜单确认后才会写入。
+async function maybeOfferTmuxIntegration() {
+  const conf = checkTmuxConf();
+  if (conf.pointsToCurrent) return;
+
+  p.log.warn(
+    conf.exists
+      ? '.tmux.conf 尚未集成本插件（或路径已过期），状态栏与 hooks 不会自动生效。'
+      : '未找到 ~/.tmux.conf，可创建一个新文件并写入本插件的加载声明。',
+  );
+  await confirmAndApplyTmuxIntegration(conf);
+}
+
+function confStatusLine(conf) {
+  if (!conf.exists) return `${NO} 不存在`;
+  if (conf.pointsToCurrent) return `${OK} 已指向当前安装`;
+  if (conf.referenced) return `${NO} 已引用，但路径过期或为旧式声明`;
+  return `${NO} 未集成`;
+}
+
+// source 管理：查看当前生效 source（含来源与失效警告），设置本地开发路径，
+// 或清除持久化配置恢复默认。切换后仅影响"接下来"的 hooks 安装 / tmux 集成写入，
+// 已写入的旧路径需要重新执行对应操作才会更新（见 docs 计划的残留风险第 4 条）。
+function currentSourceLines() {
+  const lines = [
+    `  当前 source：${REPO_ROOT}`,
+    `  来源：${originLabel(SOURCE_ORIGIN)}`,
+  ];
+  for (const w of SOURCE_WARNINGS) lines.push(`  ⚠ ${w}`);
+  return lines;
+}
+
+async function sourceMenu() {
+  note(currentSourceLines().join('\n'), 'source 状态');
+
+  const persisted = getPersistedSource();
+  const choice = await p.select({
+    message: '选择操作（Esc 返回主菜单）',
+    options: [
+      { value: 'set', label: '设置本地开发路径', hint: '指向本地仓库，改代码即时生效' },
+      {
+        value: 'clear',
+        label: '清除并恢复默认',
+        hint: persisted ? `当前已保存：${persisted}` : '未设置持久化路径',
+      },
+      { value: '__back__', label: '← 返回主菜单' },
+    ],
+  });
+  if (p.isCancel(choice) || choice === '__back__') return;
+
+  if (choice === 'set') {
+    const dir = await p.text({
+      message: '输入本地仓库路径（需含 scripts/ 目录）',
+      placeholder: '~/work/home/tmux-claude-hooks-status',
     });
-    if (p.isCancel(decl) || !decl) return;
-    const a = appendPluginDeclaration();
-    if (!a.ok) { p.log.error(`${NO} 写入 .tmux.conf 失败：${a.output}`); return; }
-    if (a.appended) p.log.success(`${OK} 已追加插件声明到 ${a.path}`);
-    else p.log.info('已引用插件，跳过写入');
-    const rl = await reloadTmux();
-    if (rl.ok) p.log.success(`${OK} 已重载 tmux 配置`);
-    else p.log.warn(`重载失败（tmux 可能未运行）：${rl.output}\n请手动执行 tmux source-file ~/.tmux.conf`);
+    if (p.isCancel(dir) || !dir) { p.log.info('已取消'); return; }
+    const expanded = dir.startsWith('~') ? dir.replace(/^~/, homedir()) : dir;
+    const r = setSource(expanded);
+    if (!r.ok) { p.log.error(`${NO} ${r.output}`); return; }
+    refreshSource();
+    p.log.success(`${OK} source 已切换到 ${r.source}`);
+    p.log.warn('需重新执行「安装 hooks」与「tmux 集成」，新路径才会写入 hooks 配置 / .tmux.conf');
+    return;
+  }
+
+  if (choice === 'clear') {
+    const r = clearSource();
+    if (!r.ok) { p.log.error(`${NO} ${r.output}`); return; }
+    refreshSource();
+    p.log.success(`${OK} 已清除，恢复默认（${originLabel(SOURCE_ORIGIN)}）`);
+    p.log.warn('需重新执行「安装 hooks」与「tmux 集成」，默认路径才会写回 hooks 配置 / .tmux.conf');
   }
 }
 
 async function purgeMenu() {
-  p.log.warn('完整卸载：停止 monitor、清聚合状态、删软链。hooks 请先在「卸载 hooks」菜单移除。');
+  p.log.warn('完整卸载：停止 monitor、清聚合状态、清理历史遗留软链。hooks 请先在「卸载 hooks」菜单移除。');
   const go = await p.confirm({ message: '继续完整卸载插件运行态？（不删仓库、不改 .tmux.conf、不 kill-server）' });
   if (p.isCancel(go) || !go) { p.log.info('已取消'); return; }
 
@@ -203,32 +301,28 @@ async function purgeMenu() {
   else p.log.warn(`清除聚合状态失败（tmux 可能未运行）：${clr.output}`);
 
   const rm = removeSymlinks();
-  if (rm.removed.length > 0) p.log.success(`${OK} 已删除软链：${rm.removed.join(', ')}`);
-  else p.log.info('无软链可删除');
+  if (rm.removed.length > 0) p.log.success(`${OK} 已清理历史遗留软链：${rm.removed.join(', ')}`);
+  else p.log.info('无历史遗留软链需要清理');
 
   note(
     "  以下破坏性步骤请手动执行：\n" +
-    "  1. 从 ~/.tmux.conf 删除：set -g @plugin 'tmux-ai-hooks-status'\n" +
+    `  1. 从 ~/.tmux.conf 删除本插件的 run-shell 声明（形如 run-shell '.../tmux-ai-hooks-status.tmux'，\n` +
+    "     或历史遗留的 set -g @plugin 'tmux-ai-hooks-status'）\n" +
     "  2. 重启 tmux server 使状态行/hooks/按键完全卸载：tmux kill-server\n" +
     "     （kill-server 会关闭当前所有 session，请先保存工作）",
     '手动收尾',
   );
 }
 
-function PLUGIN_LINE(st) {
-  if (st.status === 'ok') return `${OK} ${st.note || '指向本仓库'}`;
-  if (st.status === 'missing') return `${NO} 不存在`;
-  return `${NO} 错误（${st.reason || '指向其他位置'}）`;
-}
-function PLUGIN_LINK_PATH() {
-  return '~/.tmux/plugins/tmux-ai-hooks-status';
-}
-
 async function main() {
   p.intro('tmux-ai-status 安装器');
 
+  note(currentSourceLines().join('\n'), 'source 状态');
+
   if (!repoExists) {
-    p.log.warn(`未定位到仓库 scripts/（期望 ${REPO_ROOT}）。若通过 npx 运行，请在仓库内或已装插件目录下运行。`);
+    p.log.warn(`当前 source（${REPO_ROOT}）下未找到 scripts/ 目录，hooks 安装与 tmux 集成将失败。请用「source 管理」指向一个有效仓库路径。`);
+  } else {
+    await maybeOfferTmuxIntegration();
   }
 
   while (true) {
@@ -240,8 +334,9 @@ async function main() {
         { value: 'install', label: '安装 hooks' },
         { value: 'uninstall', label: '卸载 hooks' },
         { value: 'repair', label: '修复 hooks', hint: '完整性检查 + 缺失重装' },
-        { value: 'symlink', label: 'tmux 软链校验' },
-        { value: 'purge', label: '完整卸载插件', hint: 'monitor stop + 清状态 + 删软链' },
+        { value: 'tmux', label: 'tmux 集成', hint: '校验/修复 .tmux.conf 的加载声明' },
+        { value: 'source', label: 'source 管理', hint: '生产默认 / 切换本地调试路径' },
+        { value: 'purge', label: '完整卸载插件', hint: 'monitor stop + 清状态 + 清历史软链' },
         { value: 'exit', label: '退出' },
       ],
     });
@@ -258,7 +353,8 @@ async function main() {
       else if (choice === 'install') await runHookAction(installHooks, '安装');
       else if (choice === 'uninstall') await runHookAction(uninstallHooks, '卸载');
       else if (choice === 'repair') await runHookAction(repairHooks, '修复');
-      else if (choice === 'symlink') await symlinkMenu();
+      else if (choice === 'tmux') await tmuxIntegrationMenu();
+      else if (choice === 'source') await sourceMenu();
       else if (choice === 'purge') await purgeMenu();
     } catch (err) {
       p.log.error(String(err));

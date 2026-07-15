@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'installer/**'
+      - 'scripts/**'
+      - 'tmux-ai-hooks-status.tmux'
 
 permissions:
   contents: write
