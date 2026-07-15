@@ -5,7 +5,7 @@
 // 实际 hooks 逻辑委托 bash wrapper（scripts/install-<tool>-hooks.sh）。
 
 import * as p from '@clack/prompts';
-import { checkEnv, detectClis } from '../src/detect.js';
+import { checkEnv, detectClis, interactiveShell } from '../src/detect.js';
 import { hasBrew, brewInstall } from '../src/env.js';
 import { installHooks, uninstallHooks, repairHooks } from '../src/hooks.js';
 import { checkSymlink, createSymlink, checkTmuxConf } from '../src/symlink.js';
@@ -25,6 +25,15 @@ async function doctor() {
     return `  ${mark} ${r.name.padEnd(6)} ${r.detail.padEnd(16)} (要求 ${r.min})`;
   });
   p.note(lines.join('\n'), '环境依赖');
+
+  // 交互 shell 说明：消除「我用 zsh 但 Doctor 检查 bash」的困惑
+  const sh = interactiveShell();
+  p.note(
+    `  当前交互 shell：${sh.name}（${sh.path}）\n` +
+    `  说明：hook 脚本 shebang 为 #!/bin/bash，由 AI CLI 触发时以 bash 执行，\n` +
+    `        与你的交互 shell（${sh.name}）无关。macOS 自带 bash 3.2 即可，无需升级。`,
+    'shell 说明',
+  );
 
   const missing = results.filter((r) => !r.ok);
   if (missing.length === 0) {

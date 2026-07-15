@@ -152,7 +152,7 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
 
 - tmux >= 3.1 (user options, pane-border-status, set-hook, multi-line status-format)
 - jq (for hook installation)
-- bash >= 4.0
+- bash (any version; scripts use no bash-4-only features, macOS built-in 3.2 works. Your interactive shell — zsh/fish/etc. — is irrelevant: hooks run under `#!/bin/bash`, invoked by the AI CLI)
 
 ## Verification
 

@@ -238,7 +238,7 @@ ls /tmp/ai-status/*/*-poll-pid
 
 - tmux >= 3.1
 - jq
-- bash >= 4.0
+- bash（任意版本；脚本零 bash4 专属特性，macOS 自带 3.2 即可。交互 shell 用 zsh/fish 均不影响——hook 由 AI CLI 以 `#!/bin/bash` 执行，与交互 shell 无关）
 
 ## Hook 事件注册
 

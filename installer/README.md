@@ -16,7 +16,7 @@ prefix + I
 
 | 菜单项 | 说明 |
 |--------|------|
-| 环境检查 | 侦测 tmux(≥3.1) / jq / bash(≥4.0) / node(≥18)，逐项 ✓/✗；缺失可 brew 代装（需确认） |
+| 环境检查 | 侦测 tmux(≥3.1) / jq / bash(任意版本) / node(≥18)，逐项 ✓/✗；缺失可 brew 代装（需确认）。附交互 shell 说明（hook 用 bash 执行，与 zsh 等交互 shell 无关） |
 | 侦测 AI CLI | 扫 claude / codex，显示版本 + 是否满足最低要求（codex ≥ 0.144）+ hooks 状态 |
 | 安装 hooks | 选工具（claude/codex/全部）→ 调 `scripts/install-<tool>-hooks.sh` |
 | 卸载 hooks | 对称卸载，保留他人注册的 hook |

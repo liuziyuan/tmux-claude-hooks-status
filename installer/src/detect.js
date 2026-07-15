@@ -40,13 +40,14 @@ export async function checkEnv() {
     pkg: 'jq',
   });
 
-  // bash ≥ 4.0（macOS 自带 3.2，脚本用到 bash4 特性）
+  // bash：脚本 shebang 为 #!/bin/bash，实测零 bash4 专属特性，macOS 自带 3.2 即可运行。
+  // 只要存在可执行 bash 即通过（不校验版本）。
   const bash = await probe('bash', ['--version'], /version (\d+\.\d+)/);
   results.push({
     name: 'bash',
-    ok: bash.found && versionGte((bash.version || '0') + '.0', '4.0.0'),
+    ok: bash.found,
     detail: bash.found ? `v${bash.version}` : '未安装',
-    min: '≥ 4.0',
+    min: '任意版本',
     fixCmd: 'brew install bash',
     pkg: 'bash',
   });
@@ -63,6 +64,13 @@ export async function checkEnv() {
   });
 
   return results;
+}
+
+// 当前交互 shell（用于 Doctor 说明：hook 用 bash 执行，与交互 shell 无关）。
+export function interactiveShell() {
+  const sh = process.env.SHELL || '';
+  const name = sh.split('/').pop() || '未知';
+  return { path: sh || '未知', name };
 }
 
 // 侦测某工具是否已装本插件 hooks
