@@ -92,8 +92,9 @@ async function pickTool(message) {
     return { value: t.id, label: t.label, hint };
   });
   opts.push({ value: '__all__', label: '全部', hint: 'claude + codex' });
+  opts.push({ value: '__back__', label: '← 返回主菜单' });
   const sel = await p.select({ message, options: opts });
-  return p.isCancel(sel) ? null : sel;
+  return p.isCancel(sel) || sel === '__back__' ? null : sel;
 }
 
 async function runHookAction(action, verb) {
