@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前开发状态
 
-**Claude Code 支持已稳定。Codex CLI 支持已加入**（需 codex ≥ v0.117，lifecycle hooks）。
+**Claude Code 支持已稳定。Codex CLI 支持已加入**（需 codex ≥ v0.144，hooks.json + hook trust）。
 
 ## 项目概述
 
@@ -25,7 +25,7 @@ scripts/
   tmux-ai-status                       # 事件处理器（参数化：<TOOL_ID> <EVENT>，claude/codex 共用）
   tmux-ai-esc                          # Esc 键拒绝检测（!/? → -）
   install-claude-hooks.sh              # Claude Code hooks 注册/卸载（~/.claude/settings.json）
-  install-codex-hooks.sh               # Codex hooks 注册/卸载（~/.codex/hooks.toml）
+  install-codex-hooks.sh               # Codex hooks 注册/卸载（~/.codex/hooks.json，需 jq）
 ```
 
 ### 共享库 `lib-tmux-ai-status.sh`
@@ -36,7 +36,7 @@ scripts/
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`
 - **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配 `claude` **或** `codex` 命令
-- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 按 `TOOL_ID` 分派：claude 查 `~/.claude/settings.json`（10 事件）、codex 查 `~/.codex/hooks.toml`（6 事件）
+- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 按 `TOOL_ID` 分派：claude 查 `~/.claude/settings.json`（10 事件）、codex 查 `~/.codex/hooks.json`（6 事件）
 
 ### 数据流
 
@@ -141,7 +141,7 @@ ESC 拒绝能转 `-` 是因为 tmux 端 `bind-key -n Escape` 拦截了键流；N
 ```bash
 ln -s /Users/liuziyuan/work/home/tmux-claude-hooks-status ~/.tmux/plugins/tmux-claude-hooks-status
 prefix + C-h    # 安装 Claude hooks
-prefix + M-h    # 安装 Codex hooks（需 codex ≥ v0.117）
+prefix + M-h    # 安装 Codex hooks（需 codex ≥ v0.144，首次启动 TUI 需 Trust all）
 prefix + r      # 重载（自动触发初始化）
 ```
 
@@ -161,7 +161,7 @@ tmux list-panes -a -F "#{window_index}.#{pane_index} #{pane_id} #{@ai_pane_statu
 # 查看 Claude hooks 注册
 jq '.hooks | keys' ~/.claude/settings.json
 # 查看 Codex hooks 注册
-cat ~/.codex/hooks.toml
+cat ~/.codex/hooks.json
 
 # 查看日志（每次 hook 事件 = 一个多行块：头行含状态转移，缩进行含 tool/input 摘要）
 tail -f /tmp/tmux-ai-status.log
@@ -217,14 +217,18 @@ SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUse
 
 全部 async=true，PermissionRequest 例外（async=false 用于立即阻塞）。命令格式：`<abs>/scripts/tmux-ai-status claude <Event>`。
 
-**Codex CLI**（6 个事件，注册到 `~/.codex/hooks.toml`，需 codex ≥ v0.117）：
+**Codex CLI**（6 个事件，注册到 `~/.codex/hooks.json`，需 codex ≥ v0.144）：
 SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop
 
-命令格式：`<abs>/scripts/tmux-ai-status codex <Event>`。全部 async=true，PermissionRequest 例外（async=false）。
+命令格式：`<abs>/scripts/tmux-ai-status codex <Event>`。**全部同步**（0.144 静默跳过 `async=true` 的 hook，故不能用 async）。
 
 ### Codex 与 Claude 的差异（备忘）
 
 - Codex **无** `SessionEnd / Notification / PostToolUseFailure / StopFailure` 事件。Codex 的 `Stop` 是「turn 完成」而非 session 结束；session 真正退出时无任何 hook。→ pane 状态清理只能靠 `_cleanup_stale_panes` 的进程树检测（codex 进程消失即清）。
-- Codex hooks 配置在 `~/.codex/hooks.toml`（TOML），格式：`[[hooks.<Event>]]` matcher 组 + `[[hooks.<Event>.hooks]]` handler（`type="command"`）。`install-codex-hooks.sh` 用 sentinel 注释块（`# >>> tmux-ai-hooks-status (managed) >>>`）独占管理本插件段，块外内容原样保留，纯 bash + awk 零依赖。
+- **Codex 0.144 hook 系统重写（相对旧 0.117 的三处 breaking change）**：
+  1. **不再读取独立 `hooks.toml`** —— 仅认 `config.toml` 的 `[hooks]` 表，或 config 文件夹里的 `hooks.json`。本插件改用 `~/.codex/hooks.json`。
+  2. **`async=true` 的 hook 被静默跳过**（源码 `if r#async { skip "async hooks are not supported yet" }`）—— 故本插件所有 codex hook 均同步（无 async 字段，默认 false）。
+  3. **Hook trust 门禁** —— user 来源的 hook 需 `hooks.state.<key>.trusted_hash` 匹配 codex 计算的归一化 TOML 指纹才运行。该 hash 无法在 bash 里可靠复现，故 `install-codex-hooks.sh` **不预写 trusted_hash**；用户下次启动 codex TUI 会弹「Hooks need review → Trust all and continue」授信一次即永久生效（或以 `codex --dangerously-bypass-hook-trust` 启动跳过）。
+- Codex hooks 配置在 `~/.codex/hooks.json`（JSON），结构 `{"hooks":{"<Event>":[{"hooks":[{"type":"command","command":...,"timeout":5}]}]}}`。`install-codex-hooks.sh` 用 jq 读改写：仅剔除/替换 command 含 `tmux-ai-status` 的 group，保留用户/其他工具自有 hook（依赖 jq）。
 - Codex 与 Claude 的 stdin JSON 字段同构（`session_id`/`tool_name`/`tool_use_id`/`tool_input`/`hook_event_name`）；`PermissionRequest` 均不带 `tool_use_id`，现有兜底逻辑通用。
 - Codex hooks 同步执行，脚本正常退出 0 且 stdout 为空即视为 no-op 透传——本插件只读状态、不写 stdout，天然安全。

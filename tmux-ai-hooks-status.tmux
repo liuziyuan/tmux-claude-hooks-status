@@ -15,10 +15,6 @@ IDLE_ICON=$(tmux show-option -gv @claude_hooks_idle_icon 2>/dev/null || echo "�
 BUSY_ICON=$(tmux show-option -gv @claude_hooks_busy_icon 2>/dev/null || echo "⠿")
 AUTH_ICON=$(tmux show-option -gv @claude_hooks_auth_icon 2>/dev/null || echo "🔒")
 
-# --- 通用设置：pane 边框标题（不覆盖颜色样式）---
-tmux set-option -g pane-border-status top 2>/dev/null || true
-tmux set-option -g pane-border-format " #P #{pane_title} " 2>/dev/null || true
-
 # --- 多行状态栏：动态追加 AI 状态行 ---
 # 读取当前行数（其他插件已设置好的），追加到最后一行的下一行
 # 幂等检测：扫描所有行，查找已含 @ai_all_status 签名的行，直接复用，
@@ -77,13 +73,19 @@ tmux set-hook -g client-attached   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-st
 tmux set-hook -g pane-exited       "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 # after-kill-pane: kill-pane 后触发孤儿清理
 tmux set-hook -g after-kill-pane   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
+# pane-focus-in: 切换到 pane 时完整刷新（清理 + 重建聚合）。
+# codex 无 SessionEnd 事件，退出后状态残留只能靠 _cleanup_stale_panes 的进程树检测清除；
+# 且 SessionStart hook 延迟到首个 turn，空闲蹲提示符时无事件。借 focus 事件一并处理：
+# 退出残留 ✓/- → cleanup 清空；空闲无状态 → build_all_status 补 idle -。与 claude 靠
+# 生命周期 hook 维护状态一致。
+tmux set-hook -g pane-focus-in     "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 
 # --- 快捷键绑定 ---
 # prefix + C-h: 安装 Claude hooks 到 ~/.claude/settings.json
 tmux bind-key C-h run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh && tmux display 'Claude hooks installed'"
 # prefix + C-u: 卸载 Claude hooks
 tmux bind-key C-u run-shell "${CURRENT_DIR}/scripts/install-claude-hooks.sh uninstall && tmux display 'Claude hooks removed'"
-# prefix + M-h: 安装 Codex hooks 到 ~/.codex/hooks.toml
+# prefix + M-h: 安装 Codex hooks 到 ~/.codex/hooks.json（需 codex ≥ v0.144）
 tmux bind-key M-h run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh && tmux display 'Codex hooks installed'"
 # prefix + M-u: 卸载 Codex hooks
 tmux bind-key M-u run-shell "${CURRENT_DIR}/scripts/install-codex-hooks.sh uninstall && tmux display 'Codex hooks removed'"

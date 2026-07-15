@@ -76,12 +76,23 @@ _clear_pane_id() {
 
 # --- 状态聚合 ---
 # 扫描所有 attached session 的 pane，读取 @ai_pane_status，写入 @ai_all_status
+#
+# 空窗期补 idle：codex 的 SessionStart hook 延迟到首个 turn 才触发（上游 run_pending_
+# session_start_hooks 设计），空闲蹲在提示符时插件收不到任何事件 → 无 @ai_pane_status。
+# 用 pane_current_command 兜底：前台命令是 codex/claude 但无显式状态时，显示 idle `-`。
+# 纯显示，不落 @ai_pane_status（避免污染 pending/cleanup 逻辑）。零进程扫描。
 build_all_status() {
     ALL=""
     cur_sess=""
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _last cur_cmd; do
         local pane_status="$claude_status"
-        [ -n "$pane_status" ] || continue
+        if [ -z "$pane_status" ]; then
+            # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle
+            case "$(basename "$cur_cmd" 2>/dev/null)" in
+                claude*|codex*) pane_status="-" ;;
+                *) continue ;;
+            esac
+        fi
         local session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
         local panel_block="#[bg=#44475A,fg=#BD93F9] ${win_idx}.${pane_idx} #[bg=default,fg=default]"
         local status_block
@@ -99,7 +110,7 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_last_attached}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_last_attached}|#{pane_current_command}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
@@ -255,7 +266,11 @@ _new_session_owns_pane() {
 _pane_has_ai_process() {
     local pane_id="$1"
     local pane_pid
-    pane_pid=$(tmux list-panes -t "$pane_id" -F "#{pane_pid}" 2>/dev/null)
+    # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
+    # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
+    # 邻近 pane 的 codex/claude 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
+    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
+        | awk -v id="$pane_id" '$1==id{print $2; exit}')
     [ -z "$pane_pid" ] && return 1
     local pids="$pane_pid" next="" depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
@@ -374,15 +389,17 @@ _maybe_cleanup_stale() {
 
 # Hooks 完整性检查：按 TOOL_ID 分派
 #   claude → ~/.claude/settings.json 的 10 个事件是否都注册了 tmux-ai-status hook
-#   codex  → ~/.codex/hooks.toml 是否含 6 个 tmux-ai-status command
+#   codex  → ~/.codex/hooks.json 是否含 6 个 tmux-ai-status command（0.144+）
 # 缺失 → 返回 1（配置被外部应用覆盖时会发生）
 _check_hooks_integrity() {
     case "${TOOL_ID:-claude}" in
         codex)
-            local hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.toml"
+            local hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
             [ -f "$hooks_file" ] || return 1
             local n
-            n=$(grep -c "tmux-ai-status codex" "$hooks_file" 2>/dev/null)
+            n=$(jq '[.hooks[]?[]?.hooks[]?.command // empty
+                     | select(contains("tmux-ai-status codex"))] | length' \
+                "$hooks_file" 2>/dev/null)
             [ "${n:-0}" -ge 6 ]
             ;;
         *)
