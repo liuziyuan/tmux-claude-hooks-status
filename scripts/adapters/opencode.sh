@@ -11,12 +11,13 @@
 #     permission.ask）+ 通用 event 流（session.created/idle），拼成 Claude 规范 JSON 后
 #     pipe 给本仓库 tmux-ai-status，核心引擎（tmux-ai-status 的事件 case）零改动。
 #   - opencode 无法区分「等待普通授权」与「AskUserQuestion」，permission.asked 统一映射
-#     PermissionRequest 且不传 tool_name=AskUserQuestion，故派生状态固定为 `!`（不出现 `?`）。
+#     PermissionRequest，故派生状态固定为 `!`（不出现 `?`）。请求 ID 与
+#     permission.replied.requestID 用于精确维护多个 pending 请求。
 #   - 无 SessionEnd：退出无 hook，由 tmux-ai-monitor 做进程检测清理（同 codex）。
 #   - SessionStart 即时：session.created 在会话建立时立即触发（不同于 codex 的 deferred）。
 
-# opencode 只触发 6 个规范事件（无 SessionEnd/Notification/PostToolUseFailure/StopFailure）
-ADAPTER_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop"
+# 6 个规范生命周期事件 + 精确解除审批态的内部 PermissionResolved 事件。
+ADAPTER_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest PermissionResolved PostToolUse Stop"
 
 # 前台进程名：opencode 二进制无 arch 后缀（区别于 codex 的 codex-aarch64-* 等）
 ADAPTER_PROCESS_NAMES="opencode"
@@ -28,6 +29,8 @@ ADAPTER_HOOKS_FILE="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ope
 ADAPTER_HAS_SESSION_END="false"
 # session.created 即时触发
 ADAPTER_SESSION_START_TIMING="immediate"
+# permission.asked 始终携带请求 ID，不需要无 ID sentinel。
+ADAPTER_HOLD_UNMATCHED_PERMISSION="false"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-opencode-hooks.sh"
@@ -38,7 +41,9 @@ _OPENCODE_MARKER="tmux-ai-status (managed by tmux-ai-hooks-status)"
 adapter_check_integrity() {
     [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
     grep -q "$_OPENCODE_MARKER" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
-    grep -q "${_LIB_DIR}/tmux-ai-status" "$ADAPTER_HOOKS_FILE" 2>/dev/null
+    grep -q "${_LIB_DIR}/tmux-ai-status" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
+    grep -q 'case "permission.replied"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
+    grep -q 'tool_use_id: p.id' "$ADAPTER_HOOKS_FILE" 2>/dev/null
 }
 
 # 生成 plugin 文件内容。$1 = tmux-ai-status 绝对路径。
@@ -101,6 +106,13 @@ export const TmuxAiStatus = async ({ \$ }) => {
           return fire("PermissionRequest", {
             session_id: p.sessionID || p.session_id || "",
             tool_name: p.permission || p.type || p.tool || "",
+            tool_use_id: p.id || "",
+          })
+        case "permission.replied":
+          return fire("PermissionResolved", {
+            session_id: p.sessionID || p.session_id || "",
+            request_id: p.requestID || "",
+            reply: p.reply || "",
           })
       }
     },

@@ -10,6 +10,7 @@
 #   ADAPTER_HOOKS_FILE        hooks 配置文件绝对路径
 #   ADAPTER_HAS_SESSION_END   "true"|"false" 是否有 SessionEnd 事件
 #   ADAPTER_SESSION_START_TIMING  "immediate"|"deferred" SessionStart 时机
+#   ADAPTER_HOLD_UNMATCHED_PERMISSION "true"|"false" 无请求 ID 时是否保守保持审批态
 #   ADAPTER_INSTALLER         install 脚本绝对路径（供自修复/TUI 调用）
 #   adapter_check_integrity() hooks 是否完整注册本插件（返回 0=完整）
 #   adapter_install_hooks()   安装 hooks（合并式，保留他人 hook）
@@ -31,6 +32,8 @@ ADAPTER_HOOKS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 ADAPTER_HAS_SESSION_END="true"
 # SessionStart 在 CLI 启动时立即触发（对比 codex 延迟到首个 turn）。
 ADAPTER_SESSION_START_TIMING="immediate"
+# Claude 当前串行执行工具，完成事件可解除无 ID 的审批态。
+ADAPTER_HOLD_UNMATCHED_PERMISSION="false"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-claude-hooks.sh"

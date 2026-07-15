@@ -26,6 +26,9 @@ ADAPTER_HOOKS_FILE="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 ADAPTER_HAS_SESSION_END="false"
 # SessionStart 延迟到首个 turn
 ADAPTER_SESSION_START_TIMING="deferred"
+# PermissionRequest 不含 tool_use_id，而 Codex 支持并行工具。用 sentinel 保守保持 `!`，
+# 直到 Stop/UserPromptSubmit/SessionStart 清理，避免其他工具完成时漏报待审批。
+ADAPTER_HOLD_UNMATCHED_PERMISSION="true"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-codex-hooks.sh"

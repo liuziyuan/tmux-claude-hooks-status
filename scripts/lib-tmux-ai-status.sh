@@ -1,11 +1,11 @@
 #!/bin/bash
 # lib-tmux-ai-status.sh: 共享库 — TMUX_PANE 解析、状态聚合、pane title 监控
 # 被 tmux-ai-status source
-# 调用方需设置: TOOL_ID ("claude" | "codex")、SESSION_ID（从 hook input 解析）
+# 调用方需设置: TOOL_ID ("claude" | "codex" | "opencode")、SESSION_ID（从 hook input 解析）
 
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_STATUS_DIR="/tmp/ai-status"
+_STATUS_DIR="${TMUX_AI_STATUS_DIR:-/tmp/ai-status}"
 STATUS_COLOR="#F1FA8C"
 
 # --- 日志模块 ---
@@ -52,6 +52,7 @@ _collect_ai_process_names() {
 #   pending-pre                 已收 PreToolUse、未收 PostToolUse 的 tool_use_id（每行 "id tool ts"）
 #   pending-perm                已收 PermissionRequest、未配对的 tool_use_id（每行 "id !/? tool ts"）
 #   .lock/                      修改 pending-* 时的 per-pane mkdir mutex
+#   .event-lock/                串行化一次 hook 的 pending 变更、派生和 tmux option 写入
 
 _pane_sanitized() {
     echo "${TMUX_PANE//[^a-zA-Z0-9]/_}"
@@ -168,6 +169,43 @@ build_all_status() {
 _pending_pre_path()  { echo "$(_pane_dir)/pending-pre"; }
 _pending_perm_path() { echo "$(_pane_dir)/pending-perm"; }
 _lock_dir()          { echo "$(_pane_dir)/.lock"; }
+_event_lock_dir()    { echo "$(_pane_dir)/.event-lock"; }
+
+# 串行化同 pane 的完整事件处理，避免 pending 变更后、tmux option 写入前被其他 hook
+# 插入，导致较晚写入的过期派生结果覆盖审批态。使用独立锁，允许事件内部继续使用 .lock。
+_acquire_event_lock() {
+    [ -n "$TMUX_PANE" ] || return 1
+    _ensure_pane_dir
+    local lock; lock=$(_event_lock_dir)
+    local i
+    for i in $(seq 1 200); do
+        if mkdir "$lock" 2>/dev/null; then
+            echo "$$" > "$lock/owner"
+            return 0
+        fi
+        local owner mtime
+        owner=$(cat "$lock/owner" 2>/dev/null)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$lock/owner" 2>/dev/null
+            rmdir "$lock" 2>/dev/null
+            continue
+        fi
+        mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)
+        if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge 10 ]; then
+            rm -f "$lock/owner" 2>/dev/null
+            rmdir "$lock" 2>/dev/null
+        fi
+        sleep 0.01 2>/dev/null || sleep 1
+    done
+    _ai_log "EVENT_LOCK: acquire timeout on $lock"
+    return 1
+}
+
+_release_event_lock() {
+    [ -n "$TMUX_PANE" ] || return
+    rm -f "$(_event_lock_dir)/owner" 2>/dev/null
+    rmdir "$(_event_lock_dir)" 2>/dev/null
+}
 
 # Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
 _acquire_lock() {
@@ -237,6 +275,20 @@ _remove_pending_id() {
         grep -v "^${id} " "$pre" > "${pre}.tmp" 2>/dev/null
         mv "${pre}.tmp" "$pre" 2>/dev/null || rm -f "${pre}.tmp"
     fi
+    if [ -f "$perm" ]; then
+        grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
+        mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
+    fi
+    _release_lock
+}
+
+# 仅移除已回复的权限请求。OpenCode 的 request ID 与 tool call ID 独立，不能同时清
+# pending-pre；后续 PostToolUse 会用 call ID 清理工具执行项。
+_remove_pending_perm_id() {
+    local id="$1"
+    [ -z "$id" ] && return
+    _acquire_lock || return
+    local perm; perm=$(_pending_perm_path)
     if [ -f "$perm" ]; then
         grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
         mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
