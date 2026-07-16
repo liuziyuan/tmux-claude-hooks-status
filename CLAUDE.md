@@ -136,10 +136,11 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 届时需重新设计：等 Claude Code 在 PermReq input 中补 `tool_use_id` 字段（最可能），或用 `tool_name + tool_input` 哈希作 surrogate id。
 **触发条件**：日志中观察到 `[PermissionRequest] '>' → '!'` 与 `[PostToolUse] '!' → '>'` 之间夹有其他工具的 `[PreToolUse]` 事件即说明并发已开始。
 
-Codex 同样不提供 `tool_use_id`，但支持并行工具调用。Codex adapter 因此写入一个无法由
-`PostToolUse` 配对删除的 sentinel，保守保持 `!` 到 `Stop`、`UserPromptSubmit` 或
-`SessionStart` 清理。OpenCode 的 `permission.asked.id` 与 `permission.replied.requestID`
-则会精确维护多个 pending 请求。
+Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `PostToolUse` 提供且
+可配对。核心会把无 ID 的权限请求绑定到最近的同工具 pending PreToolUse ID，批准后的
+`PostToolUse` 因而能精确清理并恢复 `>`；无法绑定时才写 sentinel，保守保持 `!` 到
+`Stop`、`UserPromptSubmit` 或 `SessionStart` 清理。OpenCode 的 `permission.asked.id` 与
+`permission.replied.requestID` 则会精确维护多个 pending 请求。
 
 ---
 

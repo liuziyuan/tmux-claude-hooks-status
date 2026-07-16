@@ -263,6 +263,31 @@ _add_pending_perm() {
     _release_lock
 }
 
+# PermissionRequest 缺少 ID 时，将它绑定到最近的同工具、尚未绑定权限的 PreToolUse。
+# Codex 的 Pre/PostToolUse 仍携带同一个 tool_use_id，因此批准后的 PostToolUse 可精确清除。
+_bind_pending_perm_to_pre() {
+    local mark="$1" tool="$2"
+    BOUND_PERMISSION_ID=""
+    _acquire_lock || return 1
+    local pre; pre=$(_pending_pre_path)
+    local perm; perm=$(_pending_perm_path)
+    local id pending_tool rest
+    if [ -f "$pre" ]; then
+        while read -r id pending_tool rest; do
+            [ -n "$id" ] || continue
+            [ "$pending_tool" = "${tool:-?}" ] || continue
+            if ! awk -v id="$id" '$1 == id { found=1; exit } END { exit !found }' "$perm" 2>/dev/null; then
+                BOUND_PERMISSION_ID="$id"
+            fi
+        done < "$pre"
+    fi
+    if [ -n "$BOUND_PERMISSION_ID" ]; then
+        echo "${BOUND_PERMISSION_ID} ${mark} ${tool:-?} $(date +%s)" >> "$perm"
+    fi
+    _release_lock
+    [ -n "$BOUND_PERMISSION_ID" ]
+}
+
 # 从 pending-pre 和 pending-perm 同时移除 id（配对清除）
 _remove_pending_id() {
     local id="$1"

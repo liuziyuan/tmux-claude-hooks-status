@@ -26,8 +26,8 @@ ADAPTER_HOOKS_FILE="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 ADAPTER_HAS_SESSION_END="false"
 # SessionStart 延迟到首个 turn
 ADAPTER_SESSION_START_TIMING="deferred"
-# PermissionRequest 不含 tool_use_id，而 Codex 支持并行工具。用 sentinel 保守保持 `!`，
-# 直到 Stop/UserPromptSubmit/SessionStart 清理，避免其他工具完成时漏报待审批。
+# PermissionRequest 不含 tool_use_id，而 Codex 支持并行工具。核心会将请求绑定到同工具的
+# pending PreToolUse ID；无法绑定时用 sentinel 保持 `!` 到 turn/session 边界。
 ADAPTER_HOLD_UNMATCHED_PERMISSION="true"
 # request_permissions 直接弹出 Codex 权限 UI，但上游不会发送 PermissionRequest hook。
 # 它仍发送可配对的 PreToolUse/PostToolUse，因此可在 PreToolUse 阶段精确进入审批态。
