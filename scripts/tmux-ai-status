@@ -105,19 +105,28 @@ case "$EVENT" in
     TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
     _add_pending_pre "$TOOL_USE_ID" "$TOOL"
-    # Claude 的 PermReq 不带 tool_use_id，派生看不到审批态；用 LIVE_STATUS 兜底。
-    # Codex sentinel 和 OpenCode request ID 则会直接从 pending 集合派生。
-    LIVE_STATUS=$(_current_pane_status)
-    case "$LIVE_STATUS" in
-        "!"|"?") STATUS="$LIVE_STATUS" ;;
-        *)
-            if _derive_status_from_pending; then
-                STATUS="$DERIVED"
-            else
-                STATUS=">"
-            fi
-            ;;
-    esac
+    _permission_pre_tool=0
+    for _permission_tool in ${ADAPTER_PERMISSION_PRE_TOOL_NAMES:-}; do
+        [ "$TOOL" = "$_permission_tool" ] && { _permission_pre_tool=1; break; }
+    done
+    if [ "$_permission_pre_tool" = "1" ]; then
+        STATUS="!"
+        _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
+    else
+        # Claude 的 PermReq 不带 tool_use_id，派生看不到审批态；用 LIVE_STATUS 兜底。
+        # Codex sentinel 和 OpenCode request ID 则会直接从 pending 集合派生。
+        LIVE_STATUS=$(_current_pane_status)
+        case "$LIVE_STATUS" in
+            "!"|"?") STATUS="$LIVE_STATUS" ;;
+            *)
+                if _derive_status_from_pending; then
+                    STATUS="$DERIVED"
+                else
+                    STATUS=">"
+                fi
+                ;;
+        esac
+    fi
     ;;
   PostToolUse|PostToolUseFailure)
     TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)

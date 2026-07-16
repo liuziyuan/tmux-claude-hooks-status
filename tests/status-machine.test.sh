@@ -72,6 +72,17 @@ assert_status '-' 'Codex Stop clears conservative permission state'
 
 reset_state
 
+# Codex request_permissions 绕过 PermissionRequest hook；其 Pre/PostToolUse ID 可精确维护审批态。
+run_event codex PreToolUse '{"session_id":"codex-rp","tool_use_id":"rp-1","tool_name":"request_permissions","tool_input":{"permissions":{"file_system":{"write":["/tmp"]}}}}'
+assert_status '!' 'Codex request_permissions PreToolUse enters permission state'
+run_event codex PreToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool_name":"Bash"}'
+run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool_name":"Bash"}'
+assert_status '!' 'Other Codex tools cannot clear request_permissions state'
+run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"rp-1","tool_name":"request_permissions"}'
+assert_status '>' 'Matching request_permissions PostToolUse resumes processing'
+
+reset_state
+
 # Claude 保留原有串行语义：无 ID 审批在对应工具完成后恢复处理中。
 run_event claude PreToolUse '{"session_id":"claude-s","tool_use_id":"a","tool_name":"Bash"}'
 run_event claude PermissionRequest '{"session_id":"claude-s","tool_name":"Bash"}'
