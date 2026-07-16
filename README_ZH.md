@@ -4,6 +4,22 @@
 
 [English](README.md)
 
+## 前置条件
+
+交互式 TUI 是一个 Node 程序，**无法给自己装运行时**，因此在运行它*之前*必须先具备：
+
+- **Node.js ≥ 18** —— `npm install -g` 安装 TUI 和运行 TUI 都需要它。若缺失请先自行安装（如 `brew install node`，或用 nvm/nodenv）。TUI 无法替你装 Node。
+- **Homebrew**（macOS，推荐）—— TUI 的环境「Doctor」*只*通过 Homebrew 修复依赖。没有 Homebrew 时，Doctor 只打印手动建议，不安装任何东西。
+
+真正的运行依赖 —— **tmux ≥ 3.1** 和 **jq** —— 既可由 Doctor 代为安装（经 Homebrew，需你显式勾选），也可自行安装：
+
+```bash
+# macOS：一次性装齐
+brew install node tmux jq
+```
+
+Doctor 从不静默安装：它只对你勾选的项动作，只走 Homebrew，绝不自动装 Homebrew，不碰非 Homebrew 管理的软件，也从不自动安装或升级 AI CLI（Claude Code / Codex / opencode）。
+
 ## 快速安装（交互式命令行）
 
 用 npm 全局安装已发布的 TUI（需要 Node.js 18+；插件的 `scripts/` 与 tmux 入口已打包进 npm 包内，这条路径无需仓库 checkout）：
@@ -48,45 +64,64 @@ tmux -V
 jq --version
 ```
 
-### 2. 安装 TPM（插件管理器）
+Claude Code / Codex 的 hooks 是纯 shell，只需 `bash` + `jq`。opencode 集成是一个由 opencode 自身运行的 TypeScript plugin，无需额外运行时。
+
+### 2. 获取插件
+
+将仓库 clone 到 TPM 的插件目录（下面两种集成方式都假设这个固定位置，以便本文档中的示例路径始终有效）：
+
+```bash
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git \
+  ~/.tmux/plugins/tmux-claude-hooks-status
+```
+
+### 3. 集成进 tmux
+
+在以下两种方式中**任选其一**。
+
+**推荐：`run-shell` 直连（无需 TPM）：**
+
+在 `~/.tmux.conf` 中加一行：
+
+```tmux
+run-shell '~/.tmux/plugins/tmux-claude-hooks-status/tmux-ai-hooks-status.tmux'
+```
+
+这与交互式 TUI 写入的方式完全一致，不依赖 TPM 软链。
+
+**备选：TPM（tmux 插件管理器）：**
+
+若你已用 TPM 管理插件，先安装 TPM（如未安装），并用 `owner/repo` 形式声明插件，TPM 才能拉取：
 
 ```bash
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 ```
 
-### 3. 配置 .tmux.conf
-
-在 `~/.tmux.conf` 中添加：
-
 ```tmux
 # --- 插件 ---
-set -g @plugin 'tmux-claude-hooks-status'
+set -g @plugin 'liuziyuan/tmux-claude-hooks-status'
 
 # TPM 初始化（必须放在最后）
 set -g @plugin 'tmux-plugins/tpm'
 run '~/.tmux/plugins/tpm/tpm'
 ```
 
-插件会自动完成以下配置：
-- 在多行状态栏中添加独立的 Claude 状态行
-- 配置 pane 边框显示（pane 编号 + 标题）
+然后按一次 `prefix + I` 让 TPM 拉取。注意：插件加载后会把 `prefix + I` 重绑为打开本项目的 TUI 安装器，因此 TPM 自己的 `prefix + I` 只在插件尚未生效前可用（之后请从 TPM 菜单里直接安装）。
+
+加载后插件会自动完成：
+- 在多行 `status-format` 中添加独立的 AI 状态行
+- 注册生命周期 hook（session/client/pane）和 tmux server 级 monitor
 - 不会修改你现有的 `status-right` 设置
 
-### 4. 安装插件
+### 4. 重载
 
-启动（或重启）tmux，然后执行：
-
-```
-prefix + I
-```
-
-（默认 prefix 是 `Ctrl+a`，按下后松开，再按大写 `I`）
-
-TPM 会自动安装所有声明的插件。安装完成后重载：
+启动（或重启）tmux，然后重载：
 
 ```
 prefix + r
 ```
+
+（tmux 默认 prefix 是 `Ctrl+b`：按下后松开 prefix，再按对应键。若你已把 prefix 改成 `Ctrl+a`，则用 `Ctrl+a`。）
 
 ### 5. 安装 Claude Code Hooks
 
@@ -138,31 +173,48 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
 >
 > 安装器只替换 command 包含 `tmux-ai-status` 的 hook group，保留 `hooks.json` 中其他内容。下次启动 Codex 时可能需要选择 **Hooks need review → Trust all and continue** 完成一次性授信。
 
+### 7. 安装 opencode Plugin（可选）
+
+在 tmux 内按快捷键：
+
+```
+prefix + C-p
+```
+
+与 Claude Code、Codex 不同，opencode 通过 TypeScript **plugin**（而非 hooks 文件）集成。安装器写入 `~/.config/opencode/plugins/tmux-ai-status.ts`，由 opencode 自身加载并执行。
+
+卸载：
+
+```
+prefix + M-p
+```
+
+手动安装：
+
+```bash
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-opencode-hooks.sh
+```
+
 ## 状态符号与事件
 
-| 事件 | 状态 | 颜色 | 含义 |
+每个 pane 的状态渲染为一个带背景色的色块。配色采用固定的 Dracula 方案，目前不支持自定义。
+
+| 事件 | 符号 | 颜色 | 含义 |
 |------|------|------|------|
 | `SessionStart` | `-` | 黄色 | 会话空闲 |
-| `PreToolUse` / `PostToolUse` | `>` | 黄色 | 处理中 |
-| `PreToolUse` (AskUserQuestion) | `?` | 黄色 | 等待用户输入 |
-| `PermissionRequest` | `!` | 红色 | 等待授权 |
-| `Stop` / `StopFailure` | `✓` 或 `-` | 黄色 | 完成或回到空闲 |
-| `SessionEnd` | （清空） | — | 会话结束 |
+| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` | `>` | 绿色 | 处理中 |
+| `PermissionRequest` (AskUserQuestion) | `?` | 红色 | 等待用户输入 |
+| `PermissionRequest`（其他工具） | `!` | 红色 | 等待授权 |
+| `Stop` / `StopFailure` | `✓` 或 `-` | 黄色 | 完成，或回到空闲 |
+| `SessionEnd` | （清空） | — | 会话结束（仅 Claude Code） |
 
-Notification 事件在内部处理——特定消息（权限相关、已取消等）会被分发到对应状态，而非直接显示。
-
-## 自定义选项
-
-| 选项 | 默认值 | 用途 |
-|------|--------|------|
-| `@claude_hooks_status_color` | `#F1FA8C` | 状态文字颜色 |
-| `@claude_hooks_idle_icon` | `✓` | 空闲图标 |
-| `@claude_hooks_busy_icon` | `⠿` | 处理中图标 |
-| `@claude_hooks_auth_icon` | `🔒` | 等待授权图标 |
+- 多 pane / 多状态聚合时的优先级：`!` > `?` > `>` > 空。
+- **没有**超时自动恢复。权限请求设置的 `!`/`?` 会一直保持，直到该请求被处理，或被下一次 `UserPromptSubmit` / `Stop` / `SessionStart` 清除。通过 `Esc`（被 tmux 拦截）拒绝会重置为 `-`；在 TUI 里选择 “No” 拒绝则会保持 `!` 到下一次输入。
+- `Notification` 事件（仅 Claude Code）在内部处理：`idle_prompt` 及 `denied` / `cancelled` / `rejected` 消息会重置为 `-`。
 
 ## 依赖
 
-- tmux >= 3.1（user options、pane-border-status、set-hook、多行 status-format）
+- tmux >= 3.1（user options、set-hook、多行 status-format）
 - jq（用于 hook 安装）
 - bash（任意版本；macOS 自带 3.2 即可，交互 shell 使用 zsh/fish 不影响 hooks）
 - Node.js >= 18（仅交互式安装器需要，shell hooks 不依赖 Node.js）
@@ -186,7 +238,7 @@ tmux source ~/.tmux.conf
 
 ## 快捷键
 
-Prefix 为 `Ctrl+a`（按下后松开，再按对应键）。
+tmux 默认 prefix 是 `Ctrl+b`（按下后松开，再按对应键）。若你已把 prefix 改成 `Ctrl+a`，则用 `Ctrl+a`。
 
 | 快捷键 | 功能 |
 |--------|------|

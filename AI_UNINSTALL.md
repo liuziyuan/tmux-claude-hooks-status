@@ -35,13 +35,17 @@ bash scripts/install-opencode-hooks.sh uninstall
 
 以下步骤仅在无法启动 TUI 时使用；正常请用 TUI 的「完整卸载插件」项。TUI 管理 hooks 与运行态，不会擅自删除用户的 tmux 配置或仓库。完成 hooks 卸载后：
 
-1. 从 `~/.tmux.conf` 删除本插件声明：
+1. 从 `~/.tmux.conf` 删除本插件的集成声明。当前推荐的集成是一行 `run-shell`：
 
    ```tmux
-   set -g @plugin 'tmux-ai-hooks-status'
+   run-shell '<仓库绝对路径>/tmux-ai-hooks-status.tmux'
    ```
 
-   旧配置中如果使用 `tmux-claude-hooks-status`，也一并删除对应声明。
+   若你用的是 TPM，则删除对应的 `@plugin` 声明（历史上可能是 `tmux-ai-hooks-status`、`tmux-claude-hooks-status` 或 `liuziyuan/tmux-claude-hooks-status`）：
+
+   ```tmux
+   set -g @plugin 'liuziyuan/tmux-claude-hooks-status'
+   ```
 
 2. 停止 Codex lifecycle monitor，并清除聚合状态：
 

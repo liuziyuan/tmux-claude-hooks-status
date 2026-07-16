@@ -4,6 +4,22 @@
 
 A tmux plugin that displays AI CLI (Claude Code / Codex) status in the tmux status bar. It hooks into each tool's hook system to show real-time state (idle, processing, waiting for authorization, awaiting user input) per pane via a dedicated status line. Claude Code and Codex share the same hook semantics (event names, stdin JSON fields), so one core script handles both, keyed by `TOOL_ID` (`claude`/`codex`).
 
+## Prerequisites
+
+The interactive TUI is a Node program and **cannot bootstrap its own runtime**, so a few things must exist *before* you run it:
+
+- **Node.js ≥ 18** — required both to `npm install -g` the TUI and to run it. If Node is missing, install it first (e.g. `brew install node`, or via nvm/nodenv). The TUI cannot install Node for you.
+- **Homebrew** (macOS, recommended) — the TUI's environment "Doctor" repairs dependencies *only* through Homebrew. Without Homebrew, Doctor just prints manual suggestions and installs nothing.
+
+The actual runtime dependencies — **tmux ≥ 3.1** and **jq** — can either be installed for you by the Doctor (via Homebrew, after you explicitly select them) or installed by hand:
+
+```bash
+# macOS: install everything up front
+brew install node tmux jq
+```
+
+The Doctor never installs anything silently: it acts only on items you select, only via Homebrew, never installs Homebrew itself, never touches non-Homebrew installations, and never auto-installs or upgrades the AI CLIs (Claude Code / Codex / opencode).
+
 ## Quick Start (Interactive CLI)
 
 Install the published TUI globally with npm (Node.js 18+ required to run it; the plugin's `scripts/` and tmux entry point are bundled inside the npm package, so no repository checkout is required for this path):
@@ -48,45 +64,64 @@ tmux -V
 jq --version
 ```
 
-### 2. Install TPM (Plugin Manager)
+Claude Code / Codex hooks are plain shell and need only `bash` + `jq`. The opencode integration is a TypeScript plugin executed by opencode itself, so it needs no extra runtime.
+
+### 2. Get the Plugin
+
+Clone the repository into TPM's plugin directory (both integration methods below assume this exact location, which keeps the example paths in this document valid):
+
+```bash
+git clone https://github.com/liuziyuan/tmux-claude-hooks-status.git \
+  ~/.tmux/plugins/tmux-claude-hooks-status
+```
+
+### 3. Integrate into tmux
+
+Pick **one** of the following.
+
+**Recommended — direct `run-shell` (no TPM required):**
+
+Add a single line to `~/.tmux.conf`:
+
+```tmux
+run-shell '~/.tmux/plugins/tmux-claude-hooks-status/tmux-ai-hooks-status.tmux'
+```
+
+This is exactly what the interactive TUI writes, and it does not depend on a TPM symlink.
+
+**Alternative — TPM (tmux plugin manager):**
+
+If you already manage plugins with TPM, install TPM (if needed) and declare the plugin with its `owner/repo` form so TPM can fetch it:
 
 ```bash
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 ```
 
-### 3. Apply tmux Config
-
-Add the following to `~/.tmux.conf`:
-
 ```tmux
 # --- Plugins ---
-set -g @plugin 'tmux-claude-hooks-status'
+set -g @plugin 'liuziyuan/tmux-claude-hooks-status'
 
 # TPM init (must be at the end)
 set -g @plugin 'tmux-plugins/tpm'
 run '~/.tmux/plugins/tpm/tpm'
 ```
 
-The plugin automatically:
-- Adds a dedicated line in the multi-line status-format for Claude status
-- Configures pane border display (pane index + title)
+Then press `prefix + I` **once** to let TPM fetch it. Note: after the plugin loads it rebinds `prefix + I` to open this project's TUI installer, so TPM's own `prefix + I` only works before the plugin is active (afterwards, install from TPM's menu directly).
+
+On load the plugin automatically:
+- Adds a dedicated line to the multi-line `status-format` for the AI status
+- Registers lifecycle hooks (session/client/pane) and a tmux-server monitor
 - Does not modify your existing `status-right` setting
 
-### 4. Install Plugins
+### 4. Reload
 
-Start (or restart) tmux, then run:
-
-```
-prefix + I
-```
-
-(Default prefix is `Ctrl+a`. Press and release, then press uppercase `I`.)
-
-TPM will automatically install all declared plugins. After installation, reload:
+Start (or restart) tmux, then reload:
 
 ```
 prefix + r
 ```
+
+(tmux's default prefix is `Ctrl+b`: press and release the prefix, then press the key. If you remapped your prefix to `Ctrl+a`, use that instead.)
 
 ### 5. Install Claude Code Hooks
 
@@ -138,32 +173,48 @@ bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-codex-hooks.sh
 >
 > The installer only replaces hook groups whose command contains `tmux-ai-status`, preserves all other `hooks.json` content, and may require selecting **Hooks need review → Trust all and continue** on the next Codex launch.
 
+### 7. Install opencode Plugin (Optional)
+
+In tmux, press:
+
+```
+prefix + C-p
+```
+
+Unlike Claude Code and Codex, opencode integrates via a TypeScript **plugin** (not a hooks file). The installer writes `~/.config/opencode/plugins/tmux-ai-status.ts`, which opencode loads and runs itself.
+
+To uninstall:
+
+```
+prefix + M-p
+```
+
+Manual install:
+
+```bash
+bash ~/.tmux/plugins/tmux-claude-hooks-status/scripts/install-opencode-hooks.sh
+```
+
 ## Status Symbols and Events
 
-| Event | Status | Color | Meaning |
+Each pane's status is rendered as a colored background block. Colors follow a fixed Dracula palette and are not user-configurable at the moment.
+
+| Event | Symbol | Color | Meaning |
 |-------|--------|-------|---------|
 | `SessionStart` | `-` | Yellow | Session idle |
-| `PreToolUse` / `PostToolUse` | `>` | Yellow | Processing |
+| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` | `>` | Green | Processing |
 | `PermissionRequest` (AskUserQuestion) | `?` | Red | Awaiting user input |
 | `PermissionRequest` (other tools) | `!` | Red | Waiting for authorization |
-| `Stop` / `StopFailure` | `✓` or `-` | Yellow | Completed or back to idle |
-| `SessionEnd` | (empty) | — | Session ended |
+| `Stop` / `StopFailure` | `✓` or `-` | Yellow | Completed, or back to idle |
+| `SessionEnd` | (empty) | — | Session ended (Claude Code only) |
 
-- `!` status has a 30-second timeout (configurable via `PERMISSION_TIMEOUT` env var) — auto-resets to `-` if the permission is denied or unresolved
-- Notification events are handled internally — `idle_prompt` resets to `-`; `permission_prompt` notifications are handled by the PermissionRequest flow
-
-## Customization Options
-
-| Option | Default | Purpose |
-|--------|---------|---------|
-| `@claude_hooks_status_color` | `#F1FA8C` | Status text color |
-| `@claude_hooks_idle_icon` | `✓` | Idle indicator |
-| `@claude_hooks_busy_icon` | `⠿` | Processing indicator |
-| `@claude_hooks_auth_icon` | `🔒` | Authorization indicator |
+- Aggregation priority when several panes/states combine: `!` > `?` > `>` > empty.
+- There is **no** auto-timeout. A `!`/`?` set by a permission request stays until the request is resolved or cleared by the next `UserPromptSubmit` / `Stop` / `SessionStart`. Rejecting via `Esc` (intercepted by tmux) resets it to `-`; rejecting via the TUI's "No" option leaves `!` until your next prompt.
+- `Notification` events (Claude Code only) are handled internally: `idle_prompt` and `denied` / `cancelled` / `rejected` messages reset to `-`.
 
 ## Dependencies
 
-- tmux >= 3.1 (user options, pane-border-status, set-hook, multi-line status-format)
+- tmux >= 3.1 (user options, set-hook, multi-line status-format)
 - jq (for hook installation)
 - bash (any version; scripts use no bash-4-only features, macOS built-in 3.2 works. Your interactive shell — zsh/fish/etc. — is irrelevant: hooks run under `#!/bin/bash`, invoked by the AI CLI)
 - Node.js >= 18 (only for the interactive installer; the shell hooks do not require Node.js)
@@ -187,7 +238,7 @@ tmux source ~/.tmux.conf
 
 ## Keyboard Shortcuts
 
-Prefix is `Ctrl+a` (press and release, then press the key).
+tmux's default prefix is `Ctrl+b` (press and release, then press the key). If you remapped it to `Ctrl+a`, use that instead.
 
 | Shortcut | Action |
 |----------|--------|
