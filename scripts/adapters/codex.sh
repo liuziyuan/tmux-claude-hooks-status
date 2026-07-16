@@ -29,6 +29,9 @@ ADAPTER_SESSION_START_TIMING="deferred"
 # PermissionRequest 不含 tool_use_id，而 Codex 支持并行工具。用 sentinel 保守保持 `!`，
 # 直到 Stop/UserPromptSubmit/SessionStart 清理，避免其他工具完成时漏报待审批。
 ADAPTER_HOLD_UNMATCHED_PERMISSION="true"
+# request_permissions 直接弹出 Codex 权限 UI，但上游不会发送 PermissionRequest hook。
+# 它仍发送可配对的 PreToolUse/PostToolUse，因此可在 PreToolUse 阶段精确进入审批态。
+ADAPTER_PERMISSION_PRE_TOOL_NAMES="request_permissions"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-codex-hooks.sh"
