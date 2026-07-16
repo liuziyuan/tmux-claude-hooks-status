@@ -85,9 +85,10 @@ case "$EVENT" in
     if [ -n "$TOOL_USE_ID" ]; then
         _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
     elif [ "${ADAPTER_HOLD_UNMATCHED_PERMISSION:-false}" = "true" ]; then
-        # Codex 的 PermissionRequest 无请求 ID。sentinel 不与任何 PostToolUse ID 配对，
-        # 因而保守保持审批态，直到 turn/session 边界统一清理。
-        _add_pending_perm "__unmatched_permission__" "$STATUS" "$TOOL"
+        # Codex 的 PermissionRequest 无请求 ID，但紧邻的 Pre/PostToolUse 有同一个 ID。
+        # 优先绑定该 ID，让批准后的 PostToolUse 恢复处理中；无匹配项时才保守兜底。
+        _bind_pending_perm_to_pre "$STATUS" "$TOOL" || \
+            _add_pending_perm "__unmatched_permission__" "$STATUS" "$TOOL"
     fi
     ;;
   PermissionResolved)

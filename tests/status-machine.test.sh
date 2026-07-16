@@ -60,14 +60,42 @@ reset_state() {
     mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR"
 }
 
-# Codex PermissionRequest 无 ID。任何 PostToolUse 都不能清除保守 sentinel。
+# Codex PermissionRequest 无 ID，但应绑定紧邻 PreToolUse 的 ID，批准执行后恢复处理中。
 run_event codex PreToolUse '{"session_id":"codex-s","tool_use_id":"a","tool_name":"Bash"}'
-run_event codex PreToolUse '{"session_id":"codex-s","tool_use_id":"b","tool_name":"Bash"}'
-run_event codex PermissionRequest '{"session_id":"codex-s","tool_name":"Bash"}'
 run_event codex PermissionRequest '{"session_id":"codex-s","tool_name":"Bash"}'
 run_event codex PostToolUse '{"session_id":"codex-s","tool_use_id":"a","tool_name":"Bash"}'
-assert_status '!' 'Codex must hold unmatched permission after another tool completes'
-run_event codex Stop '{"session_id":"codex-s"}'
+assert_status '>' 'Approved Codex permission resumes after matching tool completion'
+
+reset_state
+
+# 并行同类工具只让后启动者请求权限时，应绑定最近的 PreToolUse。
+run_event codex PreToolUse '{"session_id":"codex-p","tool_use_id":"a","tool_name":"Bash"}'
+run_event codex PreToolUse '{"session_id":"codex-p","tool_use_id":"b","tool_name":"Bash"}'
+run_event codex PermissionRequest '{"session_id":"codex-p","tool_name":"Bash"}'
+run_event codex PostToolUse '{"session_id":"codex-p","tool_use_id":"a","tool_name":"Bash"}'
+assert_status '!' 'Completing an earlier Codex tool preserves the later pending permission'
+run_event codex PostToolUse '{"session_id":"codex-p","tool_use_id":"b","tool_name":"Bash"}'
+assert_status '>' 'Codex resumes after all bound permissions complete'
+
+reset_state
+
+# 多个并行审批分别绑定不同 ID；完成一个不能清除另一个审批态。
+run_event codex PreToolUse '{"session_id":"codex-p2","tool_use_id":"a","tool_name":"Bash"}'
+run_event codex PermissionRequest '{"session_id":"codex-p2","tool_name":"Bash"}'
+run_event codex PreToolUse '{"session_id":"codex-p2","tool_use_id":"b","tool_name":"Bash"}'
+run_event codex PermissionRequest '{"session_id":"codex-p2","tool_name":"Bash"}'
+run_event codex PostToolUse '{"session_id":"codex-p2","tool_use_id":"a","tool_name":"Bash"}'
+assert_status '!' 'Completing one Codex permission preserves another pending permission'
+run_event codex PostToolUse '{"session_id":"codex-p2","tool_use_id":"b","tool_name":"Bash"}'
+assert_status '>' 'Codex resumes after all parallel permissions complete'
+
+reset_state
+
+# 找不到对应 PreToolUse 时仍使用 sentinel，避免未知并发事件漏报审批。
+run_event codex PermissionRequest '{"session_id":"codex-fallback","tool_name":"Bash"}'
+run_event codex PostToolUse '{"session_id":"codex-fallback","tool_use_id":"other","tool_name":"Bash"}'
+assert_status '!' 'Unmatched Codex permission keeps conservative sentinel'
+run_event codex Stop '{"session_id":"codex-fallback"}'
 assert_status '-' 'Codex Stop clears conservative permission state'
 
 reset_state
