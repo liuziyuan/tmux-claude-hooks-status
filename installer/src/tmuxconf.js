@@ -3,8 +3,7 @@
 // 加载机制不再依赖 TPM 风格的 `@plugin` 声明与软链，而是直接一行
 // `run-shell '<当前 source 的 tmux 入口绝对路径>'`。TMUX_ENTRY 随 source.js
 // 的三级解析（env / 持久化配置 / 包内自带 / 开发回落）而变化，切换 source 后
-// 需要重新调用 ensureTmuxIntegration() 才会把 .tmux.conf 里的路径更新到位
-// （见 docs/2026-07-15-npm-global-install-plan.md 的残留风险第 4 条）。
+// 需要重新调用 ensureTmuxIntegration() 才会把 .tmux.conf 里的路径更新到位。
 import { execa } from 'execa';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

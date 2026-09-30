@@ -6,7 +6,7 @@
 //
 // "source" 决定 scripts/ 与 tmux 入口来自哪里：环境变量 TMUXCLIHOOK_SOURCE >
 // 持久化配置 ~/.config/tmuxclihook/config.json > 包内自带（生产默认）> 仓库根
-// （开发回落）。见 src/source.js 与 docs/2026-07-15-npm-global-install-plan.md。
+// （开发回落）。见 src/source.js。
 
 import { homedir } from 'node:os';
 import * as p from '@clack/prompts';
