@@ -49,7 +49,21 @@ The environment Doctor can install missing Homebrew formulas and upgrade outdate
 
 ## Quick Hook Uninstall
 
-Open the TUI with `prefix + I` (or `tmuxclihook` / `npm start` in `installer/`) and choose **Uninstall hooks**. For complete plugin removal, including tmux configuration and the plugin link, see [`AI_UNINSTALL.md`](AI_UNINSTALL.md). The compatibility document is retained for non-interactive and recovery workflows.
+Open the TUI with `prefix + I` (or `tmuxclihook` / `npm start` in `installer/`) and choose **Uninstall hooks** — it removes only hooks registered by this plugin. **Complete plugin removal** additionally stops the Codex monitor, clears `@ai_all_status`, and deletes the plugin symlink: use the TUI's **Complete uninstall** item, or do it by hand:
+
+```bash
+# no-TTY fallback: uninstall hooks for each installed CLI
+bash scripts/install-claude-hooks.sh uninstall
+bash scripts/install-codex-hooks.sh uninstall
+bash scripts/install-opencode-hooks.sh uninstall
+
+# complete removal, after hooks are gone
+scripts/tmux-ai-monitor stop 2>/dev/null || true
+tmux set-option -gu @ai_all_status 2>/dev/null || true
+rm -f ~/.tmux/plugins/tmux-ai-hooks-status ~/.tmux/plugins/tmux-claude-hooks-status
+```
+
+Then remove the plugin's `run-shell` / `@plugin` line from `~/.tmux.conf` and restart the tmux server (`tmux kill-server`) when convenient to fully unload everything. The repo directory itself is never deleted.
 
 ## Manual Installation
 
