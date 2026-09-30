@@ -29,6 +29,10 @@ function buildTools(scriptsDir) {
       installer: join(scriptsDir, 'install-claude-hooks.sh'),
       hookMarker: 'tmux-ai-status',
       minHookCount: 10,
+      // cc-switch 存在时 hooks 真源在其 db（通用配置），文件判定失效 → 由 bash 侧
+      // wrapper check 判定（内部走 sqlite）；非 cc-switch 环境仍走本地文件计数。
+      checkViaWrapper: true,
+      ccSwitchDb: join(HOME, '.cc-switch', 'cc-switch.db'),
     },
     {
       id: 'codex',

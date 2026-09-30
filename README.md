@@ -217,6 +217,7 @@ Each pane's status is rendered as a colored background block. Colors follow a fi
 - tmux >= 3.1 (user options, set-hook, multi-line status-format)
 - jq (for hook installation)
 - bash (any version; scripts use no bash-4-only features, macOS built-in 3.2 works. Your interactive shell — zsh/fish/etc. — is irrelevant: hooks run under `#!/bin/bash`, invoked by the AI CLI)
+- sqlite3 (only when [cc-switch](https://github.com/farion1231/cc-switch) is present: the persistent hooks source lives in `~/.cc-switch/cc-switch.db`, macOS ships it. Without it the installer falls back to the classic settings.json mode)
 - Node.js >= 18 (only for the interactive installer; the shell hooks do not require Node.js)
 
 ## Verification

@@ -37,6 +37,8 @@ test('checkEnv marks every satisfied dependency ready and preserves ok compatibi
       jq: { found: true, version: '1.7', raw: 'jq-1.7' },
       bash: { found: true, version: '3.2', raw: 'GNU bash, version 3.2' },
       node: { found: true, version: '22.0.0', raw: 'v22.0.0' },
+      // cc-switch 环境（存在 ~/.cc-switch/cc-switch.db）会追加探测 sqlite3
+      sqlite3: { found: true, version: '3.54', raw: '3.54.0' },
     }),
   });
 
