@@ -49,7 +49,21 @@ TMUXCLIHOOK_SOURCE=/path/to/your/checkout tmuxclihook
 
 ## 快速卸载 Hooks
 
-通过 `prefix + I`（或 `tmuxclihook` / 在 `installer/` 中运行 `npm start`）进入 TUI，选择“卸载 hooks”。如需连同 tmux 配置和插件软链一起完整移除，请查看 [`AI_UNINSTALL.md`](AI_UNINSTALL.md)；该兼容文档继续用于无 TTY 和故障恢复场景。
+通过 `prefix + I`（或 `tmuxclihook` / 在 `installer/` 中运行 `npm start`）进入 TUI，选择“卸载 hooks”——只移除本插件注册的 hooks。如需**完整移除插件**（额外停止 Codex monitor、清除 `@ai_all_status`、删除插件软链），使用 TUI 的「完整卸载插件」项，或手动执行：
+
+```bash
+# 无 TTY 回退：对每个已安装的 AI CLI 卸载 hooks
+bash scripts/install-claude-hooks.sh uninstall
+bash scripts/install-codex-hooks.sh uninstall
+bash scripts/install-opencode-hooks.sh uninstall
+
+# hooks 卸载后的完整移除
+scripts/tmux-ai-monitor stop 2>/dev/null || true
+tmux set-option -gu @ai_all_status 2>/dev/null || true
+rm -f ~/.tmux/plugins/tmux-ai-hooks-status ~/.tmux/plugins/tmux-claude-hooks-status
+```
+
+最后从 `~/.tmux.conf` 删除本插件的 `run-shell` / `@plugin` 声明，并在方便时重启 tmux server（`tmux kill-server`）以彻底卸载。仓库目录本身不会被删除。
 
 ## 手动安装
 

@@ -48,9 +48,18 @@ scripts/
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
 - `adapter_install_hooks()` / `adapter_uninstall_hooks()` — 安装/卸载 hooks（合并式，保留他人 hook）
 
-install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
+install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch，另含 `check` 模式输出 `ok`/`missing` 供 TUI 侦测）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
 
 核心引擎不再写 `case "$TOOL_ID"`：`_check_hooks_integrity` 委托 `adapter_check_integrity`；`_maybe_repair_hooks` 用 `ADAPTER_INSTALLER`；`_pane_has_ai_process`/`build_all_status` 用 `_collect_ai_process_names`（扫所有 `adapters/*.sh` 汇总进程名，聚合/清理路径认全部工具）。
+
+### cc-switch 通用配置真源（claude adapter）
+
+用户经 cc-switch（GUI + `switch` 命令）管理多供应商配置时，claude 的 hooks 唯一持久真源是 `~/.cc-switch/cc-switch.db`（SQLite）`settings` 表的 `common_config_claude`：`switch` 启动时把它深合并进实例 `settings.json`（provider `meta.commonConfigEnabled: true`），而 `~/.claude/settings.json` 与实例文件都会被 cc-switch 覆盖，直接写它们不持久。claude adapter 因此分两种模式：
+
+- **门禁 `_ccswitch_active`**：db 存在 && `sqlite3` 可用 && `settings` 表可查（不要求 key 存在，缺失由 upsert 建行；sqlite3 缺失 → 整体回退文件模式）
+- **active 模式**：install/uninstall/integrity 只操作通用配置——复用与文件模式相同的 jq 合并/剥离/计数核心（`_CLAUDE_JQ_MERGE/_STRIP/_COUNT`），写入用与 cc-launch 同款 `json_patch` upsert（RFC 7396，只动 `hooks` 键，他人 hook 与顶层其他字段保留）。GUI 运行中写入前 stderr 警告（其内存缓存可能在退出时全量回写覆盖 db，实测发生过；tmux 活跃时 60s 自修复会重写）
+- **文件模式**：非 cc-switch 用户，行为与历史版本逐字节一致
+- TUI 侧 `adapters-meta.js` 声明 `checkViaWrapper` + `ccSwitchDb`，`detect.js` 在 db 存在时改走 wrapper `check`（bash 内 sqlite 判定），避免 JS 文件计数误报
 
 ### 共享库 `lib-tmux-ai-status.sh`
 
@@ -124,6 +133,14 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
 ### ⚠️ 已知限制 / 备忘
+
+**cc-switch GUI 运行中写库会被内存缓存覆盖**
+
+cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时全量写回 `cc-switch.db`（实测发生过：install 写入的 hooks 被旧缓存冲掉）。缓解：claude adapter 写库前 `pgrep` 检测 GUI 并 stderr 警告；tmux 会话活跃时 `_maybe_repair_hooks`（60s 节流）会自动重写。最稳妥流程：先退出 cc-switch GUI → install → 再启动 GUI。
+
+**非 `switch` 启动的裸 claude 无状态**
+
+cc-switch 模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。
 
 **PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
 当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
@@ -256,6 +273,7 @@ ls /tmp/ai-status/*/*-poll-pid
 - tmux >= 3.1
 - jq
 - bash（任意版本；脚本零 bash4 专属特性，macOS 自带 3.2 即可。交互 shell 用 zsh/fish 均不影响——hook 由 AI CLI 以 `#!/bin/bash` 执行，与交互 shell 无关）
+- sqlite3（仅 cc-switch 环境：hooks 真源在 `~/.cc-switch/cc-switch.db`，装/卸/完整性走 sqlite；macOS 自带。缺失时自动回退传统文件模式）
 
 ## Hook 事件注册
 

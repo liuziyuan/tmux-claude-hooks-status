@@ -2,7 +2,7 @@
 import { execa } from 'execa';
 import { existsSync } from 'node:fs';
 import { toolById } from './adapters-meta.js';
-import { hooksInstalled } from './detect.js';
+import { hooksInstalledAsync } from './detect.js';
 
 // 安装某工具 hooks（调薄 wrapper install-<tool>-hooks.sh）
 export async function installHooks(id) {
@@ -30,11 +30,12 @@ export async function uninstallHooks(id) {
   }
 }
 
-// 修复某工具 hooks：完整性检查（JS 侧 hooksInstalled）→ 缺失则重装
+// 修复某工具 hooks：完整性检查（cc-switch 模式走 bash wrapper check，否则文件计数）
+// → 缺失则重装
 export async function repairHooks(id) {
   const tool = toolById(id);
   if (!tool) return { ok: false, output: `未知工具: ${id}` };
-  if (hooksInstalled(tool)) {
+  if (await hooksInstalledAsync(tool)) {
     return { ok: true, output: `${tool.label} hooks 完整，无需修复`, repaired: false };
   }
   const r = await installHooks(id);

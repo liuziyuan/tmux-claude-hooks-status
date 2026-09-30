@@ -1,6 +1,8 @@
 // detect.js — 环境依赖侦测 + AI CLI 侦测
 import { execa } from 'execa';
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { TOOLS, versionGte } from './adapters-meta.js';
 
 // 探测某命令是否存在 + 版本
@@ -80,6 +82,23 @@ export async function checkEnv({ probeCommand = probe } = {}) {
     pkg: 'node',
   }));
 
+  // sqlite3：仅 cc-switch 环境需要（hooks 真源在其 db 通用配置，装/卸/检查走 sqlite）
+  const ccSwitchDb = join(homedir(), '.cc-switch', 'cc-switch.db');
+  if (existsSync(ccSwitchDb)) {
+    const sqlite3 = await probeCommand('sqlite3', ['--version'], /(\d+\.\d+)/);
+    results.push(envResult({
+      name: 'sqlite3',
+      found: sqlite3.found,
+      meetsMinimum: sqlite3.found,
+      detail: sqlite3.found
+        ? `v${sqlite3.version}（cc-switch 模式）`
+        : '未安装（cc-switch 模式需要）',
+      min: '任意版本',
+      fixCmd: 'brew install sqlite3',
+      pkg: 'sqlite3',
+    }));
+  }
+
   return results;
 }
 
@@ -90,7 +109,7 @@ export function interactiveShell() {
   return { path: sh || '未知', name };
 }
 
-// 侦测某工具是否已装本插件 hooks
+// 侦测某工具是否已装本插件 hooks（同步文件版：非 cc-switch 路径/向后兼容）
 function hooksInstalled(tool) {
   try {
     if (!existsSync(tool.hooksFile)) return false;
@@ -100,6 +119,23 @@ function hooksInstalled(tool) {
   } catch {
     return false;
   }
+}
+
+// 异步判定：声明 checkViaWrapper 且 cc-switch db 存在时，走 bash wrapper check
+// （bash 侧按 sqlite 通用配置判定真源）；否则回落本地文件计数。
+async function hooksInstalledAsync(tool) {
+  if (tool.checkViaWrapper && tool.ccSwitchDb && existsSync(tool.ccSwitchDb)) {
+    try {
+      const { stdout, exitCode } = await execa('bash', [tool.installer, 'check'], {
+        reject: false,
+        timeout: 15000,
+      });
+      return exitCode === 0 && String(stdout).trim() === 'ok';
+    } catch {
+      return false;
+    }
+  }
+  return hooksInstalled(tool);
 }
 
 // 侦测所有已装 AI CLI
@@ -115,10 +151,10 @@ export async function detectClis() {
       version: p.version,
       meetsMin,
       minVersion: tool.minVersion,
-      hooksInstalled: p.found ? hooksInstalled(tool) : false,
+      hooksInstalled: p.found ? await hooksInstalledAsync(tool) : false,
     });
   }
   return rows;
 }
 
-export { hooksInstalled };
+export { hooksInstalled, hooksInstalledAsync };

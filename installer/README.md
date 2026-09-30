@@ -32,14 +32,18 @@ hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `T
 
 | 菜单项 | 说明 |
 |--------|------|
-| 环境检查 | 侦测 tmux(≥3.1) / jq / bash(任意版本) / node(≥18)，显示 `✓ ready`、`✗ missing`、`⚠ outdated`，并在确认后安全修复 |
-| 侦测 AI CLI | 扫描 Claude Code / Codex / opencode，显示版本、最低版本和 hooks 状态；不自动安装或升级 AI CLI |
+| 环境检查 | 侦测 tmux(≥3.1) / jq / bash(任意版本) / node(≥18)，显示 `✓ ready`、`✗ missing`、`⚠ outdated`，并在确认后安全修复。检测到 cc-switch（`~/.cc-switch/cc-switch.db`）时追加 sqlite3 项 |
+| 侦测 AI CLI | 扫描 Claude Code / Codex / opencode，显示版本、最低版本和 hooks 状态；不自动安装或升级 AI CLI。cc-switch 环境下 Claude Code 的 hooks 状态由 bash 侧 `install-claude-hooks.sh check`（sqlite 真源）判定 |
 | 安装 hooks | 选工具（claude/codex/opencode/全部）→ 调 `scripts/install-<tool>-hooks.sh`（路径随当前 source 解析） |
 | 卸载 hooks | 对称卸载本插件 hooks，保留其他工具注册的 hook |
 | 修复 hooks | 完整性检查 → 缺失则重装 |
 | tmux 集成 | 校验 `~/.tmux.conf` 是否已有指向当前 source 的 `run-shell` 声明；缺失则追加，路径过期（例如切换过 source）则原地替换，随后 `tmux source-file` 重载；不依赖 TPM 软链（历史遗留软链仅作提示，清理走「完整卸载插件」） |
 | source 管理 | 查看当前生效 source（来源 + 失效警告）；设置本地仓库路径用于开发调试；清除持久化配置恢复默认 |
 | 完整卸载插件 | 停止 Codex monitor、清除聚合状态 `@ai_all_status`、清理历史遗留软链（不删仓库）；`.tmux.conf` 删声明与 `tmux kill-server` 因破坏性仅打印手动指引 |
+
+### cc-switch 模式（Claude Code）
+
+检测到 `~/.cc-switch/cc-switch.db` 时，Claude Code hooks 的装/卸/修/状态检查全部指向其通用配置（db `settings` 表 `common_config_claude`）——`switch` 命令启动 claude 时会把通用配置合并进实例配置，`~/.claude/settings.json` 与实例文件都会被 cc-switch 覆盖，直接写它们不持久。写入用与 cc-switch 自身一致的 `json_patch` 原子更新，他人 hook 与配置其他字段保留。注意：cc-switch GUI 运行中会把内存缓存写回 db，安装前建议先退出 GUI（脚本会警告）；不经 `switch` 直接运行的 `claude` 读不到 db 里的 hooks。
 
 ## Source 管理（生产默认 / 本地调试切换）
 
