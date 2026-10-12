@@ -122,7 +122,7 @@ build_all_status() {
     cur_sess=""
     local _ai_names
     _ai_names=$(_collect_ai_process_names)
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _last cur_cmd; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _created cur_cmd; do
         local pane_status="$claude_status"
         if [ -z "$pane_status" ]; then
             # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle。
@@ -153,7 +153,10 @@ build_all_status() {
         else
             ALL="${ALL}${seg}"
         fi
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_last_attached}|#{pane_current_command}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
+    # 主排序键 = session_created（创建序升序）：后开的 session 恒在末尾。
+    # 不用 session_last_attached——tmux 的 server_client_set_session 无条件刷新该
+    # 时间戳，client 自指 switch（点状态栏/选择器选自己所在 session）也会刷新，污染排序。
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{pane_current_command}" 2>/dev/null | awk -F'|' '$6>0' | sort -t'|' -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
