@@ -39,6 +39,14 @@ _current_pane_status() {
     tmux display-message -pt "$TMUX_PANE" -p "#{@ai_pane_status}" 2>/dev/null
 }
 
+# 重建聚合状态（_refresh / _entered 共用）
+_run_refresh() {
+    _maybe_repair_hooks
+    _cleanup_stale_panes
+    build_all_status
+    tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+}
+
 # 事件块日志变量（各 case 分支按需赋值，脚本末尾统一出块）
 PREV_STATUS=$(_current_pane_status)
 TOOL=""
@@ -191,14 +199,30 @@ case "$EVENT" in
     fi
     ;;
   _refresh)
-    _maybe_repair_hooks
-    _cleanup_stale_panes
-    build_all_status
-    tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
+    _run_refresh
     # 诊断日志：记录 pane 状态快照（纯文本，去掉 tmux 格式码）
     _refresh_snapshot=$(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}=#{@ai_pane_status}|#{session_attached}" 2>/dev/null \
         | awk -F'|' '$2+0>0' | cut -d'|' -f1 | tr '\n' ' ')
     _ai_log "REFRESH: ${_refresh_snapshot:-<empty>}"
+    exit 0
+    ;;
+  _session-switched)
+    # client-session-changed hook（入口传 #{hook_client_name}）：attach 与 switch-client
+    # 的共同汇聚点（tmux server_client_set_session），两种「进入」都能捕获。
+    # 该 hook 自指 switch 也触发（源码无 old != s 守卫）→ 用 per-client 自维护的
+    # 上次 session 对比过滤：cur != prev 才算「真进入」，自指（cur == prev）跳过。
+    # 排序语义：刚进入的 session 排最后；无记录的 session 回退 session_created。
+    if [ -n "$3" ]; then
+        _sw_key=$(printf '%s' "$3" | tr -c 'A-Za-z0-9._-' '_')
+        _cur_sess=$(tmux display-message -p -c "$3" '#{session_name}' 2>/dev/null)
+        _prev_sess=$(tmux show-option -gv "@ai_prev_sess_${_sw_key}" 2>/dev/null || true)
+        if [ -n "$_cur_sess" ] && [ "$_cur_sess" != "$_prev_sess" ]; then
+            tmux set-option -g "@ai_prev_sess_${_sw_key}" "$_cur_sess" 2>/dev/null || true
+            tmux set-option -t "$_cur_sess" @ai_entered_time "$(date +%s)" 2>/dev/null || true
+            _ai_log "ENTERED: client=$3 session=$_cur_sess"
+        fi
+    fi
+    _run_refresh
     exit 0
     ;;
   *)
