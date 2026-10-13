@@ -70,11 +70,14 @@ fi
 # --- 注册 tmux session/client 变化 hook，刷新聚合状态 ---
 # session-closed: session 被销毁时清除残留条目
 # client-detached: client 断开连接时排除已变为 detached 的 session
-# client-attached: client 重新连接时恢复该 session 的状态
+# client-session-changed: attach 与 switch-client 的共同汇聚点 = 「进入」→ 记
+# @ai_entered_time（排序用：刚进入的 session 排最后；handler 内以 per-client
+# 上次 session 对比过滤自指 switch）+ 刷新聚合
 # 注：_refresh 与 TOOL_ID 无关（仅重建聚合 + 自修复 claude hooks），统一传 claude。
 tmux set-hook -g session-closed    "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 tmux set-hook -g client-detached   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
-tmux set-hook -g client-attached   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
+tmux set-hook -g client-session-changed "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _session-switched #{hook_client_name}'" 2>/dev/null || true
+# （client-attached 不再注册：attach 场景由 client-session-changed 覆盖）
 # pane-exited: 程序自然退出 → 触发孤儿清理（#{pane_id} 在此 hook 中不可靠）
 tmux set-hook -g pane-exited       "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 # after-kill-pane: kill-pane 后触发孤儿清理
