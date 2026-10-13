@@ -12,6 +12,10 @@ tmuxclihook
 # 检查 npm registry 并将全局安装更新到最新版
 tmuxclihook update
 
+# 查看版本 / 帮助（version、--version、-v 与 help、--help、-h 等价）
+tmuxclihook --version
+tmuxclihook --help
+
 # 插件已经载入 tmux 后
 prefix + I
 

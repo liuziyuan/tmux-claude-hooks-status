@@ -27,7 +27,7 @@ import {
 } from '../src/adapters-meta.js';
 import { setSource, clearSource, getPersistedSource, originLabel } from '../src/source.js';
 import { note, padDisplay } from '../src/tui.js';
-import { updatePackage } from '../src/update.js';
+import { updatePackage, CURRENT_VERSION } from '../src/update.js';
 
 const OK = '✓';
 const NO = '✗';
@@ -365,13 +365,26 @@ async function main() {
   p.outro('完成');
 }
 
-if (process.argv[2] === 'update') {
+const arg = process.argv[2];
+if (arg === 'update') {
   updatePackage().then((ok) => {
     if (!ok) process.exitCode = 1;
   }).catch((err) => {
     console.error(err);
     process.exitCode = 1;
   });
+} else if (arg === '--version' || arg === '-v' || arg === 'version') {
+  console.log(`tmuxclihook v${CURRENT_VERSION}`);
+} else if (arg === '--help' || arg === '-h' || arg === 'help') {
+  console.log(
+    'tmuxclihook — tmux-ai-status 交互式安装器\n' +
+    '\n' +
+    '用法：\n' +
+    '  tmuxclihook              打开交互式 TUI 安装器\n' +
+    '  tmuxclihook update       检查并更新到 npm 最新版本\n' +
+    '  tmuxclihook version      显示版本（--version / -v 等价）\n' +
+    '  tmuxclihook help         显示本帮助（--help / -h 等价）',
+  );
 } else {
   main().catch((err) => {
     console.error(err);

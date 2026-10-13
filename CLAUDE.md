@@ -144,6 +144,8 @@ cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时
 
 cc-switch 模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。
 
+**决策（2026-10-13）**：评估过「db + 原生 settings.json 双写」方案，不做。双写唯一收益是覆盖裸跑场景，用户确认几乎不裸跑；代价是原生写入永久处于「被 cc-switch 覆盖 → 60s 自修复重写」的拉锯（CLAUDE.md 前文实测：原生文件会被 cc-switch 覆盖）。若未来使用模式变化再重新评估，届时应做成 option 开关式、尽力而为的双写。
+
 **PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
 当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
 状态机仍能正确显示 `!`/`?` 是因为：
