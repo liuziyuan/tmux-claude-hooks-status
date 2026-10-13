@@ -32,6 +32,8 @@ hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `T
 
 `tmuxclihook update` 会显示当前版本，通过 `npm view tmuxclihook version` 查询最新版；版本不同时直接执行 `npm install -g tmuxclihook@latest`，版本相同则不做修改。网络查询或安装失败时命令以非零状态退出。
 
+安装成功后会做一次生效自检：按 PATH 解析实际会被运行的 `tmuxclihook`，读取其真实版本与最新版比对。若本机使用 volta，`npm install -g` 只会更新 node 工具链目录里的副本、不会更新 volta 的 shim 镜像（实测 volta 2.0.2：shim npm 的全局 prefix 即工具链目录），自检发现这种情况时会自动补执行 `volta install tmuxclihook@latest` 使更新生效并复检；volta 缺失或修正失败时打警告并提示手动命令。`npm install` 始终是标准安装方式，无需因 volta 改变习惯。
+
 ## 功能
 
 | 菜单项 | 说明 |
