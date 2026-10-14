@@ -197,7 +197,7 @@ _acquire_event_lock() {
             rmdir "$lock" 2>/dev/null
             continue
         fi
-        mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)
+        mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
         if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge 10 ]; then
             rm -f "$lock/owner" 2>/dev/null
             rmdir "$lock" 2>/dev/null
@@ -226,7 +226,7 @@ _acquire_lock() {
         fi
         # stale 检测: 锁目录 mtime > 5s 视为遗弃
         local mtime
-        mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)
+        mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
         if [ -n "$mtime" ]; then
             local age=$(( $(date +%s) - mtime ))
             if [ "$age" -ge 5 ]; then
@@ -379,7 +379,7 @@ _new_session_owns_pane() {
         [ "$stored_pane" = "$TMUX_PANE" ] || continue
         local mtime
         # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
+        mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -ge 300 ] && ! _pane_has_ai_process "$TMUX_PANE" && continue
         return 0
@@ -435,7 +435,7 @@ _is_pane_session_dead() {
         [ -f "$f" ] || continue
         local mtime
         # stat 失败时保守视为新鲜（date +%s），避免误清活跃会话
-        mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || date +%s)
+        mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || date +%s)
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
