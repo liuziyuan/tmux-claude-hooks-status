@@ -12,8 +12,9 @@ export const CURRENT_VERSION = packageJson.version;
 // `npm install -g` 在版本管理器（volta 等）环境下不会更新其管理的 shim：
 // volta 的 `~/.volta/bin` shim 指向 packages/ 镜像，而 npm -g 只写 node
 // 工具链目录，两者互不感知（实测 0.3.0 → 0.3.2 升级时用户命令仍解析到
-// 旧版）。install 成功后按 PATH 解析「用户实际会运行的那份」，尽力读取
-// 真实版本并与 registry latest 比对，无法确认或版本不符时打警告。
+// 旧版）。生效收敛由 repairWithVolta 无条件完成（见下）；本节自检只是
+// 事后确认：按 update 进程的 PATH 解析一份，尽力读取真实版本并与
+// registry latest 比对，无法确认或版本不符时打警告。
 // 验证是尽力而为的提示，不改变 update 的返回值（install 本身已成功）。
 
 function findOnPath(name, env) {
@@ -95,9 +96,12 @@ function warnNotEffective(log, result) {
 
 // volta 生效修正：`npm install -g` 只写 node 工具链目录，不更新 volta 的
 // shim 镜像（实测 volta 2.0.2：shim npm 的全局 prefix 就是工具链目录），
-// 用户的命令经 ~/.volta/bin shim 解析时仍是旧版。检测到 volta 可用时自动
-// 补一次 volta install 使更新生效。npm install -g 始终是安装语义本身，
-// volta 只在自检发现未生效时被自动调用，用户无需改变安装习惯。
+// 用户的命令经 ~/.volta/bin shim 解析时仍是旧版。因此只要检测到 volta
+// 就无条件补一次 volta install 完成生效（幂等，已是最新时秒回）。不走
+// 「自检失败才修」的条件路径：自检按 update 进程自己的 PATH 找第一份，
+// 可能恰好命中 npm -g 刚写的那份而误判 ok（实测 0.3.3 → 0.3.4：verify
+// 判 ok，修复从未触发，用户命令仍是旧版）。npm install -g 是安装语义，
+// volta install 是生效语义，两者都执行；用户无需改变安装习惯。
 export async function repairWithVolta(run, log, env = process.env) {
   const voltaHome = env.VOLTA_HOME || join(env.HOME || '', '.volta');
   const voltaBin = findOnPath('volta', env) || join(voltaHome, 'bin', 'volta');
@@ -149,19 +153,20 @@ export async function updatePackage(options = {}) {
 
   log.log(`Done. Updated to v${latestVersion}`);
 
+  // 生效收敛：有 volta 就无条件跑（幂等；无 volta 时静默跳过，纯 npm 场景
+  // npm -g 本身已生效）。任何命令行执行 update 都能升级生效的关键。
+  if (repairVolta) {
+    await repairVolta(run, log);
+  }
+
   if (verify) {
-    let result = await verify(latestVersion);
-    if (result.status !== 'ok') {
-      // PATH 命中的副本未反映新版本（典型：volta shim 镜像未更新）——
-      // 自动走 volta 完成生效步骤，然后复检。
-      if (repairVolta && await repairVolta(run, log)) {
-        result = await verify(latestVersion);
-      }
-      if (result.status === 'ok') {
-        log.log(`Verified: tmuxclihook on your PATH now resolves to v${latestVersion}.`);
-      } else {
-        warnNotEffective(log, result);
-      }
+    // 事后确认（尽力而为）：两处落点都应已是新版，命中哪份都该 ok；
+    // 不 ok（如 PATH 上另有第三份旧安装）只警告，不影响返回值。
+    const result = await verify(latestVersion);
+    if (result.status === 'ok') {
+      log.log(`Verified: tmuxclihook on your PATH now resolves to v${latestVersion}.`);
+    } else {
+      warnNotEffective(log, result);
     }
   }
 

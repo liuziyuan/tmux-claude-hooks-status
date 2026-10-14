@@ -44,7 +44,7 @@ test('updatePackage installs the latest global package when versions differ', as
     return { stdout: '0.3.0\n' };
   };
 
-  const ok = await updatePackage({ run, log, currentVersion: '0.2.0', verify: null });
+  const ok = await updatePackage({ run, log, currentVersion: '0.2.0', verify: null, repairVolta: null });
 
   assert.equal(ok, true);
   assert.deepEqual(calls, [
@@ -209,29 +209,26 @@ test('updatePackage warns when post-install verification fails without volta', a
   ]);
 });
 
-test('updatePackage repairs via volta and verifies again', async () => {
+test('updatePackage applies volta repair unconditionally, then verifies once', async () => {
   const { log, messages } = captureLog();
   const run = async () => ({ stdout: '1.2.3\n' });
-  let verifyCalls = 0;
+  const timeline = [];
+  // 自检判 ok 正是真实 bug 场景（0.3.3 → 0.3.4：PATH 第一份是 npm -g 刚写
+  // 的那份，verify 必然误判 ok）——volta 生效步骤仍必须执行，修复不能由
+  // 自检结果决定
   const verify = async () => {
-    verifyCalls += 1;
-    // 首检：PATH 副本仍是旧版（volta shim 镜像未更新）；volta 修正后复检通过
-    return verifyCalls === 1
-      ? { status: 'mismatch', path: '/fake/volta-shim', version: '1.0.0' }
-      : { status: 'ok', path: '/fake/volta-shim', version: '1.2.3' };
+    timeline.push('verify');
+    return { status: 'ok', path: '/fake/volta-shim', version: '1.2.3' };
   };
-  const repairCalls = [];
   const repairVolta = async (runFn, logFn) => {
-    repairCalls.push([runFn === run, logFn === log]);
+    timeline.push('repair');
     return true;
   };
 
   const ok = await updatePackage({ run, log, currentVersion: '1.0.0', verify, repairVolta });
 
   assert.equal(ok, true);
-  assert.equal(verifyCalls, 2);
-  assert.deepEqual(repairCalls, [[true, true]]);
-  // 'Detected volta...' 由默认 repairWithVolta 内部打；注入 stub 不产生该行
+  assert.deepEqual(timeline, ['repair', 'verify']);
   assert.deepEqual(messages, [
     'Current version: v1.0.0',
     'Updating to v1.2.3...',
@@ -294,17 +291,18 @@ test('repairWithVolta returns false when volta is absent', () => {
   });
 });
 
-test('updatePackage stays silent when post-install verification passes', async () => {
+test('updatePackage confirms when post-install verification passes', async () => {
   const { log, messages } = captureLog();
   const run = async () => ({ stdout: '1.2.3\n' });
   const verify = async () => ({ status: 'ok', path: '/fake/tmuxclihook', version: '1.2.3' });
 
-  const ok = await updatePackage({ run, log, currentVersion: '1.0.0', verify });
+  const ok = await updatePackage({ run, log, currentVersion: '1.0.0', verify, repairVolta: null });
 
   assert.equal(ok, true);
   assert.deepEqual(messages, [
     'Current version: v1.0.0',
     'Updating to v1.2.3...',
     'Done. Updated to v1.2.3',
+    'Verified: tmuxclihook on your PATH now resolves to v1.2.3.',
   ]);
 });
