@@ -6,6 +6,8 @@
 _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _STATUS_DIR="${TMUX_AI_STATUS_DIR:-/tmp/ai-status}"
+# 卸载意图标记目录（suppressed-<tool>）。⚠️ 与 lib-install-hooks.sh 中的定义保持一致（两处同步改）。
+_SUPPRESS_DIR="${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/tmuxclihook}"
 STATUS_COLOR="#F1FA8C"
 
 # --- 日志模块 ---
@@ -533,6 +535,10 @@ _check_hooks_integrity() {
 # 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
 # 安装器由 adapter 声明（ADAPTER_INSTALLER）。
 _maybe_repair_hooks() {
+    # 用户显式卸载意图（suppressed-<tool>）→ 不自动修复，尊重到显式安装为止。
+    if [ -f "${_SUPPRESS_DIR}/suppressed-${TOOL_ID:-claude}" ]; then
+        return 0
+    fi
     local marker="${_STATUS_DIR}/.hooks-repair-${TOOL_ID:-claude}-ts"
     local now
     now=$(date +%s)

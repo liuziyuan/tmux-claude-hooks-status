@@ -25,12 +25,14 @@ scripts/
   tmux-ai-status                       # 事件处理器（参数化：<TOOL_ID> <EVENT>，claude/codex 共用）
   tmux-ai-monitor                      # tmux server 级 Codex 生命周期监控（启动补 -、/exit 清空）
   tmux-ai-esc                          # Esc 键拒绝检测（!/? → -）
-  lib-install-hooks.sh                 # 安装公共骨架（依赖检查 + 原子写）
+  lib-install-hooks.sh                 # 安装公共骨架（依赖检查 + 原子写 + 卸载意图标记 helper）
   adapters/
     claude.sh                          # Claude Code 差异声明 + 完整性检查 + install/uninstall
     codex.sh                           # Codex 差异声明 + install/uninstall（无SessionEnd/延迟SessionStart/trust）
-  install-claude-hooks.sh              # 薄 wrapper → adapters/claude.sh
-  install-codex-hooks.sh               # 薄 wrapper → adapters/codex.sh
+    opencode.sh                        # opencode 差异声明 + plugin 文件生成/删除（整文件写、无 jq）
+  install-claude-hooks.sh              # 薄 wrapper → adapters/claude.sh（[install|uninstall|check|auto]）
+  install-codex-hooks.sh               # 薄 wrapper → adapters/codex.sh（[install|uninstall|check]）
+  install-opencode-hooks.sh            # 薄 wrapper → adapters/opencode.sh（[install|uninstall|check]）
 ```
 
 ### 工具适配器架构（adapters/）
@@ -139,6 +141,10 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 **cc-switch GUI 运行中写库会被内存缓存覆盖**
 
 cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时全量写回 `cc-switch.db`（实测发生过：install 写入的 hooks 被旧缓存冲掉）。缓解：claude adapter 写库前 `pgrep` 检测 GUI 并 stderr 警告；tmux 会话活跃时 `_maybe_repair_hooks`（60s 节流）会自动重写。最稳妥流程：先退出 cc-switch GUI → install → 再启动 GUI。
+
+**GUI 回写可复活已卸载条目（卸载方向无自动对抗）**
+
+用户显式卸载（suppressed 标记写入）后，GUI 旧内存缓存回写 db 会把本插件条目带回真源。标记只挡自动修复路径，不做「负向修复」主动剥条目——与外部应用对拉风险大于收益。表现为 check 又变 ok（「已装」）。缓解：uninstall 前有 `_ccswitch_warn_gui` 警告；用户退出 GUI 后重跑 uninstall 即可。
 
 **非 `switch` 启动的裸 claude 无状态**
 
@@ -272,6 +278,12 @@ ls /tmp/ai-status/*/*-poll-pid
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
 - **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
+- **多安装源收敛与卸载意图标记（2026-10-14）**：hooks 条目可由开发 repo 与 npm bundled 包两个「安装源」写入（TUI 走 bundled、自修复走 tmux 加载源），曾因 claude 剥离用 `startswith($hook_script)` 路径敏感匹配导致跨源卸载假成功（剥离零命中 → 报成功但真源未变 → 检测恒「已装」）。修复后的契约：
+    - **归属判定路径无关**：所有 strip/merge 清理/check 计数统一 `contains("tmux-ai-status")`（codex 用 `contains("tmux-ai-status codex")`），legacy 名（tmux-powerline-claude-status/tmux-claude-status）清理保留。跨源 install/卸载/修复在任意源组合下结果一致
+    - **check 三要素**：按事件计数（非扁平总数，防重复+缺失假阳性）+ 结构指纹 + **每事件至少一条条目脚本存活**（`test -x` command 首 token；死路径如 npm 卸载/volta 升级换路径 → missing → 重装收敛自愈）
+    - **收敛策略不对称**：claude 无 trust 代价 → install 每次强收敛到执行者路径；codex/opencode **no-op if valid**（check 通过时不改写——codex 重写即 `trusted_hash` 失效需重新 Trust all，仅缺失/死路径才 strip+重写收敛）
+    - **卸载意图标记（suppression marker）**：`${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmuxclihook}/suppressed-<tool>`（持久，跨重启有效）。wrapper 显式 uninstall 成功 → 写；显式 install 成功 → 清；三条自动修复路径（`_maybe_repair_hooks`、SessionStart 重装、入口 `auto`）见标记一律跳过。`install-claude-hooks.sh auto` 供 tmux 入口加载时调用（被挡静默 exit 0）；用户恢复需显式安装（prefix+C-h / TUI）
+    - `_SUPPRESS_DIR` 在 `lib-install-hooks.sh` 与 `lib-tmux-ai-status.sh` 各定义一次（双上下文自包含，改动需两处同步）；adapter check 不得依赖 lib-install-hooks.sh（事件路径未 source 它）
 
 ## 依赖
 

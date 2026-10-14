@@ -45,6 +45,9 @@ function buildTools(scriptsDir) {
       installer: join(scriptsDir, 'install-codex-hooks.sh'),
       hookMarker: 'tmux-ai-status codex',
       minHookCount: 6,
+      // 无 cc-switch 真源（hooks.json 即文件真源），但统一走 wrapper check 以获得
+      // 脚本存活校验（死路径 → missing → repair 收敛），与 bash 侧同一份真相。
+      checkViaWrapper: true,
     },
     {
       id: 'opencode',
@@ -62,6 +65,9 @@ function buildTools(scriptsDir) {
       installer: join(scriptsDir, 'install-opencode-hooks.sh'),
       hookMarker: 'tmux-ai-status (managed by tmux-ai-hooks-status)',
       minHookCount: 1,
+      // 统一走 wrapper check：bash 侧含 HOOK_SCRIPT 存活校验（死路径 → missing →
+      // repair 收敛），JS 文件计数判不出死路径。
+      checkViaWrapper: true,
     },
   ];
 }

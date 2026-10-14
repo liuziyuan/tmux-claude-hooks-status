@@ -39,11 +39,17 @@ ADAPTER_INSTALLER="${_LIB_DIR}/install-opencode-hooks.sh"
 
 _OPENCODE_MARKER="tmux-ai-status (managed by tmux-ai-hooks-status)"
 
-# 完整性检查：plugin 文件存在且含本插件标记 + 指向当前仓库的 hook 脚本路径。
+# 完整性检查：plugin 文件存在 + 本插件标记 + 结构指纹 + HOOK_SCRIPT 指向的脚本存活。
+# 路径无关（不比对当前 _LIB_DIR——跨安装源的合法 plugin 同样有效）；
+# 脚本死路径（npm 包卸载/换路径）→ missing → 重装收敛。
 adapter_check_integrity() {
     [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
     grep -q "$_OPENCODE_MARKER" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
-    grep -q "${_LIB_DIR}/tmux-ai-status" "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
+    local script_path
+    script_path=$(sed -n 's/^const HOOK_SCRIPT = "\(.*\)"$/\1/p' "$ADAPTER_HOOKS_FILE" 2>/dev/null | head -n 1)
+    if [ -z "$script_path" ] || [ ! -x "$script_path" ]; then
+        return 1
+    fi
     grep -q 'case "permission.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
     grep -q 'case "question.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
     grep -q 'case "permission.replied"' "$ADAPTER_HOOKS_FILE" 2>/dev/null || return 1
@@ -142,7 +148,12 @@ EOF
 }
 
 # 安装：写出/覆盖 plugin 文件。整文件替换（非合并）——同目录下他人 plugin 文件不受影响。
+# no-op if valid：文件完整且 HOOK_SCRIPT 存活时不重写（避免跨安装源无谓覆盖）。
 adapter_install_hooks() {
+    if adapter_check_integrity; then
+        echo "opencode plugin already installed and valid at $ADAPTER_HOOKS_FILE (no-op)"
+        return 0
+    fi
     mkdir -p "$(dirname "$ADAPTER_HOOKS_FILE")" 2>/dev/null || true
     local hook_script="${_LIB_DIR}/tmux-ai-status"
     local content

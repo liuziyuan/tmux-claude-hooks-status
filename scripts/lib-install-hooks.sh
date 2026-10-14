@@ -24,3 +24,16 @@ _install_atomic_write() {
     printf '%s\n' "$content" > "$tmp"
     mv -f "$tmp" "$target"
 }
+
+# --- 卸载意图标记（suppression marker）---
+# 显式 uninstall 成功 → 写 suppressed-<tool>；显式 install 成功 → 清。
+# 自动修复路径（_maybe_repair_hooks / 入口 auto / SessionStart 重装）见标记一律不装。
+# ⚠️ _SUPPRESS_DIR 与 lib-tmux-ai-status.sh 中的定义保持一致（两处同步改）。
+_SUPPRESS_DIR="${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/tmuxclihook}"
+
+_hooks_suppress_file() { printf '%s/suppressed-%s' "$_SUPPRESS_DIR" "$1"; }
+_hooks_suppress_write() {
+    mkdir -p "$_SUPPRESS_DIR" 2>/dev/null || true
+    date +%s > "$(_hooks_suppress_file "$1")" 2>/dev/null || true
+}
+_hooks_suppress_clear() { rm -f "$(_hooks_suppress_file "$1")" 2>/dev/null || true; }
