@@ -121,10 +121,11 @@ function hooksInstalled(tool) {
   }
 }
 
-// 异步判定：声明 checkViaWrapper 且 cc-switch db 存在时，走 bash wrapper check
-// （bash 侧按 sqlite 通用配置判定真源）；否则回落本地文件计数。
+// 异步判定：声明 checkViaWrapper 时走 bash wrapper check（cc-switch 模式在 bash 侧
+// 按 sqlite 通用配置判定真源；所有 adapter check 均含脚本存活校验）；未声明的工具
+// 回落本地文件计数。
 async function hooksInstalledAsync(tool) {
-  if (tool.checkViaWrapper && tool.ccSwitchDb && existsSync(tool.ccSwitchDb)) {
+  if (tool.checkViaWrapper && (!tool.ccSwitchDb || existsSync(tool.ccSwitchDb))) {
     try {
       const { stdout, exitCode } = await execa('bash', [tool.installer, 'check'], {
         reject: false,

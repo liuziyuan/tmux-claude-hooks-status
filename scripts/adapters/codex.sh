@@ -36,14 +36,38 @@ ADAPTER_PERMISSION_PRE_TOOL_NAMES="request_permissions"
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-codex-hooks.sh"
 
-# 完整性检查：hooks.json 是否含 6 个本插件 command（0.144+）。
+# 完整性计数：6 个事件中注册了含 tmux-ai-status codex 的 command 的事件数（按事件，
+# 非扁平总数——重复+缺失的组合在扁平计数下会假阳性）。
+_CODEX_JQ_COUNT='
+    .hooks as $h |
+    ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"]
+    | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-ai-status codex"))))
+    | length
+'
+
+# 完整性检查：6 事件计数 + 每个事件至少一条条目的脚本文件存活（test -x）。
+# 跨安装源路径无关（contains）；脚本死路径（npm 包卸载/volta 换路径，含部分事件死）
+# → missing → install 收敛（no-op 门禁随之放行，接受一次 re-trust 代价换功能恢复）。
 adapter_check_integrity() {
     [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
-    local n
-    n=$(jq '[.hooks[]?[]?.hooks[]?.command // empty
-             | select(contains("tmux-ai-status codex"))] | length' \
-        "$ADAPTER_HOOKS_FILE" 2>/dev/null)
-    [ "${n:-0}" -ge 6 ]
+    local n ev p ok_events=""
+    n=$(jq "$_CODEX_JQ_COUNT" "$ADAPTER_HOOKS_FILE" 2>/dev/null)
+    [ "${n:-0}" -ge 6 ] || return 1
+    while IFS=$'\t' read -r ev p; do
+        if [ -n "$ev" ] && [ -x "$p" ]; then
+            case ",$ok_events," in *",$ev,"*) ;; *) ok_events="$ok_events,$ev" ;; esac
+        fi
+    done < <(jq -r '.hooks as $h |
+        ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"] as $events |
+        $events[] as $e |
+        [$h[$e][]?.hooks[]?.command // empty
+         | select(contains("tmux-ai-status codex")) | split(" ")[0]] as $scripts |
+        select(($scripts | length) > 0) |
+        $scripts[] | "\($e)\t\(.)"' "$ADAPTER_HOOKS_FILE" 2>/dev/null)
+    for ev in SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop; do
+        case ",$ok_events," in *",$ev,"*) ;; *) return 1 ;; esac
+    done
+    return 0
 }
 
 # Codex 6 事件（全部同步——0.144 静默跳过 async=true 的 hook）
@@ -73,11 +97,17 @@ _codex_read_existing() {
 }
 
 # 安装：改写 hooks.json（剥离旧 managed group 后为每事件追加本插件 group），保留他人 hook。
+# no-op if valid：事件齐全且脚本存活时不改写——重写即 trusted_hash 失效（command 路径
+# 变化 → codex 启动要重新 Trust all），跨安装源重复安装因此保持既有授信。
 # 清理旧 hooks.toml（0.144 不再读取）。trust 无法在 bash 复现，靠用户首启 codex TUI 授信。
 adapter_install_hooks() {
     _install_require_jq
     mkdir -p "$(dirname "$ADAPTER_HOOKS_FILE")" 2>/dev/null || true
     [ -f "$_CODEX_LEGACY_TOML" ] && rm -f "$_CODEX_LEGACY_TOML" && echo "移除旧 hooks.toml（0.144 不再读取）"
+    if adapter_check_integrity; then
+        echo "Codex hooks already installed and valid at $ADAPTER_HOOKS_FILE (no-op, trust preserved)"
+        return 0
+    fi
     local hook_script="${_LIB_DIR}/tmux-ai-status"
     local new_json
     new_json=$(_codex_read_existing | _codex_strip_managed | jq \

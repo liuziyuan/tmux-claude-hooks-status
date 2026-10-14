@@ -58,8 +58,10 @@ if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ];
 fi
 
 # --- 自动注册 Claude hooks（幂等，每次插件加载时确保 hooks 存在）---
+# auto 模式：用户显式卸载过（suppressed-claude 标记在）时静默跳过，尊重卸载意图；
+# 显式安装（prefix+C-h / TUI）才会清除标记恢复自动守护。
 # 注：codex/opencode hooks 不自动安装（非人人安装），用 prefix+M-h / prefix+C-p 手动装。
-"${CURRENT_DIR}/scripts/install-claude-hooks.sh" >/dev/null 2>&1 || true
+"${CURRENT_DIR}/scripts/install-claude-hooks.sh" auto >/dev/null 2>&1 || true
 
 # --- 启动 tmux server 级状态监控器 ---
 # Codex/opencode 均无 SessionEnd（codex 的 SessionStart 还延迟到首个 turn）；

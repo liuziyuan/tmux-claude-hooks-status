@@ -72,10 +72,7 @@ _CLAUDE_JQ_MERGE='
                         .hooks[]
                         | select(.command | contains("tmux-powerline-claude-status") | not)
                         | select(.command | contains("tmux-claude-status") | not)
-                        | select(
-                            (.command | contains("tmux-ai-status") | not)
-                            or (.command | startswith($dev_script))
-                        )
+                        | select(.command | contains("tmux-ai-status") | not)
                     ]
                     | select(.hooks | length > 0)
                 )
@@ -98,7 +95,7 @@ _CLAUDE_JQ_STRIP='
         .hooks |= if . then
             [. | to_entries[] |
                 .value |= [
-                    .[] | .hooks = [.hooks[] | select(.command | startswith($hook_script) | not)]
+                    .[] | .hooks = [.hooks[] | select(.command | contains("tmux-ai-status") | not)]
                     | select(.hooks | length > 0)
                 ]
                 | select(.value | length > 0)
@@ -107,13 +104,12 @@ _CLAUDE_JQ_STRIP='
 '
 
 _claude_apply_merge() {  # $1=输入 JSON 文件 → stdout 变换后全文档
-    jq --arg dev_script "${_LIB_DIR}/tmux-ai-status" \
-       --arg tool_cmd "${_LIB_DIR}/tmux-ai-status claude" \
+    jq --arg tool_cmd "${_LIB_DIR}/tmux-ai-status claude" \
        "$_CLAUDE_JQ_MERGE" "$1"
 }
 
 _claude_apply_strip() {  # $1=输入 JSON 文件 → stdout 变换后全文档
-    jq --arg hook_script "${_LIB_DIR}/tmux-ai-status" "$_CLAUDE_JQ_STRIP" "$1"
+    jq "$_CLAUDE_JQ_STRIP" "$1"
 }
 
 _claude_count_registered() {  # $1=输入 JSON 文件 → stdout 事件数（jq 失败时为空）
@@ -187,18 +183,41 @@ ON CONFLICT(key) DO UPDATE SET value = json_patch(settings.value, json($(_sqlquo
 }
 
 # 完整性检查：cc-switch 模式查通用配置；否则查 hooks 配置文件。
-# 10 个事件都注册了本插件 hook 才算完整；缺失（外部覆盖）→ 返回 1 触发自修复。
+# 三要素：10 事件计数 + 每个事件至少一条条目的脚本文件存活（test -x）。
+# 计数齐但脚本死（npm 包卸载/volta 升级换路径，含部分事件死）→ missing → 自修复重装收敛。
+# 存活提取内联在本函数（jq + test），不依赖 lib-install-hooks.sh——本函数同时被
+# 事件路径（lib-tmux-ai-status.sh）与 install wrapper（lib-install-hooks.sh）两个上下文调用。
 adapter_check_integrity() {
-    local registered tmp
+    local src registered ev p ok_events=""
     if _ccswitch_active; then
-        _ccswitch_dump_common tmp || return 1
-        registered=$(_claude_count_registered "$tmp")
-        rm -f "$tmp"
+        _ccswitch_dump_common src || return 1
     else
         [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
-        registered=$(_claude_count_registered "$ADAPTER_HOOKS_FILE")
+        src="$ADAPTER_HOOKS_FILE"
     fi
-    [ "${registered:-0}" -ge 10 ]
+    registered=$(_claude_count_registered "$src")
+    if [ "${registered:-0}" -ge 10 ]; then
+        while IFS=$'\t' read -r ev p; do
+            if [ -n "$ev" ] && [ -x "$p" ]; then
+                case ",$ok_events," in *",$ev,"*) ;; *) ok_events="$ok_events,$ev" ;; esac
+            fi
+        done < <(jq -r '.hooks as $h |
+            ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+             "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
+            $events[] as $e |
+            [$h[$e][]?.hooks[]?.command // empty
+             | select(contains("tmux-ai-status")) | split(" ")[0]] as $scripts |
+            select(($scripts | length) > 0) |
+            $scripts[] | "\($e)\t\(.)"' "$src" 2>/dev/null)
+    fi
+    if [ "$src" != "$ADAPTER_HOOKS_FILE" ]; then
+        rm -f "$src"
+    fi
+    [ "${registered:-0}" -ge 10 ] || return 1
+    for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest Notification Stop StopFailure; do
+        case ",$ok_events," in *",$ev,"*) ;; *) return 1 ;; esac
+    done
+    return 0
 }
 
 # 安装：合并式更新，保留他人（masko 等）注册的 hook。cc-switch 模式只写库
@@ -233,6 +252,7 @@ adapter_uninstall_hooks() {
     _install_require_jq
     if _ccswitch_active; then
         local tmp stripped cur_hooks final_hooks patch managed top_patch
+        _ccswitch_warn_gui
         _ccswitch_dump_common tmp || return 1
         cur_hooks=$(jq -c '.hooks // {}' "$tmp")
         # 已无本插件条目 → no-op（否则会把保留的他人 hook 重写一遍）

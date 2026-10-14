@@ -135,4 +135,37 @@ H5=$(new_home nokey)
 HOME="$H5" bash "$WRAPPER" >/dev/null
 assert_eq "10" "$(managed_events "$H5")" "key 缺失时 upsert 建行并注册 10 事件"
 
-echo "PASS: 10/10 cc-switch install 用例全部通过"
+# 把全部本插件 command 改为挂在前缀 <prefix> 下（模拟条目由另一安装源写入）
+repath_commands() {  # $1=home $2=fake-prefix
+    local newval
+    newval=$(common_value "$1" | jq --arg p "$2" \
+        'walk(if type == "object" and ((.command // "") | contains("tmux-ai-status"))
+              then .command = ($p + ((.command // "") | sub(".*tmux-ai-status"; "tmux-ai-status")))
+              else . end)')
+    sqlite3 "$1/.cc-switch/cc-switch.db" \
+        "UPDATE settings SET value='$newval' WHERE key='common_config_claude'"
+}
+
+# ── 用例 11: 跨源卸载（路径无关剥离回归：条目路径非执行者路径时也必须剥干净）──
+H6=$(new_home crosssrc); seed_common "$H6"
+HOME="$H6" bash "$WRAPPER" >/dev/null
+repath_commands "$H6" "/opt/fake-src"
+assert_eq "10" "$(managed_events "$H6")" "前置：假路径条目仍被计数识别"
+HOME="$H6" bash "$WRAPPER" uninstall >/dev/null
+assert_eq "0" "$(managed_events "$H6")" "假路径（跨源）条目被完整剥离"
+assert_contains "rtk hook claude" "$(common_value "$H6")" "跨源卸载仍保留他人 rtk hook"
+[ -f "$H6/.config/tmuxclihook/suppressed-claude" ] \
+    || { echo "FAIL: uninstall 应写卸载意图标记"; exit 1; }
+
+# ── 用例 12: check 脚本存活校验（死路径 → missing → install 收敛恢复）──
+H7=$(new_home deadscript); seed_common "$H7"
+HOME="$H7" bash "$WRAPPER" >/dev/null
+repath_commands "$H7" "/nonexistent"
+if HOME="$H7" bash "$WRAPPER" check >/dev/null 2>&1; then
+    echo "FAIL: 死路径条目 check 应失败"; exit 1
+fi
+HOME="$H7" bash "$WRAPPER" >/dev/null
+out=$(HOME="$H7" bash "$WRAPPER" check)
+assert_eq "ok" "$out" "install 收敛为执行者路径后 check 恢复 ok"
+
+echo "PASS: 12/12 cc-switch install 用例全部通过"

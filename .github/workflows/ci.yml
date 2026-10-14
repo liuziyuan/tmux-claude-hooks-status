@@ -30,7 +30,7 @@ jobs:
         run: node --input-type=module -e 'import "./src/detect.js"; import "./src/env.js"; import "./src/hooks.js"; import "./src/symlink.js"; import "./src/adapters-meta.js"; console.log("modules load OK")'
 
   scripts:
-    name: bash scripts (syntax)
+    name: bash scripts (syntax + tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,3 +41,9 @@ jobs:
             [ -f "$f" ] || continue
             bash -n "$f" && echo "OK  $f"
           done
+      - name: install/uninstall/check 行为测试（含 cc-switch 模式与卸载标记）
+        run: |
+          set -e
+          bash tests/ccswitch-install.test.sh
+          bash tests/status-machine.test.sh
+          bash tests/suppress-cross-source.test.sh
