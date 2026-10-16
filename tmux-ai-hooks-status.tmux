@@ -75,7 +75,10 @@ fi
 # client-session-changed: attach 与 switch-client 的共同汇聚点 = 「进入」→ 记
 # @ai_entered_time（排序用：刚进入的 session 排最后；handler 内以 per-client
 # 上次 session 对比过滤自指 switch）+ 刷新聚合
-tmux set-hook -g client-session-changed "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _session-switched #{hook_client_name}'" 2>/dev/null || true
+# 变量必须用 #{hook_client}（3.7c/3.8 均展开为触发 client 名）。不存在
+# #{hook_client_name} 这个 format 变量——误用它恒展开为空，handler 的
+# [ -n "$3" ] 守卫静默跳过，entered_time 从不写入，排序退化为 created 序。
+tmux set-hook -g client-session-changed "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _session-switched #{hook_client}'" 2>/dev/null || true
 # 注：_refresh 与 TOOL_ID 无关（仅重建聚合 + 自修复 claude hooks），统一传 claude。
 tmux set-hook -g session-closed    "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 tmux set-hook -g client-detached   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"

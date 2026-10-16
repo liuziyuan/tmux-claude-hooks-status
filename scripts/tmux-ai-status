@@ -211,7 +211,8 @@ case "$EVENT" in
     exit 0
     ;;
   _session-switched)
-    # client-session-changed hook（入口传 #{hook_client_name}）：attach 与 switch-client
+    # client-session-changed hook（入口传 #{hook_client}，3.7c/3.8 均为触发
+    # client 名；注意不存在 #{hook_client_name} 变量，误用恒为空）：attach 与 switch-client
     # 的共同汇聚点（tmux server_client_set_session），两种「进入」都能捕获。
     # 该 hook 自指 switch 也触发（源码无 old != s 守卫）→ 用 per-client 自维护的
     # 上次 session 对比过滤：cur != prev 才算「真进入」，自指（cur == prev）跳过。

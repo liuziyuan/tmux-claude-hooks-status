@@ -268,7 +268,7 @@ ls /tmp/ai-status/*/*-poll-pid
 ## 关键设计决策
 
 - **共享库架构**：通过 `lib-tmux-ai-status.sh` 提供通用功能，`TOOL_ID` 区分状态变量和临时文件
-- **Attached-only 显示**：`build_all_status()` 按「进入时间 → 创建时间」两级升序排列（`window_index`/`pane_index` 次之），仅显示 attached session。进入时间 = `client-session-changed` hook（attach 与 switch-client 的共同汇聚点）时 `_session-switched` 写入的 session option `@ai_entered_time`（刚进入的 session 排最后；无记录回退 `session_created`）。该 hook 对自指 switch 也触发（tmux 源码无 `old != s` 守卫），handler 用 per-client 自维护的上次 session（server option `@ai_prev_sess_<client>`）对比过滤：`cur != prev` 才算真进入。不用 `session_last_attached`：tmux 对该时间戳无条件刷新（自指 switch 也算），会污染「刚进入的排最后」的预期。不用 `client-attached`：switch-client 进入（tmuxtui 在已 attach 的 client 里切项目）不触发它
+- **Attached-only 显示**：`build_all_status()` 按「进入时间 → 创建时间」两级升序排列（`window_index`/`pane_index` 次之），仅显示 attached session。进入时间 = `client-session-changed` hook（attach 与 switch-client 的共同汇聚点）时 `_session-switched` 写入的 session option `@ai_entered_time`（刚进入的 session 排最后；无记录回退 `session_created`）。该 hook 对自指 switch 也触发（tmux 源码无 `old != s` 守卫），handler 用 per-client 自维护的上次 session（server option `@ai_prev_sess_<client>`）对比过滤：`cur != prev` 才算真进入。不用 `session_last_attached`：tmux 对该时间戳无条件刷新（自指 switch 也算），会污染「刚进入的排最后」的预期。不用 `client-attached`：switch-client 进入（tmuxtui 在已 attach 的 client 里切项目）不触发它。hook 命令传 `#{hook_client}`（3.7c/3.8 均展开为触发 client 名）——**不存在 `#{hook_client_name}` 变量**（tmux 任何版本都没有；误用恒展开为空，handler 的 `[ -n "$3" ]` 守卫静默跳过，entered_time 从不写入、排序退化 created 序，2026-10-16 实测踩坑）
 - **set-hook 是 upsert**：改 hook 名或从入口删除 hook 行时，tmux server 里已注册的旧 hook 不会消失（prefix+r 重载不清），需手动 `tmux set-hook -ug <hook>` 清除，否则旧命令继续触发（case 无匹配时静默 no-op，但属脏状态）
 - **进程树解析**：hook 子进程不继承 `$TMUX_PANE`，通过 `ps -o ppid` 向上遍历找到 pane PID
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
