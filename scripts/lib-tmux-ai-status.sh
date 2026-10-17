@@ -112,6 +112,52 @@ _clear_pane_id() {
     [ -n "$SESSION_ID" ] && rm -f "$(_pane_dir)/pane-${SESSION_ID}"
 }
 
+# --- cc-switch provider 标签 ---
+# cc-switch(switch 命令)launch 时向 CLI 注入 CC_SWITCH_PROVIDER / CC_SWITCH_PROVIDER_ID,
+# CLI 的 hooks 进程继承之;tmux-ai-status 入口把它们捕获进 pane option
+# @ai_provider / @ai_provider_id。聚合侧在此读取并渲染彩色 provider 段。
+# 颜色真源:~/.cc-switch/statusline-preferences.json(colors.claude / colors.codex
+# 按 providerId 分桶)——与 cc-switch wrapper 状态栏标签同一真源,TUI `o` 改色
+# 下一次 rebuild 即生效。显式值是 ANSI SGI 码(30-37/90-97),映射 tmux colourN
+# (30-37 → 0-7,90-97 → 8-15);缺省 auto = FNV-1a(name)落在 cc-switch wrapper
+# 同款 6 色 bright 调色板上。JS Math.imul 是 32 位截断乘;64 位精确积 & 0xFFFFFFFF
+# 与之同余,纯 bash 可复刻(非 ASCII 名按字节遍历,与 JS 码点遍历 hash 可能不同,
+# 只影响 auto 落点,非错误)。
+_PROVIDER_PREFS_LINES=""
+_PROVIDER_PREFS_LOADED=""
+_provider_prefs_lines() {
+    if [ -z "$_PROVIDER_PREFS_LINES" ] && [ -z "$_PROVIDER_PREFS_LOADED" ]; then
+        _PROVIDER_PREFS_LOADED=1
+        local f="${HOME}/.cc-switch/statusline-preferences.json"
+        if [ -f "$f" ]; then
+            # claude/codex 两桶浅合并:providerId 是 uuid,跨桶不冲突
+            _PROVIDER_PREFS_LINES=$(jq -r '((.colors.claude // {}) + (.colors.codex // {})) | to_entries[] | "\(.key)=\(.value)"' "$f" 2>/dev/null)
+        fi
+    fi
+    printf '%s' "$_PROVIDER_PREFS_LINES"
+}
+
+_provider_tag_colour() {
+    local id="$1" name="$2" v=""
+    if [ -n "$id" ]; then
+        v=$(printf '%s\n' "$(_provider_prefs_lines)" | awk -F= -v id="$id" '$1==id{print $2; exit}')
+    fi
+    case "$v" in
+        3[0-7]) echo $(( v - 30 )); return ;;
+        9[0-7]) echo $(( v - 82 )); return ;;
+    esac
+    # auto: FNV-1a 32 位
+    local hash=2166136261 i ch cp
+    for ((i=0; i<${#name}; i++)); do
+        ch="${name:$i:1}"
+        printf -v cp '%d' "'$ch"
+        hash=$(( (hash ^ cp) * 16777619 & 4294967295 ))
+    done
+    case $(( hash % 6 )) in
+        0) echo 96 ;; 1) echo 92 ;; 2) echo 93 ;; 3) echo 95 ;; 4) echo 94 ;; 5) echo 91 ;;
+    esac
+}
+
 # --- 状态聚合 ---
 # 扫描所有 attached session 的 pane，读取 @ai_pane_status，写入 @ai_all_status
 #
@@ -124,7 +170,7 @@ build_all_status() {
     cur_sess=""
     local _ai_names
     _ai_names=$(_collect_ai_process_names)
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _created _entered cur_cmd; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _created _entered cur_cmd prov_name prov_id; do
         local pane_status="$claude_status"
         if [ -z "$pane_status" ]; then
             # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle。
@@ -149,6 +195,12 @@ build_all_status() {
             status_block="#[bg=${STATUS_COLOR},fg=#282A36] ${pane_status} #[bg=default,fg=default]"
         fi
         local seg="${panel_block}${status_block}"
+        # cc-switch provider 段:有 @ai_provider 才显示(非 switch 启动的 pane 无此 option)
+        if [ -n "$prov_name" ]; then
+            local prov_colour
+            prov_colour=$(_provider_tag_colour "$prov_id" "$prov_name")
+            seg="${seg}#[fg=colour${prov_colour}][${prov_name}] #[fg=default]"
+        fi
         if [ "$session_name" != "$cur_sess" ]; then
             ALL="${ALL:+$ALL  }${session_block}${seg}"
             cur_sess="$session_name"
@@ -160,7 +212,7 @@ build_all_status() {
     # 自指 switch 由 handler 的 per-client prev 对比滤除）
     # ② session_created（无进入记录时回退创建序）。不用 session_last_attached——
     # tmux 的 server_client_set_session 无条件刷新该时间戳（自指 switch 也算），污染排序。
-    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}" 2>/dev/null | awk -F'|' -v OFS='|' '$6>0{if($8=="")$8=$7; print}' | sort -t'|' -k8,8n -k7,7n -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}|#{@ai_provider}|#{@ai_provider_id}" 2>/dev/null | awk -F'|' -v OFS='|' '$6>0{if($8=="")$8=$7; print}' | sort -t'|' -k8,8n -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
