@@ -74,6 +74,45 @@ adapter_check_integrity() {
 _CODEX_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop"
 _CODEX_LEGACY_TOML="${CODEX_HOME:-$HOME/.codex}/hooks.toml"
 
+# 明细检查（仅 install wrapper 的 check --json 调用；与 claude adapter 同构）。
+# 差异：无 cc-switch 分支（hooks.json 即文件真源，mode 恒 file）、6 事件、
+# 匹配串为 "tmux-ai-status codex"。失败输出空 events 降级片段，不 exit 非 0。
+adapter_check_detail() {
+    local src="$ADAPTER_HOOKS_FILE" pairs rows line ev p a
+    if [ ! -f "$src" ]; then
+        printf '{"mode":"file","events":{},"plugin":null,"registeredPaths":[]}\n'
+        return 0
+    fi
+    pairs=$(jq -r '.hooks as $h |
+        ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"] as $events |
+        $events[] as $e |
+        $h[$e][]?.hooks[]?.command // empty |
+        select(contains("tmux-ai-status codex")) | split(" ")[0] | "\($e)\t\(.)"' "$src" 2>/dev/null)
+    rows=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        ev="${line%%$'\t'*}"
+        p="${line#*$'\t'}"
+        if [ -x "$p" ]; then a=1; else a=0; fi
+        rows="${rows}${ev}"$'\t'"${p}"$'\t'"${a}"$'\n'
+    done <<EOF
+$pairs
+EOF
+    jq -R -s --arg mode "file" --arg events "$_CODEX_EVENTS" '
+        (reduce ($events | split(" ")[]) as $e
+            ({}; .[$e] = {registered: 0, alive: 0, scriptPaths: []})) as $base
+        | reduce (split("\n") | .[] | select(length > 0) | split("\t")) as $r (
+            $base;
+            .[$r[0]] = {
+                registered: (.[$r[0]].registered + 1),
+                alive: (.[$r[0]].alive + ($r[2] | tonumber)),
+                scriptPaths: ((.[$r[0]].scriptPaths + [$r[1]]) | unique)
+            })
+        | {mode: $mode, events: ., plugin: null,
+           registeredPaths: ([.[] | .scriptPaths[]] | unique)}
+    ' <<<"$rows"
+}
+
 # 从每个事件数组剔除本插件 group（command 含 tmux-ai-status），事件/hooks 清空后删键。
 _codex_strip_managed() {
     jq '
@@ -99,12 +138,14 @@ _codex_read_existing() {
 # 安装：改写 hooks.json（剥离旧 managed group 后为每事件追加本插件 group），保留他人 hook。
 # no-op if valid：事件齐全且脚本存活时不改写——重写即 trusted_hash 失效（command 路径
 # 变化 → codex 启动要重新 Trust all），跨安装源重复安装因此保持既有授信。
+# TMUX_AI_FORCE_INSTALL=1 旁路 no-op 门禁（漂移收敛专用：hooks 指向其他安装源但脚本
+# 仍存活时 integrity 恒过，普通 install 永远收敛不了；代价由调用方确认 re-trust）。
 # 清理旧 hooks.toml（0.144 不再读取）。trust 无法在 bash 复现，靠用户首启 codex TUI 授信。
 adapter_install_hooks() {
     _install_require_jq
     mkdir -p "$(dirname "$ADAPTER_HOOKS_FILE")" 2>/dev/null || true
     [ -f "$_CODEX_LEGACY_TOML" ] && rm -f "$_CODEX_LEGACY_TOML" && echo "移除旧 hooks.toml（0.144 不再读取）"
-    if adapter_check_integrity; then
+    if adapter_check_integrity && [ -z "${TMUX_AI_FORCE_INSTALL:-}" ]; then
         echo "Codex hooks already installed and valid at $ADAPTER_HOOKS_FILE (no-op, trust preserved)"
         return 0
     fi

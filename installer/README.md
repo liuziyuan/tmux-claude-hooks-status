@@ -12,6 +12,10 @@ tmuxclihook
 # 检查 npm registry 并将全局安装更新到最新版
 tmuxclihook update
 
+# hooks 健康明细（非交互）：每个 CLI 的完整性、判定真源、注册路径、漂移警告
+# 可选参数 claude|codex|opencode 只看一个；exit 1 = 有缺失或漂移
+tmuxclihook check
+
 # 查看版本 / 帮助（version、--version、-v 与 help、--help、-h 等价）
 tmuxclihook --version
 tmuxclihook --help
@@ -39,13 +43,34 @@ hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `T
 | 菜单项 | 说明 |
 |--------|------|
 | 环境检查 | 侦测 tmux(≥3.1) / jq / bash(任意版本) / node(≥18)，显示 `✓ ready`、`✗ missing`、`⚠ outdated`，并在确认后安全修复。检测到 cc-switch（`~/.cc-switch/cc-switch.db`）时追加 sqlite3 项 |
-| 侦测 AI CLI | 扫描 Claude Code / Codex / opencode，显示版本、最低版本和 hooks 状态；不自动安装或升级 AI CLI。cc-switch 环境下 Claude Code 的 hooks 状态由 bash 侧 `install-claude-hooks.sh check`（sqlite 真源）判定 |
+| 侦测 AI CLI | 扫描 Claude Code / Codex / opencode，显示版本、最低版本和 hooks 健康明细（判定真源、缺失原因、注册路径、漂移警告，见下节）；不自动安装或升级 AI CLI。判定全部走 bash 侧 wrapper `check --json`（cc-switch 模式在 bash 内查 sqlite 真源），TUI 只渲染 |
 | 安装 hooks | 选工具（claude/codex/opencode/全部）→ 调 `scripts/install-<tool>-hooks.sh`（路径随当前 source 解析） |
 | 卸载 hooks | 对称卸载本插件 hooks，保留其他工具注册的 hook |
 | 修复 hooks | 完整性检查 → 缺失则重装 |
 | tmux 集成 | 校验 `~/.tmux.conf` 是否已有指向当前 source 的 `run-shell` 声明；缺失则追加，路径过期（例如切换过 source）则原地替换，随后 `tmux source-file` 重载；不依赖 TPM 软链（历史遗留软链仅作提示，清理走「完整卸载插件」） |
 | source 管理 | 查看当前生效 source（来源 + 失效警告）；设置本地仓库路径用于开发调试；清除持久化配置恢复默认 |
 | 完整卸载插件 | 停止 Codex monitor、清除聚合状态 `@ai_all_status`、清理历史遗留软链（不删仓库）；`.tmux.conf` 删声明与 `tmux kill-server` 因破坏性仅打印手动指引 |
+
+### hooks 健康明细与漂移收敛
+
+`tmuxclihook check`（子命令）与 TUI「侦测 AI CLI」共用同一份 bash 侧明细：每个 wrapper 的 `check --json` 模式输出单行 JSON（status / 判定真源 mode / 逐事件 registered+alive / opencode plugin 结构指纹 / suppress 标记 / drift）。默认 `check`（无 `--json`）输出逐字节不变（`ok`/`missing` + exit code），TUI 与 tmux 自修复的既有契约不受影响。
+
+**漂移（drift）**：hooks 指向其他安装源但脚本仍存活（典型场景：本地调试切 source 后、volta 换路径后旧包仍可用）。此时功能未坏、check 仍判 `ok`，但 `tmuxclihook check` 与 TUI 会给出 ⚠ 警告并列出旧路径。漂移参照系是**执行中的 wrapper 自身路径**——`tmuxclihook`/TUI 经当前 source 调 wrapper，警告即「已装 hooks 不是当前 source 写的」。
+
+**发现漂移后的收敛（策略不对称）**：
+
+| 配置 | 收敛代价 | 方式 |
+|------|---------|------|
+| Claude Code hooks | 无（install 幂等强收敛） | TUI 选择即收敛 |
+| Codex hooks | 重写 `hooks.json` 使 `trusted_hash` 失效，需重新 Trust all | TUI 显式确认后收敛（`TMUX_AI_FORCE_INSTALL=1` 旁路 no-op 门禁） |
+| opencode plugin | 无信任代价（整文件重写） | TUI 确认后收敛 |
+| `.tmux.conf` 声明 | 无 | 复用「tmux 集成」的原地替换 + 重载 |
+
+非交互场景下 `tmuxclihook check` 只报告并 exit 1，收敛动作需回 TUI（或手动跑对应 `install-<tool>-hooks.sh`；codex 记得带 `TMUX_AI_FORCE_INSTALL=1`）。
+
+### Esc 导航
+
+clack 0.7 只把 ctrl+c 映射为取消（Esc 默认无效果），安装器在 TUI 内把 Esc 转译为合成取消：**主菜单 Esc 退出**、子菜单 Esc 返回主菜单、确认/输入框 Esc 取消。spinner 期间 Esc 静默（避免误触硬退出）；ctrl+c 行为不变。
 
 ### cc-switch 模式（Claude Code）
 

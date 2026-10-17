@@ -37,3 +37,41 @@ _hooks_suppress_write() {
     date +%s > "$(_hooks_suppress_file "$1")" 2>/dev/null || true
 }
 _hooks_suppress_clear() { rm -f "$(_hooks_suppress_file "$1")" 2>/dev/null || true; }
+
+# --- check --json：完整性明细 JSON（wrapper 专用，事件热路径不触达）---
+# stdout = 单行紧凑 JSON；exit code 与默认 check 一致（ok→0 / missing→1）。
+# status 判定复用 adapter_check_integrity 本体（同一真源，与 ok/missing 永不发散）；
+# suppress 在 wrapper 层判定（adapter 双上下文不依赖本文件，见各 adapter 头注释）；
+# drift 参照系 = 执行中 wrapper 自身的 _LIB_DIR：Node 侧经 execa 调用的正是其解析出的
+# SCRIPTS_DIR 下的 wrapper，故 _LIB_DIR 即当前 source 的 scripts dir；手动用旧 source
+# 的 wrapper 跑 check 得到「相对该 source 无漂移」也是正确语义（它正是那个源的收敛执行者）。
+_wrapper_check_json() {  # $1=tool id
+    local tool="$1" status="missing" detail suppress
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"tool":"%s","status":"missing","mode":"unknown","suppress":false,"events":{},"plugin":null,"registeredPaths":[],"drift":{"drifted":false,"expected":"","currentScriptsDir":"%s","stale":[]},"error":"jq not found"}\n' "$tool" "$_LIB_DIR"
+        exit 1
+    fi
+    detail=$(adapter_check_detail 2>/dev/null) || detail=""
+    [ -n "$detail" ] || detail='{}'
+    if adapter_check_integrity >/dev/null 2>&1; then
+        status="ok"
+    fi
+    if [ -f "$(_hooks_suppress_file "$tool")" ]; then
+        suppress="true"
+    else
+        suppress="false"
+    fi
+    jq -cn --arg tool "$tool" --arg status "$status" --argjson detail "$detail" \
+        --argjson suppress "$suppress" --arg dir "$_LIB_DIR" '
+        ($detail + {tool: $tool, status: $status, suppress: $suppress})
+        | .drift = {
+            expected: ($dir + "/tmux-ai-status"),
+            currentScriptsDir: $dir,
+            stale: (($detail.registeredPaths // [])
+                    | map(select(. != ($dir + "/tmux-ai-status")) ) | unique)
+          }
+        | .drift.drifted = ((.drift.stale | length) > 0)'
+    if [ "$status" != "ok" ]; then
+        exit 1
+    fi
+}

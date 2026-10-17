@@ -14,10 +14,12 @@ import { checkEnv, detectClis, interactiveShell } from '../src/detect.js';
 import { planBrewRemediation, runBrewAction } from '../src/env.js';
 import { installHooks, uninstallHooks, repairHooks } from '../src/hooks.js';
 import { checkSymlink, checkTmuxConf } from '../src/symlink.js';
+import { checkToolDetail, renderToolDetail, summarizeDetails } from '../src/check-detail.js';
 import { ensureTmuxIntegration, reloadTmux } from '../src/tmuxconf.js';
 import { stopMonitor, clearAggregateStatus, removeSymlinks } from '../src/purge.js';
 import {
   TOOLS,
+  toolById,
   repoExists,
   REPO_ROOT,
   TMUX_ENTRY,
@@ -26,11 +28,23 @@ import {
   refreshSource,
 } from '../src/adapters-meta.js';
 import { setSource, clearSource, getPersistedSource, originLabel } from '../src/source.js';
+import { enableEscapeCancel, setSpinnerActive } from '../src/esc.js';
 import { note, padDisplay } from '../src/tui.js';
 import { updatePackage, CURRENT_VERSION } from '../src/update.js';
 
 const OK = '✓';
 const NO = '✗';
+
+// p.spinner 的包装：spinner 活跃期间 esc.js 不把 Esc 转译为 ctrl+c
+// （否则 Esc 会在 spinner 期间触发 block() 的 process.exit 硬退出）。
+function spinner(...args) {
+  const s = p.spinner(...args);
+  const start = s.start.bind(s);
+  const stop = s.stop.bind(s);
+  s.start = (...a) => { setSpinnerActive(true); return start(...a); };
+  s.stop = (...a) => { setSpinnerActive(false); return stop(...a); };
+  return s;
+}
 
 function renderEnvResults(results, title = '环境依赖') {
   const lines = results.map((result) => {
@@ -41,7 +55,7 @@ function renderEnvResults(results, title = '环境依赖') {
 }
 
 async function doctor() {
-  const s = p.spinner();
+  const s = spinner();
   s.start('检查环境依赖');
   const results = await checkEnv();
   s.stop('环境检查完成');
@@ -101,14 +115,14 @@ async function doctor() {
     const entry = entryByKey.get(key);
     if (!entry) continue;
 
-    const s2 = p.spinner();
+    const s2 = spinner();
     s2.start(entry.command);
     const result = await runBrewAction(entry.action, entry.pkg);
     if (result.ok) s2.stop(`${OK} ${entry.name} 修复命令执行完成`);
     else s2.stop(`${NO} ${entry.name} 修复失败: ${result.output}`);
   }
 
-  const verifySpinner = p.spinner();
+  const verifySpinner = spinner();
   verifySpinner.start('重新检查环境依赖');
   const finalResults = await checkEnv();
   verifySpinner.stop('环境复检完成');
@@ -122,7 +136,7 @@ async function doctor() {
 }
 
 async function detectCliMenu() {
-  const s = p.spinner();
+  const s = spinner();
   s.start('侦测已安装的 AI CLI');
   const rows = await detectClis();
   s.stop('侦测完成');
@@ -131,10 +145,88 @@ async function detectCliMenu() {
     if (!r.installed) return `  ${NO} ${padDisplay(r.label, 14)} 未安装`;
     const verMark = r.meetsMin ? OK : '⚠';
     const minNote = r.minVersion && !r.meetsMin ? ` (需 ≥ ${r.minVersion})` : '';
-    const hookNote = r.hooksInstalled ? '已装 hooks' : '未装 hooks';
-    return `  ${verMark} ${padDisplay(r.label, 14)} v${r.version}${minNote}  ${hookNote}`;
+    return `  ${verMark} ${padDisplay(r.label, 14)} v${r.version}${minNote}`;
   });
   note(lines.join('\n'), 'AI CLI');
+
+  // 逐工具 hooks 明细（判定在 bash 侧 check --json，这里只渲染——缺失原因、
+  // 判定真源、注册路径、漂移）。未安装的 CLI 跳过（wrapper 判 missing 无意义）。
+  const details = [];
+  for (const r of rows) {
+    if (!r.installed) continue;
+    const tool = toolById(r.id);
+    if (!tool) continue;
+    const d = await checkToolDetail(tool);
+    details.push(d);
+    note(renderToolDetail(d).join('\n'), `${r.label} hooks 明细`);
+  }
+
+  await offerDriftConvergence(details);
+}
+
+// 漂移收敛入口：检测（check --json 的 drift 字段 + .tmux.conf 的 pointsToCurrent）
+// 与收敛分离。收敛策略不对称——claude 无代价直接收敛；codex 重写即 trusted_hash
+// 失效，必须显式确认；opencode 重写无信任代价，确认一次即可。
+async function offerDriftConvergence(details) {
+  const driftTools = details.filter((d) => d.status !== 'unknown' && d.drift?.drifted);
+  const conf = checkTmuxConf();
+  const confStale = conf.exists && conf.referenced && !conf.pointsToCurrent;
+
+  const options = driftTools.map((d) => ({
+    value: `tool:${d.tool}`,
+    label: `${d.label} hooks 收敛到当前 source`,
+    hint: `旧路径 ${(d.drift.stale || []).join(', ')}`,
+  }));
+  if (confStale) {
+    options.push({ value: 'tmuxconf', label: '.tmux.conf 加载声明更新为当前 source' });
+  }
+  if (options.length === 0) return;
+
+  options.push({ value: '__skip__', label: '← 暂不处理' });
+  p.log.warn('检测到部分配置指向其他安装源（漂移）。功能仍可用，但新安装/自修复只会收敛当前 source。');
+  const sel = await p.select({
+    message: '选择要收敛的项（Esc 跳过）',
+    options,
+  });
+  if (p.isCancel(sel) || sel === '__skip__') return;
+
+  if (sel === 'tmuxconf') {
+    await confirmAndApplyTmuxIntegration(conf);
+    return;
+  }
+
+  const id = sel.slice('tool:'.length);
+  await convergeDrift(id);
+  // 收敛后复检闭环
+  const tool = toolById(id);
+  if (tool) {
+    const d = await checkToolDetail(tool);
+    note(renderToolDetail(d).join('\n'), `${d.label} 收敛后状态`);
+  }
+}
+
+async function convergeDrift(id) {
+  if (id === 'codex') {
+    const go = await p.confirm({
+      message: '重写 ~/.codex/hooks.json 会使 trusted_hash 失效，下次启动 codex 需在 TUI 点 "Trust all and continue" 授信一次。继续收敛？',
+    });
+    if (p.isCancel(go) || !go) { p.log.info('已取消'); return; }
+  } else if (id === 'opencode') {
+    const go = await p.confirm({
+      message: '将重写 plugin 文件指向当前 source（本地插件无需重新授信）。继续收敛？',
+    });
+    if (p.isCancel(go) || !go) { p.log.info('已取消'); return; }
+  }
+  // claude 无代价（install 本就幂等强收敛），选择即确认
+  const r = await installHooks(id, { force: true });
+  if (r.ok) {
+    p.log.success(`${OK} ${id} hooks 已收敛到当前 source`);
+    if (id === 'codex') p.log.warn('下次启动 codex 时选择 "Trust all and continue" 授信一次。');
+    if (r.output) p.log.message(r.output.trim());
+  } else {
+    p.log.error(`${NO} ${id} 收敛失败`);
+    p.log.error(r.output || '未知错误');
+  }
 }
 
 async function pickTool(message) {
@@ -155,7 +247,7 @@ async function runHookAction(action, verb) {
   if (!sel) { p.log.info('返回主菜单'); return; }
   const ids = sel === '__all__' ? TOOLS.map((t) => t.id) : [sel];
   for (const id of ids) {
-    const s = p.spinner();
+    const s = spinner();
     s.start(`${verb} ${id} hooks`);
     const r = await action(id);
     if (r.ok) {
@@ -317,6 +409,9 @@ async function purgeMenu() {
 
 async function main() {
   p.intro('tmux-ai-status 安装器');
+  // clack 0.7 只认 ctrl+c 取消；启用 Esc → 合成 ctrl+c 的转译后，
+  // 主菜单 Esc 退出、子菜单 Esc 返回、confirm/text Esc 取消全部真实生效。
+  enableEscapeCancel();
 
   note(currentSourceLines().join('\n'), 'source 状态');
 
@@ -328,10 +423,10 @@ async function main() {
 
   while (true) {
     const choice = await p.select({
-      message: '选择操作（Esc 在子菜单返回主页面）',
+      message: '选择操作（Esc 退出；子菜单 Esc 返回本菜单）',
       options: [
         { value: 'doctor', label: '环境检查', hint: 'tmux / jq / bash / node' },
-        { value: 'detect', label: '侦测 AI CLI', hint: '版本 + hooks 状态' },
+        { value: 'detect', label: '侦测 AI CLI', hint: '版本 + hooks 明细 + 漂移' },
         { value: 'install', label: '安装 hooks' },
         { value: 'uninstall', label: '卸载 hooks' },
         { value: 'repair', label: '修复 hooks', hint: '完整性检查 + 缺失重装' },
@@ -341,11 +436,9 @@ async function main() {
         { value: 'exit', label: '退出' },
       ],
     });
-    // 主菜单是顶层：Esc（isCancel）不退出程序，留在主菜单；退出仅走「退出」项。
-    if (p.isCancel(choice)) {
-      p.log.info('已在主菜单（退出请选「退出」项）');
-      continue;
-    }
+    // 主菜单是顶层：Esc 经 esc.js 转译为合成 ctrl+c → isCancel，与「退出」项等价
+    // （outro 在循环后统一输出）。子菜单 isCancel → 返回主菜单的既有语义同时被激活。
+    if (p.isCancel(choice)) break;
     if (choice === 'exit') break;
 
     try {
@@ -365,11 +458,47 @@ async function main() {
   p.outro('完成');
 }
 
+// tmuxclihook check [claude|codex|opencode] — hooks 健康明细（非交互）。
+// 判定全在 bash 侧 check --json，这里渲染；末尾附 bash 判不了的两项全局信息
+// （.tmux.conf 加载声明指向、当前 source）。有缺失/漂移/无法判定 → exitCode 1。
+async function runCheckCommand(only) {
+  let tools = TOOLS;
+  if (only) {
+    const t = toolById(only);
+    if (!t) {
+      console.error(`未知工具: ${only}（可选 claude|codex|opencode）`);
+      process.exitCode = 1;
+      return;
+    }
+    tools = [t];
+  }
+  const details = [];
+  for (const t of tools) {
+    const d = await checkToolDetail(t);
+    details.push(d);
+    console.log(`${d.label} hooks：`);
+    console.log(renderToolDetail(d).join('\n'));
+  }
+  const conf = checkTmuxConf();
+  console.log('.tmux.conf：');
+  console.log(`  ${confStatusLine(conf)}`);
+  console.log('source：');
+  for (const line of currentSourceLines()) console.log(line);
+
+  const s = summarizeDetails(details);
+  if (s.hasMissing || s.hasDrift || s.hasError) process.exitCode = 1;
+}
+
 const arg = process.argv[2];
 if (arg === 'update') {
   updatePackage().then((ok) => {
     if (!ok) process.exitCode = 1;
   }).catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+} else if (arg === 'check') {
+  runCheckCommand(process.argv[3]).catch((err) => {
     console.error(err);
     process.exitCode = 1;
   });
@@ -381,6 +510,7 @@ if (arg === 'update') {
     '\n' +
     '用法：\n' +
     '  tmuxclihook              打开交互式 TUI 安装器\n' +
+    '  tmuxclihook check        hooks 健康明细（可跟 claude|codex|opencode；exit 1 = 有缺失或漂移）\n' +
     '  tmuxclihook update       检查并更新到 npm 最新版本\n' +
     '  tmuxclihook version      显示版本（--version / -v 等价）\n' +
     '  tmuxclihook help         显示本帮助（--help / -h 等价）',

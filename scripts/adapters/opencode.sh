@@ -56,6 +56,32 @@ adapter_check_integrity() {
     grep -q 'request_id: p.requestID' "$ADAPTER_HOOKS_FILE" 2>/dev/null
 }
 
+# 明细检查（仅 install wrapper 的 check --json 调用）。plugin 模型无逐事件注册数，
+# 明细为 integrity 五段判定拆成的布尔 + HOOK_SCRIPT 提取与存活。失败输出降级片段。
+adapter_check_detail() {
+    local exists="false" marker="false" script="" alive="false"
+    local pa="false" qa="false" pr="false" rid="false"
+    if [ -f "$ADAPTER_HOOKS_FILE" ]; then
+        exists="true"
+        if grep -q "$_OPENCODE_MARKER" "$ADAPTER_HOOKS_FILE" 2>/dev/null; then marker="true"; fi
+        script=$(sed -n 's/^const HOOK_SCRIPT = "\(.*\)"$/\1/p' "$ADAPTER_HOOKS_FILE" 2>/dev/null | head -n 1)
+        if [ -n "$script" ] && [ -x "$script" ]; then alive="true"; fi
+        if grep -q 'case "permission.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null; then pa="true"; fi
+        if grep -q 'case "question.asked"' "$ADAPTER_HOOKS_FILE" 2>/dev/null; then qa="true"; fi
+        if grep -q 'case "permission.replied"' "$ADAPTER_HOOKS_FILE" 2>/dev/null; then pr="true"; fi
+        if grep -q 'request_id: p.requestID' "$ADAPTER_HOOKS_FILE" 2>/dev/null; then rid="true"; fi
+    fi
+    jq -cn --arg path "$ADAPTER_HOOKS_FILE" --argjson exists "$exists" --argjson marker "$marker" \
+        --arg script "$script" --argjson alive "$alive" \
+        --argjson pa "$pa" --argjson qa "$qa" --argjson pr "$pr" --argjson rid "$rid" '
+        {mode: "plugin", events: {},
+         plugin: {path: $path, exists: $exists, marker: $marker,
+                  hookScript: $script, hookScriptAlive: $alive,
+                  structure: {permissionAsked: $pa, questionAsked: $qa,
+                              permissionReplied: $pr, requestId: $rid}},
+         registeredPaths: (if ($script | length) > 0 then [$script] else [] end)}'
+}
+
 # 生成 plugin 文件内容。$1 = tmux-ai-status 绝对路径。
 _opencode_plugin_content() {
     local hook_script="$1"
@@ -149,8 +175,9 @@ EOF
 
 # 安装：写出/覆盖 plugin 文件。整文件替换（非合并）——同目录下他人 plugin 文件不受影响。
 # no-op if valid：文件完整且 HOOK_SCRIPT 存活时不重写（避免跨安装源无谓覆盖）。
+# TMUX_AI_FORCE_INSTALL=1 旁路 no-op 门禁（漂移收敛专用；重写无需重新授信）。
 adapter_install_hooks() {
-    if adapter_check_integrity; then
+    if adapter_check_integrity && [ -z "${TMUX_AI_FORCE_INSTALL:-}" ]; then
         echo "opencode plugin already installed and valid at $ADAPTER_HOOKS_FILE (no-op)"
         return 0
     fi

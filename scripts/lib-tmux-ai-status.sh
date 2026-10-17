@@ -604,6 +604,13 @@ _maybe_repair_hooks() {
     local installer="${ADAPTER_INSTALLER}"
     if ! _check_hooks_integrity; then
         _ai_log "REPAIR: hooks integrity check failed, reinstalling (${TOOL_ID:-claude})"
-        [ -x "$installer" ] && "$installer" >/dev/null 2>&1 || true
+        # 浮出提示与 SessionStart 修复路径（tmux-ai-status）对齐：修复不再完全静默。
+        # 本函数仅经 _run_refresh 被 tmux hook 事件触发（run-shell 上下文，不在 AI CLI
+        # 同步 hook 路径）；display-message 无 -p 写 client tty 而非调用方 stdout。
+        if [ -x "$installer" ] && "$installer" >/dev/null 2>&1; then
+            tmux display-message "✓ ${TOOL_ID:-claude} hooks 已自动修复（检测到缺失）" 2>/dev/null || true
+        else
+            tmux display-message "⚠ ${TOOL_ID:-claude} hooks 自动修复失败，请运行 tmuxclihook 检查" 2>/dev/null || true
+        fi
     fi
 }

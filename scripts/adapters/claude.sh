@@ -13,6 +13,8 @@
 #   ADAPTER_HOLD_UNMATCHED_PERMISSION "true"|"false" 无请求 ID 时是否保守保持审批态
 #   ADAPTER_INSTALLER         install 脚本绝对路径（供自修复/TUI 调用）
 #   adapter_check_integrity() hooks 是否完整注册本插件（返回 0=完整）
+#   adapter_check_detail()    check --json 明细 JSON 片段（可选实现；仅 install wrapper
+#                             的 check --json 上下文调用，失败输出降级片段不报错）
 #   adapter_install_hooks()   安装 hooks（合并式，保留他人 hook）
 #   adapter_uninstall_hooks() 卸载本插件 hooks
 #
@@ -218,6 +220,63 @@ adapter_check_integrity() {
         case ",$ok_events," in *",$ev,"*) ;; *) return 1 ;; esac
     done
     return 0
+}
+
+# 明细检查（仅 install wrapper 的 check --json 调用；事件热路径不触达）。
+# stdout 输出单行紧凑 JSON 片段 {"mode":...,"events":{...},"plugin":null,"registeredPaths":[...]}，
+# 由 lib-install-hooks.sh 的 _wrapper_check_json 拼装 tool/status/suppress/drift。
+# 数据源与存活口径（逐条 command test -x）与 adapter_check_integrity 完全一致；
+# status 判定仍由 integrity 本体独立给出，两者永不发散。
+# 任何失败（jq 失败/配置缺失）输出空 events 的降级片段，不 exit 非 0。
+adapter_check_detail() {
+    local mode="file" src="" pairs rows line ev p a
+    if _ccswitch_active; then
+        mode="ccswitch"
+        if ! _ccswitch_dump_common src; then
+            printf '{"mode":"ccswitch","events":{},"plugin":null,"registeredPaths":[]}\n'
+            return 0
+        fi
+    elif [ -f "$ADAPTER_HOOKS_FILE" ]; then
+        src="$ADAPTER_HOOKS_FILE"
+    fi
+    if [ -z "$src" ]; then
+        printf '{"mode":"%s","events":{},"plugin":null,"registeredPaths":[]}\n' "$mode"
+        return 0
+    fi
+    # TSV：event\tscript（不去重、保留零事件——计数与去重交给下游 jq 聚合）
+    pairs=$(jq -r '.hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
+        $events[] as $e |
+        $h[$e][]?.hooks[]?.command // empty |
+        select(contains("tmux-ai-status")) | split(" ")[0] | "\($e)\t\(.)"' "$src" 2>/dev/null)
+    if [ "$src" != "$ADAPTER_HOOKS_FILE" ]; then
+        rm -f "$src"
+    fi
+    # TSV：event\tscript\talive(0|1)。bash 3.2 无关联数组，逐行展开后由 jq 一次聚合。
+    rows=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        ev="${line%%$'\t'*}"
+        p="${line#*$'\t'}"
+        if [ -x "$p" ]; then a=1; else a=0; fi
+        rows="${rows}${ev}"$'\t'"${p}"$'\t'"${a}"$'\n'
+    done <<EOF
+$pairs
+EOF
+    jq -R -s --arg mode "$mode" --arg events "$_CLAUDE_EVENTS" '
+        (reduce ($events | split(" ")[]) as $e
+            ({}; .[$e] = {registered: 0, alive: 0, scriptPaths: []})) as $base
+        | reduce (split("\n") | .[] | select(length > 0) | split("\t")) as $r (
+            $base;
+            .[$r[0]] = {
+                registered: (.[$r[0]].registered + 1),
+                alive: (.[$r[0]].alive + ($r[2] | tonumber)),
+                scriptPaths: ((.[$r[0]].scriptPaths + [$r[1]]) | unique)
+            })
+        | {mode: $mode, events: ., plugin: null,
+           registeredPaths: ([.[] | .scriptPaths[]] | unique)}
+    ' <<<"$rows"
 }
 
 # 安装：合并式更新，保留他人（masko 等）注册的 hook。cc-switch 模式只写库
