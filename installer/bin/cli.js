@@ -491,7 +491,7 @@ async function runCheckCommand(only) {
 
 const arg = process.argv[2];
 if (arg === 'update') {
-  updatePackage().then((ok) => {
+  updatePackage({ prune: process.argv.includes('--prune') }).then((ok) => {
     if (!ok) process.exitCode = 1;
   }).catch((err) => {
     console.error(err);
@@ -511,7 +511,8 @@ if (arg === 'update') {
     '用法：\n' +
     '  tmuxclihook              打开交互式 TUI 安装器\n' +
     '  tmuxclihook check        hooks 健康明细（可跟 claude|codex|opencode；exit 1 = 有缺失或漂移）\n' +
-    '  tmuxclihook update       检查并更新到 npm 最新版本\n' +
+    '  tmuxclihook update       按当前安装方式（npm/volta）检查并更新到最新版本\n' +
+    '  tmuxclihook update --prune  升级后直接删除不生效的另一份安装（默认交互确认）\n' +
     '  tmuxclihook version      显示版本（--version / -v 等价）\n' +
     '  tmuxclihook help         显示本帮助（--help / -h 等价）',
   );

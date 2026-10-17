@@ -9,8 +9,11 @@
 npm install -g tmuxclihook
 tmuxclihook
 
-# 检查 npm registry 并将全局安装更新到最新版
+# 按当前安装方式（npm/volta）检查并更新到最新版
 tmuxclihook update
+
+# 升级并直接删除不生效的另一份安装（默认会交互确认）
+tmuxclihook update --prune
 
 # hooks 健康明细（非交互）：每个 CLI 的完整性、判定真源、注册路径、漂移警告
 # 可选参数 claude|codex|opencode 只看一个；exit 1 = 有缺失或漂移
@@ -34,9 +37,11 @@ npm start
 
 hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `TMUXCLIHOOK_SOURCE` > 持久化配置 `~/.config/tmuxclihook/config.json`（TUI「source 管理」菜单写入）> 包内自带 scripts/（生产默认）> 仓库根 scripts/（`cd installer && npm start` 时的开发回落）。见下方「source 管理」一节。
 
-`tmuxclihook update` 会显示当前版本，通过 `npm view tmuxclihook version` 查询最新版；版本不同时直接执行 `npm install -g tmuxclihook@latest`，版本相同则不做修改。网络查询或安装失败时命令以非零状态退出。
+`tmuxclihook update` 会显示当前版本，通过 `npm view tmuxclihook version` 查询最新版；版本相同则不做修改。需要升级时，它按 PATH 上第一个可执行的 `tmuxclihook` 判断当前生效的安装方式：入口位于 `$VOLTA_HOME/bin/`（默认 `~/.volta/bin/`）或 volta 的 packages 镜像内时，只执行 `volta install tmuxclihook@latest`；其余入口（npm 全局、nvm/fnm 等 node 工具链目录）只执行 `npm install -g tmuxclihook@latest`。不会同时写入两套安装。网络查询或安装失败时命令以非零状态退出。
 
-安装成功后会做一次生效自检：按 PATH 解析实际会被运行的 `tmuxclihook`，读取其真实版本与最新版比对。若本机使用 volta，`npm install -g` 只会更新 node 工具链目录里的副本、不会更新 volta 的 shim 镜像（实测 volta 2.0.2：shim npm 的全局 prefix 即工具链目录），自检发现这种情况时会自动补执行 `volta install tmuxclihook@latest` 使更新生效并复检；volta 缺失或修正失败时打警告并提示手动命令。`npm install` 始终是标准安装方式，无需因 volta 改变习惯。
+安装完成后会按 PATH 自检实际生效版本。若生效入口不是 volta、自检仍未反映新版，且本机可执行 volta，则补执行一次 `volta install tmuxclihook@latest` 作为兜底并复检；仍不一致时打印警告（不影响退出码）。
+
+升级确认成功后，update 会检查另一套安装（volta packages 镜像或当前 npm 全局 prefix）是否还留有副本。发现副本时：TTY 下询问是否删除（默认不删）；非交互环境只打印警告；`--prune` 跳过询问直接删除。删除前会校验该副本未被任何 hooks 与 `~/.tmux.conf` 引用——任一检查无法确认就保留并提示先重装 hooks。**生效入口永远不删**，清理失败不影响升级结果。也可以手动收敛：卸载不再使用的那份（`npm uninstall -g tmuxclihook` 或 `volta uninstall tmuxclihook`），再从生效入口重新安装 hooks。
 
 ## 功能
 
