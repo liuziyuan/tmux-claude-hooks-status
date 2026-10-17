@@ -29,12 +29,11 @@ _save_pane_id
 _maybe_cleanup_stale
 
 # cc-switch 注入的 provider 标签(launch env,CLI 的 hooks 进程继承)→
-# per-pane option,供 build_all_status 聚合渲染。**仅 codex 捕获**:claude 的
-# provider 标签由 wrapper 在 CLI 内的 statusline 显示,tmux 状态栏刻意不重复
-# 渲染——claude/opencode 的事件一律走清理分支(顺带清掉同 pane 之前的残留)。
-# codex 无 env(非 switch 启动)同样清理。env 随 CLI 进程定死,幂等重写无害。
+# per-pane option,供 build_all_status 聚合渲染。env 随 CLI 进程定死,幂等
+# 重写无害;非 switch 启动(env 缺失)时显式清除残留,避免换 AI 进程后 pane
+# 显示上一个 provider。
 if [ -n "$TMUX_PANE" ]; then
-    if [ "$TOOL_ID" = "codex" ] && [ -n "$CC_SWITCH_PROVIDER" ]; then
+    if [ -n "$CC_SWITCH_PROVIDER" ]; then
         tmux set-option -pt "$TMUX_PANE" @ai_provider "$CC_SWITCH_PROVIDER" 2>/dev/null || true
         if [ -n "$CC_SWITCH_PROVIDER_ID" ]; then
             tmux set-option -pt "$TMUX_PANE" @ai_provider_id "$CC_SWITCH_PROVIDER_ID" 2>/dev/null || true
