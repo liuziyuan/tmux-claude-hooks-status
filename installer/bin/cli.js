@@ -31,6 +31,7 @@ import { setSource, clearSource, getPersistedSource, originLabel } from '../src/
 import { enableEscapeCancel, setSpinnerActive } from '../src/esc.js';
 import { note, padDisplay } from '../src/tui.js';
 import { updatePackage, CURRENT_VERSION } from '../src/update.js';
+import { HELP_TEXT } from '../src/help.js';
 
 const OK = '✓';
 const NO = '✗';
@@ -505,17 +506,7 @@ if (arg === 'update') {
 } else if (arg === '--version' || arg === '-v' || arg === 'version') {
   console.log(`tmuxclihook v${CURRENT_VERSION}`);
 } else if (arg === '--help' || arg === '-h' || arg === 'help') {
-  console.log(
-    'tmuxclihook — tmux-ai-status 交互式安装器\n' +
-    '\n' +
-    '用法：\n' +
-    '  tmuxclihook              打开交互式 TUI 安装器\n' +
-    '  tmuxclihook check        hooks 健康明细（可跟 claude|codex|opencode；exit 1 = 有缺失或漂移）\n' +
-    '  tmuxclihook update       按当前安装方式（npm/volta）检查并更新到最新版本\n' +
-    '  tmuxclihook update --prune  升级后直接删除不生效的另一份安装（默认交互确认）\n' +
-    '  tmuxclihook version      显示版本（--version / -v 等价）\n' +
-    '  tmuxclihook help         显示本帮助（--help / -h 等价）',
-  );
+  console.log(HELP_TEXT);
 } else {
   main().catch((err) => {
     console.error(err);

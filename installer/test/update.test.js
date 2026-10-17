@@ -42,6 +42,132 @@ test('updatePackage stops when the installed version is current', async () => {
   assert.deepEqual(messages, ['Current version: v0.2.0', 'Already up to date.']);
 });
 
+test('updatePackage prunes stale copies when already current and --prune is set', async () => {
+  const calls = [];
+  const { log, messages } = captureLog();
+  const run = async (command, args, options) => {
+    calls.push([command, args, options]);
+    if (command === 'npm') return { stdout: '0.2.0\n' };
+    return { stdout: '' };
+  };
+  let detectCalls = 0;
+  const detectSource = () => { detectCalls += 1; return 'npm'; };
+  const verifyCalls = [];
+  const verify = async (version, env) => {
+    verifyCalls.push([version, env]);
+    return { status: 'ok', path: '/fake/tmuxclihook', version: '0.2.0' };
+  };
+  const env = { HOME: '/fake' };
+
+  const ok = await updatePackage({
+    run, log, currentVersion: '0.2.0', prune: true, env,
+    detectSource, verify,
+    detectStale: async () => [{ kind: 'volta', root: '/fake/volta' }],
+    checkHooks: async () => null,
+    checkTmuxConf: () => false,
+  });
+
+  assert.equal(ok, true);
+  assert.equal(detectCalls, 1);
+  // 精确锁定：已最新 + --prune 绝不能出现任何安装命令
+  assert.deepEqual(calls, [
+    ['npm', ['view', 'tmuxclihook', 'version'], undefined],
+    ['volta', ['uninstall', 'tmuxclihook'], { stdio: 'inherit' }],
+  ]);
+  assert.deepEqual(messages, [
+    'Current version: v0.2.0',
+    'Already up to date.',
+    'Removed volta install at /fake/volta.',
+  ]);
+  assert.deepEqual(verifyCalls, [['0.2.0', env]]);
+});
+
+test('updatePackage skips cleanup when already current and no stale copies', async () => {
+  const calls = [];
+  const { log, messages } = captureLog();
+  const run = async (command, args, options) => {
+    calls.push([command, args, options]);
+    return { stdout: '0.2.0\n' };
+  };
+  let verifyCalls = 0;
+  const verify = async () => {
+    verifyCalls += 1;
+    return { status: 'ok', path: null, version: '0.2.0' };
+  };
+
+  const ok = await updatePackage({
+    run, log, currentVersion: '0.2.0', prune: true,
+    detectSource: () => 'npm', verify,
+    detectStale: async () => [],
+  });
+
+  assert.equal(ok, true);
+  assert.equal(verifyCalls, 0, '无副本被删除时不应复检');
+  assert.deepEqual(calls, [['npm', ['view', 'tmuxclihook', 'version'], undefined]]);
+  assert.deepEqual(messages, ['Current version: v0.2.0', 'Already up to date.']);
+});
+
+test('updatePackage warns when pruning an already-current install breaks verification', async () => {
+  const { log, messages } = captureLog();
+  const run = async () => ({ stdout: '0.2.0\n' });
+  const verify = async () => ({ status: 'mismatch', path: '/fake/tmuxclihook', version: '0.1.0' });
+
+  const ok = await updatePackage({
+    run, log, currentVersion: '0.2.0', prune: true,
+    detectSource: () => 'npm', verify,
+    detectStale: async () => [{ kind: 'volta', root: '/fake/volta' }],
+    checkHooks: async () => null,
+    checkTmuxConf: () => false,
+  });
+
+  assert.equal(ok, true);
+  assert.deepEqual(messages.slice(-2), [
+    'Warning: the tmuxclihook command on your PATH (/fake/tmuxclihook) did not reflect the new version (still v0.1.0).',
+    'If you use volta, run: volta install tmuxclihook@latest',
+  ]);
+});
+
+test('updatePackage stays inert when already current without --prune', async () => {
+  const calls = [];
+  const { log, messages } = captureLog();
+  const run = async (command, args, options) => {
+    calls.push([command, args, options]);
+    return { stdout: '0.2.0\n' };
+  };
+  let detectCalls = 0;
+  let staleCalls = 0;
+  let verifyCalls = 0;
+
+  const ok = await updatePackage({
+    run, log, currentVersion: '0.2.0',
+    detectSource: () => { detectCalls += 1; return 'volta'; },
+    detectStale: async () => { staleCalls += 1; return []; },
+    verify: async () => { verifyCalls += 1; return { status: 'ok', path: null, version: '0.2.0' }; },
+  });
+
+  assert.equal(ok, true);
+  assert.equal(detectCalls, 0);
+  assert.equal(staleCalls, 0);
+  assert.equal(verifyCalls, 0);
+  assert.deepEqual(calls, [['npm', ['view', 'tmuxclihook', 'version'], undefined]]);
+  assert.deepEqual(messages, ['Current version: v0.2.0', 'Already up to date.']);
+});
+
+test('updatePackage reports cleanup failure without changing the result', async () => {
+  const { log, messages } = captureLog();
+  const run = async () => ({ stdout: '0.2.0\n' });
+
+  const ok = await updatePackage({
+    run, log, currentVersion: '0.2.0', prune: true,
+    detectSource: () => 'npm',
+    detectStale: async () => { throw new Error('boom'); },
+    verify: null,
+  });
+
+  assert.equal(ok, true);
+  assert.ok(messages.some((m) => m.includes('Cleanup skipped: Error: boom')));
+});
+
 test('updatePackage installs the latest global package when versions differ', async () => {
   const calls = [];
   const { log, messages } = captureLog();
