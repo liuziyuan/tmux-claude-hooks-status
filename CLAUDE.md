@@ -70,6 +70,7 @@ install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原�
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`
+- **cc-switch provider 段** — cc-switch（`switch` 命令）launch 时注入 `CC_SWITCH_PROVIDER`/`CC_SWITCH_PROVIDER_ID` 环境变量，CLI hooks 进程继承；`tmux-ai-status` 入口捕获后写入 pane option `@ai_provider`/`@ai_provider_id`（env 缺失时显式清除，防换 CLI 后残留），聚合行在状态符号后渲染彩色 `[provider]` 段。颜色真源 `~/.cc-switch/statusline-preferences.json`（claude/codex 桶按 providerId 合并查，显式 SGI 码映射 tmux colourN），缺省 auto = FNV-1a(name) 落在与 cc-switch wrapper 相同的 6 色 bright 调色板（64 位精确积 `& 0xFFFFFFFF` 复刻 JS `Math.imul` 的 32 位截断乘）
 - **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配所有 adapter 汇总的进程名（前缀匹配）
 - **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 委托当前 adapter 的 `adapter_check_integrity` / `ADAPTER_INSTALLER`
 
