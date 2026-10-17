@@ -290,6 +290,26 @@ function warnNotEffective(log, result) {
   log.error(`If you use volta, run: volta install ${PACKAGE_NAME}@latest`);
 }
 
+// 清理非生效副本，并在实际删除过副本后复检生效入口。升级成功路径与
+// 「已是最新 + --prune」路径共用，避免两处逻辑漂移。清理失败只记录日志，
+// 不影响 update 的返回值。
+async function reconcileStaleCopies({
+  source, env, run, log, prune, isTTY, confirm,
+  checkHooks, checkTmuxConf, detectStale, verify, expectedVersion,
+}) {
+  try {
+    const removed = await cleanupStale({
+      source, env, run, log, prune, isTTY, confirm, checkHooks, checkTmuxConf, detectStale,
+    });
+    if (removed && verify) {
+      const after = await verify(expectedVersion, env);
+      if (after.status !== 'ok') warnNotEffective(log, after);
+    }
+  } catch (err) {
+    log.error(`Cleanup skipped: ${err}`);
+  }
+}
+
 // volta 安装路径：当 PATH 上的生效入口来自 volta（shim 或 packages 镜像）
 // 时，升级只能走 `volta install`——`npm install -g` 只写 node 工具链目录，
 // 不会更新 volta 的 packages 镜像。此函数现在是 volta 分支的唯一升级动作，
@@ -346,6 +366,20 @@ export async function updatePackage(options = {}) {
 
   if (currentVersion === latestVersion) {
     log.log('Already up to date.');
+
+    // 版本已最新：绝不安装；仅显式 --prune 时收敛非生效副本。
+    // 未传 --prune 时保持历史行为：不探测来源、不清理、直接返回。
+    if (cleanup && prune) {
+      const effectiveSource = typeof detectSource === 'function'
+        ? detectSource(env)
+        : 'unknown';
+      await reconcileStaleCopies({
+        source: effectiveSource, env, run, log, prune, isTTY, confirm,
+        checkHooks, checkTmuxConf, detectStale, verify,
+        expectedVersion: latestVersion,
+      });
+    }
+
     return true;
   }
 
@@ -394,18 +428,11 @@ export async function updatePackage(options = {}) {
 
   // 升级已确认成功后再收敛历史副本；清理失败不影响升级结果，也不改变退出码。
   if (cleanup && result.status === 'ok') {
-    try {
-      const removed = await cleanupStale({
-        source, env, run, log, prune, isTTY, confirm, checkHooks, checkTmuxConf, detectStale,
-      });
-      // 删过东西就再确认一次生效入口，避免误删导致命令不可用。
-      if (removed && verify) {
-        const after = await verify(latestVersion, env);
-        if (after.status !== 'ok') warnNotEffective(log, after);
-      }
-    } catch (err) {
-      log.error(`Cleanup skipped: ${err}`);
-    }
+    await reconcileStaleCopies({
+      source, env, run, log, prune, isTTY, confirm,
+      checkHooks, checkTmuxConf, detectStale, verify,
+      expectedVersion: latestVersion,
+    });
   }
 
   return true;
