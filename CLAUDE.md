@@ -34,7 +34,7 @@ scripts/
     claude.sh                          # Claude Code 差异声明 + 完整性检查 + install/uninstall
     codex.sh                           # Codex 差异声明 + install/uninstall（无SessionEnd/延迟SessionStart/trust）
     opencode.sh                        # opencode 差异声明 + plugin 文件生成/删除（整文件写、无 jq）
-  install-claude-hooks.sh              # 薄 wrapper → adapters/claude.sh（[install|uninstall|check|auto]）
+  install-claude-hooks.sh              # 薄 wrapper → adapters/claude.sh（[install|uninstall|check [--json]|auto]）
   install-codex-hooks.sh               # 薄 wrapper → adapters/codex.sh（[install|uninstall|check]）
   install-opencode-hooks.sh            # 薄 wrapper → adapters/opencode.sh（[install|uninstall|check]）
 ```
@@ -52,6 +52,7 @@ scripts/
 - `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
+- `adapter_check_detail()` — `check --json` 明细 JSON 片段（可选实现；仅 install wrapper 的 check --json 上下文调用，失败输出降级片段不报错；不得依赖 lib-install-hooks.sh——status/suppress/drift 由 wrapper 层 `_wrapper_check_json` 拼装）
 - `adapter_install_hooks()` / `adapter_uninstall_hooks()` — 安装/卸载 hooks（合并式，保留他人 hook）
 
 install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch，另含 `check` 模式输出 `ok`/`missing` 供 TUI 侦测）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
@@ -250,6 +251,19 @@ echo '{}' | bash scripts/tmux-ai-status codex Stop
 
 # 查看 poll 进程
 ls /tmp/ai-status/*/*-poll-pid
+
+# hooks 健康明细（bash 侧，machine-readable；exit code 与默认 check 一致）
+bash scripts/install-claude-hooks.sh check --json | jq .
+# 非交互子命令（人类可读 + .tmux.conf 指向 + 当前 source；exit 1 = 有缺失或漂移）
+TMUXCLIHOOK_SOURCE=$PWD node installer/bin/cli.js check
+```
+
+```bash
+# bash 集成测试（check --json / cc-switch / suppress / 状态机）
+bash tests/check-json.test.sh
+bash tests/ccswitch-install.test.sh
+bash tests/suppress-cross-source.test.sh
+bash tests/status-machine.test.sh
 ```
 
 ### 快捷键
@@ -265,7 +279,7 @@ ls /tmp/ai-status/*/*-poll-pid
 
 ### Node TUI 安装器（installer/）
 
-交互式安装器（@clack/prompts + execa），承接安装前置环节：环境侦测/修复（tmux/jq/bash/node）、AI CLI 侦测（版本+minVersion+hooks状态）、hooks 装/卸/修、TPM 软链校验/创建。
+交互式安装器（@clack/prompts + execa），承接安装前置环节：环境侦测/修复（tmux/jq/bash/node）、AI CLI 侦测（版本+minVersion+hooks 健康明细：判定真源/缺失原因/注册路径/漂移警告，经 `src/check-detail.js` 渲染 bash `check --json`）、hooks 装/卸/修/漂移收敛、tmux 集成校验/修复。非交互子命令 `tmuxclihook check [claude|codex|opencode]` 输出同一份明细（exit 1 = 有缺失或漂移）。Esc 导航见「关键设计决策」的 Esc 条目。
 
 环境检测结果分为 `ready` / `missing` / `outdated`。Doctor 对缺失依赖使用 `brew install`；只有过旧 formula 确认由 Homebrew 管理时才使用 `brew upgrade`；未安装 Homebrew 或非 Homebrew 管理的软件只给手动建议。bash 只检查存在性，AI CLI 不自动安装/升级。逐项执行后完整复检，单项失败不阻塞后续项。
 
@@ -287,9 +301,17 @@ ls /tmp/ai-status/*/*-poll-pid
 - **多安装源收敛与卸载意图标记（2026-10-14）**：hooks 条目可由开发 repo 与 npm bundled 包两个「安装源」写入（TUI 走 bundled、自修复走 tmux 加载源），曾因 claude 剥离用 `startswith($hook_script)` 路径敏感匹配导致跨源卸载假成功（剥离零命中 → 报成功但真源未变 → 检测恒「已装」）。修复后的契约：
     - **归属判定路径无关**：所有 strip/merge 清理/check 计数统一 `contains("tmux-ai-status")`（codex 用 `contains("tmux-ai-status codex")`），legacy 名（tmux-powerline-claude-status/tmux-claude-status）清理保留。跨源 install/卸载/修复在任意源组合下结果一致
     - **check 三要素**：按事件计数（非扁平总数，防重复+缺失假阳性）+ 结构指纹 + **每事件至少一条条目脚本存活**（`test -x` command 首 token；死路径如 npm 卸载/volta 升级换路径 → missing → 重装收敛自愈）
-    - **收敛策略不对称**：claude 无 trust 代价 → install 每次强收敛到执行者路径；codex/opencode **no-op if valid**（check 通过时不改写——codex 重写即 `trusted_hash` 失效需重新 Trust all，仅缺失/死路径才 strip+重写收敛）
+    - **收敛策略不对称**：claude 无 trust 代价 → install 每次强收敛到执行者路径；codex/opencode **no-op if valid**（check 通过时不改写——codex 重写即 `trusted_hash` 失效需重新 Trust all，仅缺失/死路径才 strip+重写收敛）。**drift 收敛旁路（2026-10-17）**：`TMUX_AI_FORCE_INSTALL=1` 旁路 codex/opencode 的 no-op 门禁——hooks 指向其他安装源但脚本存活时 integrity 恒过，普通 install 永远收敛不了；TUI 漂移收敛入口对 codex 显式确认 re-trust 代价后经 execa env 传入
     - **卸载意图标记（suppression marker）**：`${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmuxclihook}/suppressed-<tool>`（持久，跨重启有效）。wrapper 显式 uninstall 成功 → 写；显式 install 成功 → 清；三条自动修复路径（`_maybe_repair_hooks`、SessionStart 重装、入口 `auto`）见标记一律跳过。`install-claude-hooks.sh auto` 供 tmux 入口加载时调用（被挡静默 exit 0）；用户恢复需显式安装（prefix+C-h / TUI）
     - `_SUPPRESS_DIR` 在 `lib-install-hooks.sh` 与 `lib-tmux-ai-status.sh` 各定义一次（双上下文自包含，改动需两处同步）；adapter check 不得依赖 lib-install-hooks.sh（事件路径未 source 它）
+
+**check --json 健康明细与漂移检测（2026-10-17）**：解决「不知道是否要修 hooks / 不知道当前生效 source」两个可观测性问题。要点：
+- **默认 `check` 输出契约不变**（`ok`/`missing` + exit code，被 TUI `hooksInstalledAsync` 与 tmux 自修复依赖）；明细走 wrapper 第二参 `check --json`（单行 JSON：status/mode/events/plugin/suppress/drift），由 `lib-install-hooks.sh` 的 `_wrapper_check_json` 拼装。status 判定复用 `adapter_check_integrity` 本体 → 与 ok/missing 永不发散
+- **drift 参照系 = 执行中 wrapper 自身的 `_LIB_DIR`**：Node 经 execa 调的正是其解析出的 `SCRIPTS_DIR` 下的 wrapper，故 `_LIB_DIR` 即当前 source 的 scripts dir；手动用旧 source 的 wrapper 跑 check 得到「相对该 source 无漂移」也是正确语义（它正是那个源的收敛执行者）。Node 侧不二次计算（避免两处真源），只附加 bash 判不了的 `.tmux.conf` 全局信息
+- 消费方：`tmuxclihook check [tool]` 子命令与 TUI「侦测 AI CLI」共用 `installer/src/check-detail.js`（解析/渲染），漂移项在 TUI 内给收敛入口（收敛策略见上条）；check 子命令有缺失/漂移/无法判定时 exit 1
+- **自修复不再完全静默**：`_maybe_repair_hooks` 实际触发重装后 `tmux display-message` 浮出成功/失败（与 SessionStart 修复路径的既有提示对齐，全链路两个可见点）；该函数仅经 `_run_refresh` 在 tmux run-shell 上下文触发，不在 AI CLI 同步 hook 路径
+
+**Esc 导航（2026-10-17）**：clack 0.7 的 Prompt 仅把 `\x03`（ctrl+c）映射为 cancel，**Esc 默认无任何效果**——各子菜单「Esc 返回」此前只是文案承诺。`installer/src/esc.js` 挂全局 keypress 监听，看到 escape 就 `process.stdin.emit('keypress', '\x03', {name:'c', ctrl:true})` 合成取消（**必须 emit 而非 stdin.write**：raw mode 下向 fd 0 写入不回环成输入）。主菜单 Esc 退出 / 子菜单 Esc 返回 / confirm Esc 取消全部真实生效；spinner 期间不转译（clack `block()` 给 `\x03` 装了 `process.exit(0)`，转译会让 Esc 在 spinner 期间硬退出且不恢复 raw mode），`cli.js` 的 `spinner()` 包装负责联动。
 
 ## 依赖
 
