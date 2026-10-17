@@ -1,5 +1,6 @@
-import { readFileSync, accessSync, constants as fsConstants, realpathSync } from 'node:fs';
+import { readFileSync, accessSync, existsSync, constants as fsConstants, realpathSync } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 
 const PACKAGE_NAME = 'tmuxclihook';
@@ -85,6 +86,145 @@ export function detectInstallSource(env = process.env) {
   } catch {
     return 'unknown';
   }
+}
+
+// —— 非生效副本检测与可选收敛 ——————————————————————————————————————
+//
+// update 只升级生效入口，不主动动另一套安装。历史遗留的双份副本会让后续
+// 手动交叉升级「升级到不生效的那份」，因此提供可选收敛：只删同时满足以下
+// 条件的副本——不是生效入口、未被 hooks 引用、未被 ~/.tmux.conf 引用、
+// 位于已知标准位置。TTY 下交互确认（默认 No）；--prune 跳过确认；
+// 非交互环境只警告，绝不静默删除。
+
+const TOOL_IDS = ['claude', 'codex', 'opencode'];
+
+function voltaPackagesRoot(env) {
+  const voltaHome = env.VOLTA_HOME || (env.HOME ? join(env.HOME, '.volta') : null);
+  return voltaHome ? join(voltaHome, 'tools', 'image', 'packages', PACKAGE_NAME) : null;
+}
+
+async function readNpmGlobalPrefix(run) {
+  try {
+    const r = await run('npm', ['prefix', '-g']);
+    return (r.stdout || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// 返回「非生效 + 位于标准位置」的副本。source 为 unknown 时不做任何
+// 检测——找不到生效入口时删除任何一份都可能让用户彻底没有命令。
+export async function detectStaleInstalls(source, env = process.env, run = execa) {
+  if (source === 'unknown') return [];
+
+  const stale = [];
+  if (source === 'npm') {
+    const voltaRoot = voltaPackagesRoot(env);
+    if (voltaRoot && existsSync(voltaRoot)) stale.push({ kind: 'volta', root: voltaRoot });
+  }
+  if (source === 'volta') {
+    const prefix = await readNpmGlobalPrefix(run);
+    const npmRoot = prefix ? join(prefix, 'lib', 'node_modules', PACKAGE_NAME) : null;
+    if (npmRoot && existsSync(npmRoot)) stale.push({ kind: 'npm', root: npmRoot });
+  }
+  return stale;
+}
+
+// hooks 是否引用该副本。走三个 wrapper 的 check --json（与 TUI 同源），
+// 输出里出现目标路径即视为引用。任何异常都按「有引用」处理，宁可不动。
+async function hooksReference(root, env, run) {
+  const scriptsDir = fileURLToPath(new URL('../scripts/', import.meta.url));
+  for (const tool of TOOL_IDS) {
+    const script = join(scriptsDir, `install-${tool}-hooks.sh`);
+    if (!existsSync(script)) continue;
+    try {
+      const r = await run('bash', [script, 'check', '--json'], { env });
+      if ((r.stdout || '').includes(root)) return tool;
+    } catch (err) {
+      if ((err.stdout || '').includes(root)) return tool;
+      return tool;
+    }
+  }
+  return null;
+}
+
+function tmuxConfReferences(root, env) {
+  if (!env.HOME) return true;
+  try {
+    return readFileSync(join(env.HOME, '.tmux.conf'), 'utf8').includes(root);
+  } catch {
+    return false;
+  }
+}
+
+async function uninstallStale(item, run) {
+  try {
+    if (item.kind === 'volta') {
+      await run('volta', ['uninstall', PACKAGE_NAME], { stdio: 'inherit' });
+    } else {
+      await run('npm', ['uninstall', '-g', PACKAGE_NAME], { stdio: 'inherit' });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 交互确认的默认实现：读一行，默认 No。测试通过 options.confirm 注入。
+async function defaultConfirm(question) {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`${question} [y/N] `);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+// 清理非生效副本。返回是否实际删除过任何副本。
+export async function cleanupStale(options) {
+  const {
+    source, env, run, log, prune, isTTY, confirm, checkHooks, checkTmuxConf,
+  } = options;
+
+  const stale = await options.detectStale(source, env, run);
+  if (stale.length === 0) return false;
+
+  let removed = false;
+  for (const item of stale) {
+    const label = `${item.kind} install at ${item.root}`;
+
+    const hookTool = await checkHooks(item.root, env, run);
+    if (hookTool) {
+      log.error(`Not removing ${label}: still referenced by ${hookTool} hooks. Reinstall hooks from the effective entry first.`);
+      continue;
+    }
+    if (checkTmuxConf(item.root, env)) {
+      log.error(`Not removing ${label}: still referenced by ~/.tmux.conf.`);
+      continue;
+    }
+
+    if (!prune) {
+      if (!isTTY) {
+        log.error(`Another install found: ${label}. Run "tmuxclihook update --prune" in a terminal to remove it.`);
+        continue;
+      }
+      const yes = await confirm(`Remove the non-effective ${label}?`);
+      if (!yes) {
+        log.log(`Keeping ${label}.`);
+        continue;
+      }
+    }
+
+    if (await uninstallStale(item, run)) {
+      log.log(`Removed ${label}.`);
+      removed = true;
+    } else {
+      log.error(`Failed to remove ${label}.`);
+    }
+  }
+  return removed;
 }
 
 // npm 布局下入口是 .../lib/node_modules/<pkg>/bin/cli.js（或其 symlink）：
@@ -182,6 +322,16 @@ export async function updatePackage(options = {}) {
   const verify = options.verify === undefined ? verifyEffectiveVersion : options.verify;
   const repairVolta = options.repairVolta === undefined ? repairWithVolta : options.repairVolta;
   const detectSource = options.detectSource === undefined ? detectInstallSource : options.detectSource;
+  // 非生效副本收敛：默认开启，TTY 下交互确认；--prune 跳过确认。
+  const cleanup = options.cleanup !== false;
+  const prune = options.prune === true;
+  const isTTY = options.isTTY === undefined
+    ? Boolean(process.stdin.isTTY && process.stdout.isTTY)
+    : options.isTTY;
+  const confirm = options.confirm || defaultConfirm;
+  const detectStale = options.detectStale || detectStaleInstalls;
+  const checkHooks = options.checkHooks || hooksReference;
+  const checkTmuxConf = options.checkTmuxConf || tmuxConfReferences;
 
   log.log(`Current version: v${currentVersion}`);
 
@@ -240,6 +390,22 @@ export async function updatePackage(options = {}) {
     log.log(`Verified: tmuxclihook on your PATH now resolves to v${latestVersion}.`);
   } else {
     warnNotEffective(log, result);
+  }
+
+  // 升级已确认成功后再收敛历史副本；清理失败不影响升级结果，也不改变退出码。
+  if (cleanup && result.status === 'ok') {
+    try {
+      const removed = await cleanupStale({
+        source, env, run, log, prune, isTTY, confirm, checkHooks, checkTmuxConf, detectStale,
+      });
+      // 删过东西就再确认一次生效入口，避免误删导致命令不可用。
+      if (removed && verify) {
+        const after = await verify(latestVersion, env);
+        if (after.status !== 'ok') warnNotEffective(log, after);
+      }
+    } catch (err) {
+      log.error(`Cleanup skipped: ${err}`);
+    }
   }
 
   return true;

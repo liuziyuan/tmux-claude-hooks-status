@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, symlinkSync }
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { CURRENT_VERSION, updatePackage, verifyEffectiveVersion, repairWithVolta, detectInstallSource } from '../src/update.js';
+import { CURRENT_VERSION, updatePackage, verifyEffectiveVersion, repairWithVolta, detectInstallSource, detectStaleInstalls, cleanupStale } from '../src/update.js';
 
 function captureLog() {
   const messages = [];
@@ -258,7 +258,7 @@ test('updatePackage upgrades via volta only when the effective entry is volta', 
   };
 
   const ok = await updatePackage({
-    run, log, currentVersion: '1.0.0', env, detectSource, verify, repairVolta,
+    run, log, currentVersion: '1.0.0', env, detectSource, verify, repairVolta, cleanup: false,
   });
 
   assert.equal(ok, true);
@@ -334,7 +334,7 @@ test('updatePackage confirms when post-install verification passes', async () =>
   const run = async () => ({ stdout: '1.2.3\n' });
   const verify = async () => ({ status: 'ok', path: '/fake/tmuxclihook', version: '1.2.3' });
 
-  const ok = await updatePackage({ run, log, currentVersion: '1.0.0', verify, repairVolta: null, detectSource: () => 'npm' });
+  const ok = await updatePackage({ run, log, currentVersion: '1.0.0', verify, repairVolta: null, detectSource: () => 'npm', cleanup: false });
 
   assert.equal(ok, true);
   assert.deepEqual(messages, [
@@ -483,7 +483,7 @@ test('updatePackage does not invoke volta when npm verification passes', async (
   const repairVolta = async () => { repairs += 1; return true; };
 
   const ok = await updatePackage({
-    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta,
+    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta, cleanup: false,
   });
 
   assert.equal(ok, true);
@@ -511,7 +511,7 @@ test('updatePackage retries via volta when npm verification fails', async () => 
   const repairVolta = async () => { timeline.push('repair'); return true; };
 
   const ok = await updatePackage({
-    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta,
+    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta, cleanup: false,
   });
 
   assert.equal(ok, true);
@@ -532,7 +532,7 @@ test('updatePackage warns when the volta fallback is unavailable', async () => {
   const repairVolta = async () => { repairs += 1; return false; };
 
   const ok = await updatePackage({
-    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta,
+    run, log, currentVersion: '1.0.0', detectSource: () => 'npm', verify, repairVolta, cleanup: false,
   });
 
   assert.equal(ok, true);
@@ -544,4 +544,196 @@ test('updatePackage warns when the volta fallback is unavailable', async () => {
     'Warning: the tmuxclihook command on your PATH (/fake/tmuxclihook) did not reflect the new version (still v1.0.0).',
     'If you use volta, run: volta install tmuxclihook@latest',
   ]);
+});
+
+// —— 非生效副本检测与清理 ————————————————————————————————————————
+
+function makeVoltaPackages(root) {
+  const voltaHome = join(root, 'volta');
+  const pkg = join(voltaHome, 'tools', 'image', 'packages', 'tmuxclihook');
+  mkdirSync(pkg, { recursive: true });
+  return { voltaHome, pkg };
+}
+
+function makeNpmInstall(root) {
+  const prefix = join(root, 'npm');
+  const pkg = join(prefix, 'lib', 'node_modules', 'tmuxclihook');
+  mkdirSync(pkg, { recursive: true });
+  return { prefix, pkg };
+}
+
+function cleanupOptions(overrides = {}) {
+  const messages = [];
+  return {
+    messages,
+    options: {
+      source: 'npm',
+      env: { HOME: '/nonexistent' },
+      run: async () => ({ stdout: '' }),
+      log: { log: (m) => messages.push(m), error: (m) => messages.push(m) },
+      prune: false,
+      isTTY: false,
+      confirm: async () => false,
+      detectStale: async () => [],
+      checkHooks: async () => null,
+      checkTmuxConf: () => false,
+      ...overrides,
+    },
+  };
+}
+
+test('detectStaleInstalls finds the volta copy when npm is effective', async () => {
+  await withTempRootAsync('stale-volta', async (root) => {
+    const { voltaHome, pkg } = makeVoltaPackages(root);
+    const stale = await detectStaleInstalls(
+      'npm',
+      { HOME: root, VOLTA_HOME: voltaHome },
+      async () => { throw new Error('npm should not be called'); },
+    );
+    assert.deepEqual(stale, [{ kind: 'volta', root: pkg }]);
+  });
+});
+
+test('detectStaleInstalls finds the npm copy when volta is effective', async () => {
+  await withTempRootAsync('stale-npm', async (root) => {
+    const { prefix, pkg } = makeNpmInstall(root);
+    const run = async (command, args) => {
+      assert.deepEqual([command, args], ['npm', ['prefix', '-g']]);
+      return { stdout: prefix };
+    };
+    const stale = await detectStaleInstalls(
+      'volta',
+      { HOME: root, VOLTA_HOME: join(root, 'no-volta') },
+      run,
+    );
+    assert.deepEqual(stale, [{ kind: 'npm', root: pkg }]);
+  });
+});
+
+test('detectStaleInstalls returns nothing when the source is unknown', async () => {
+  const stale = await detectStaleInstalls(
+    'unknown',
+    { HOME: '/nonexistent' },
+    async () => { throw new Error('should not be called'); },
+  );
+  assert.deepEqual(stale, []);
+});
+
+test('detectStaleInstalls returns nothing when the other install is absent', async () => {
+  await withTempRootAsync('stale-none', async (root) => {
+    const stale = await detectStaleInstalls(
+      'volta',
+      { HOME: root, VOLTA_HOME: join(root, 'no-volta') },
+      async () => ({ stdout: join(root, 'no-npm') }),
+    );
+    assert.deepEqual(stale, []);
+  });
+});
+
+test('cleanupStale refuses to remove a copy referenced by hooks', async () => {
+  const calls = [];
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'volta', root: '/fake/volta' }],
+    checkHooks: async () => 'claude',
+    run: async (...args) => { calls.push(args); return { stdout: '' }; },
+    prune: true,
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, false);
+  assert.deepEqual(calls, []);
+  assert.ok(messages[0].includes('still referenced by claude hooks'));
+});
+
+test('cleanupStale refuses to remove a copy referenced by ~/.tmux.conf', async () => {
+  const calls = [];
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'npm', root: '/fake/npm' }],
+    checkTmuxConf: () => true,
+    run: async (...args) => { calls.push(args); return { stdout: '' }; },
+    prune: true,
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, false);
+  assert.deepEqual(calls, []);
+  assert.ok(messages[0].includes('~/.tmux.conf'));
+});
+
+test('cleanupStale only warns in a non-interactive shell without --prune', async () => {
+  const calls = [];
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'npm', root: '/fake/npm' }],
+    isTTY: false,
+    prune: false,
+    run: async (...args) => { calls.push(args); return { stdout: '' }; },
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, false);
+  assert.deepEqual(calls, []);
+  assert.ok(messages[0].includes('tmuxclihook update --prune'));
+});
+
+test('cleanupStale removes the copy after interactive confirmation', async () => {
+  const calls = [];
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'npm', root: '/fake/npm' }],
+    isTTY: true,
+    confirm: async () => true,
+    run: async (command, args) => { calls.push([command, args]); return { stdout: '' }; },
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, true);
+  assert.deepEqual(calls, [['npm', ['uninstall', '-g', 'tmuxclihook']]]);
+  assert.ok(messages.some((m) => m.includes('Removed npm install at /fake/npm')));
+});
+
+test('cleanupStale keeps the copy when the user declines', async () => {
+  const calls = [];
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'npm', root: '/fake/npm' }],
+    isTTY: true,
+    confirm: async () => false,
+    run: async (...args) => { calls.push(args); return { stdout: '' }; },
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, false);
+  assert.deepEqual(calls, []);
+  assert.ok(messages.some((m) => m.includes('Keeping npm install at /fake/npm')));
+});
+
+test('cleanupStale removes without confirmation when --prune is set', async () => {
+  const calls = [];
+  const { options } = cleanupOptions({
+    detectStale: async () => [{ kind: 'volta', root: '/fake/volta' }],
+    isTTY: false,
+    prune: true,
+    run: async (command, args) => { calls.push([command, args]); return { stdout: '' }; },
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, true);
+  assert.deepEqual(calls, [['volta', ['uninstall', 'tmuxclihook']]]);
+});
+
+test('cleanupStale reports a failed uninstall without throwing', async () => {
+  const { options, messages } = cleanupOptions({
+    detectStale: async () => [{ kind: 'npm', root: '/fake/npm' }],
+    prune: true,
+    run: async () => { throw new Error('permission denied'); },
+  });
+
+  const removed = await cleanupStale(options);
+
+  assert.equal(removed, false);
+  assert.ok(messages.some((m) => m.includes('Failed to remove npm install at /fake/npm')));
 });
