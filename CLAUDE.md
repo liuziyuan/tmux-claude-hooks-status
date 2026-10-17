@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 工作流铁律
+
+**所有改动(代码与文档一律)必须走 PR,禁止直接 push main。** 流程:从最新 `origin/main` 开分支 → 提交 → push → `gh pr create` → 合并。直接 push main 等同流程违规(2026-10-17 教训:两个提交直接落了 main,已 revert 后补走 PR)。
+
 ## 术语
 
 **AI Status** — 本项目核心功能的统称。通过 tmux 状态栏实时显示 AI CLI（Claude Code / Codex）运行状态，包括状态检测、事件监听、符号渲染、颜色编码等整套机制。
