@@ -57,7 +57,9 @@ function buildTools(scriptsDir) {
       versionArgs: ['--version'],
       versionRe: /(\d+\.\d+\.\d+)/,
       minVersion: null,                        // plugin 系统本地文件跳过版本兼容检查
-      // hooksFile 实为 JS/TS plugin 文件（非 JSON hooks 配置），install/uninstall 整文件写入/删除
+      // hooksFile 实为 JS/TS plugin 文件（非 JSON hooks 配置），install/uninstall 整文件写入/删除。
+      // 权威路径由 bash adapter 解析（OPENCODE_CONFIG_DIR > cc-switch opencodeConfigDir > XDG），
+      // 此处仅静态近似，判定一律走 wrapper check，避免两处真源发散。
       hooksFile: join(
         process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(HOME, '.config'), 'opencode'),
         'plugins',
