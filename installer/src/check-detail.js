@@ -11,7 +11,8 @@ const WARN = '⚠';
 
 const MODE_LABEL = {
   file: '配置文件',
-  ccswitch: 'cc-switch db（通用配置）',
+  'ccswitch-live': 'cc-switch 4.0+（~/.claude/settings.json）',
+  ccswitch: 'cc-switch 旧版 db（通用配置）',
   plugin: 'opencode plugin 文件',
   unknown: '未知',
 };

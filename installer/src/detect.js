@@ -82,7 +82,8 @@ export async function checkEnv({ probeCommand = probe } = {}) {
     pkg: 'node',
   }));
 
-  // sqlite3：仅 cc-switch 环境需要（hooks 真源在其 db 通用配置，装/卸/检查走 sqlite）
+  // sqlite3：cc-switch 环境用于读 db PRAGMA user_version 判定 live/legacy 真源；
+  // legacy 模式（真源在 db 通用配置）的装/卸/检查还依赖它写入。
   const ccSwitchDb = join(homedir(), '.cc-switch', 'cc-switch.db');
   if (existsSync(ccSwitchDb)) {
     const sqlite3 = await probeCommand('sqlite3', ['--version'], /(\d+\.\d+)/);

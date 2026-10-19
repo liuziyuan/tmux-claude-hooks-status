@@ -1,9 +1,11 @@
 #!/bin/bash
-# tests/ccswitch-install.test.sh — cc-switch 通用配置模式的 install/uninstall/check 测试
+# tests/ccswitch-install.test.sh — cc-switch 共享配置模式的 install/uninstall/check 测试
 #
-# 隔离方式：HOME 指向临时目录。wrapper 只依赖 _ccswitch_db（$HOME/.cc-switch/...）
-# 与 ADAPTER_HOOKS_FILE（CLAUDE_CONFIG_DIR 未设时落在 $HOME/.claude），天然可注入，
-# 无需任何代码级测试钩子。fixture db 与真实 cc-switch.db 的 settings 表同 schema。
+# 覆盖两种真源：legacy（db common_config_claude；fixture 默认 user_version=0）与
+# live（cc-switch 4.0.2+，user_version>=20，真源 ~/.claude/settings.json）。
+# 隔离方式：HOME 指向临时目录。wrapper 只依赖 _ccswitch_db（$HOME/.cc-switch/...）、
+# _ccswitch_live_file（$HOME/.claude/settings.json）与 ADAPTER_HOOKS_FILE
+# （CLAUDE_CONFIG_DIR 未设时落在 $HOME/.claude），天然可注入，无需代码级测试钩子。
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -168,4 +170,66 @@ HOME="$H7" bash "$WRAPPER" >/dev/null
 out=$(HOME="$H7" bash "$WRAPPER" check)
 assert_eq "ok" "$out" "install 收敛为执行者路径后 check 恢复 ok"
 
-echo "PASS: 12/12 cc-switch install 用例全部通过"
+# ── live 模式（cc-switch 4.0.2+，db user_version >= 20）：真源 = ~/.claude/settings.json ──
+new_home_live() {  # $1=用例名 → echo home（v4 schema）
+    local h="$TEST_TMP/home-live-$1"
+    rm -rf "$h"
+    mkdir -p "$h/.cc-switch" "$h/.claude"
+    sqlite3 "$h/.cc-switch/cc-switch.db" \
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); PRAGMA user_version = 20;"
+    printf '%s' "$h"
+}
+
+file_events() {  # $1=home → settings.json 中本插件管理的事件数
+    jq '[.hooks // {} | to_entries[]
+        | select(.value | any(.hooks[]?.command | contains("tmux-ai-status")))] | length' \
+        "$1/.claude/settings.json"
+}
+
+# ── 用例 13: live install → 写 settings.json、保留他人 hook/顶层字段、库不写 ──
+H8=$(new_home_live install)
+printf '%s\n' "$FIXTURE_COMMON" > "$H8/.claude/settings.json"
+HOME="$H8" bash "$WRAPPER" >/dev/null
+assert_eq "10" "$(file_events "$H8")" "live install 注册 10 个事件"
+jq -e '.model == "opus" and (.hooks.PreToolUse | length == 2)' "$H8/.claude/settings.json" >/dev/null \
+    || { echo "FAIL: live install 应保留 model 与他人 hook"; exit 1; }
+assert_eq "0" "$(sqlite3 "$H8/.cc-switch/cc-switch.db" "SELECT count(*) FROM settings WHERE key='common_config_claude'")" \
+    "live install 不写 legacy 库"
+assert_eq "ok" "$(HOME="$H8" bash "$WRAPPER" check)" "live check 输出 ok"
+assert_eq "ccswitch-live" "$(HOME="$H8" bash "$WRAPPER" check --json | jq -r .mode)" \
+    "check --json mode=ccswitch-live"
+
+# ── 用例 14: live + settings.json 不存在 → 自动创建 ──
+H9=$(new_home_live newfile)
+HOME="$H9" bash "$WRAPPER" >/dev/null
+assert_eq "10" "$(file_events "$H9")" "settings.json 缺失时自动创建并注册"
+
+# ── 用例 15: live 缺事件 → check 失败；重装收敛 ──
+jq '.hooks |= del(.SessionStart, .Stop)' "$H9/.claude/settings.json" > "$H9/.tmp.json" \
+    && mv "$H9/.tmp.json" "$H9/.claude/settings.json"
+if HOME="$H9" bash "$WRAPPER" check >/dev/null 2>&1; then
+    echo "FAIL: live 缺事件时 check 应失败"; exit 1
+fi
+HOME="$H9" bash "$WRAPPER" >/dev/null
+assert_eq "ok" "$(HOME="$H9" bash "$WRAPPER" check)" "live 重装后恢复 ok"
+
+# ── 用例 16: live uninstall → 剥离本插件、保留他人 hook/顶层字段 ──
+HOME="$H8" bash "$WRAPPER" uninstall >/dev/null
+assert_eq "0" "$(file_events "$H8")" "live 卸载后本插件事件为 0"
+jq -e '.model == "opus" and (.hooks.PreToolUse | length == 1)' "$H8/.claude/settings.json" >/dev/null \
+    || { echo "FAIL: live 卸载应保留 model 与他人 hook"; exit 1; }
+
+# ── 用例 17/18: CC_SWITCH_SHARED_SOURCE 显式覆盖（与 cc-switch 同款逃生阀）──
+H10=$(new_home_live override-legacy)
+HOME="$H10" CC_SWITCH_SHARED_SOURCE=legacy bash "$WRAPPER" >/dev/null
+assert_eq "10" "$(managed_events "$H10")" "override=legacy 写库"
+[ ! -f "$H10/.claude/settings.json" ] || { echo "FAIL: override=legacy 不应写 live 文件"; exit 1; }
+
+H11=$(new_home override-live); seed_common "$H11"
+HOME="$H11" CC_SWITCH_SHARED_SOURCE=live bash "$WRAPPER" >/dev/null
+assert_eq "10" "$(file_events "$H11")" "override=live 写 live 文件"
+assert_eq "0" "$(sqlite3 "$H11/.cc-switch/cc-switch.db" \
+    "SELECT count(*) FROM settings WHERE key='common_config_claude' AND value LIKE '%tmux-ai-status%'")" \
+    "override=live 不改 legacy 库"
+
+echo "PASS: 18/18 cc-switch install 用例全部通过"

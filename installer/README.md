@@ -79,7 +79,14 @@ clack 0.7 只把 ctrl+c 映射为取消（Esc 默认无效果），安装器在 
 
 ### cc-switch 模式（Claude Code）
 
-检测到 `~/.cc-switch/cc-switch.db` 时，Claude Code hooks 的装/卸/修/状态检查全部指向其通用配置（db `settings` 表 `common_config_claude`）——`switch` 命令启动 claude 时会把通用配置合并进实例配置，`~/.claude/settings.json` 与实例文件都会被 cc-switch 覆盖，直接写它们不持久。写入用与 cc-switch 自身一致的 `json_patch` 原子更新，他人 hook 与配置其他字段保留。注意：cc-switch GUI 运行中会把内存缓存写回 db，安装前建议先退出 GUI（脚本会警告）；不经 `switch` 直接运行的 `claude` 读不到 db 里的 hooks。
+检测到 `~/.cc-switch/cc-switch.db` 时，Claude Code hooks 的装/卸/修/状态检查改走 cc-switch 的共享配置。真源位置随 cc-switch 版本自动切换（判定规则与 cc-switch CLI 的 `detectSharedConfigMode` 一致，`CC_SWITCH_SHARED_SOURCE=live|legacy` 可显式覆盖）：
+
+| cc-switch 版本 | 判定 | hooks 真源 / 写入目标 |
+|---|---|---|
+| 4.0.2+（live） | `PRAGMA user_version >= 20` | `~/.claude/settings.json` |
+| 旧版（legacy） | `user_version < 20` 或读不到 | db `settings` 表 `common_config_claude` |
+
+live 模式以 `~/.claude/settings.json` 为共享配置真源（cc-switch 4.0.2 起不再读库里的 `common_config_claude`），写入用与文件模式相同的原子合并，他人 hook 与配置其他字段保留；legacy 模式用与 cc-switch 自身一致的 `json_patch` 更新 db。注意：cc-switch GUI 运行中会把内存缓存写回真源，安装前建议先退出 GUI（脚本会警告）；legacy 模式下不经 `switch` 直接运行的 `claude` 读不到 db 里的 hooks。
 
 ## Source 管理（生产默认 / 本地调试切换）
 

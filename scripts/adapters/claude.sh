@@ -119,28 +119,54 @@ _claude_count_registered() {  # $1=输入 JSON 文件 → stdout 事件数（jq 
 }
 
 # ─── cc-switch 通用配置支持 ───
-# `switch` 命令启动 claude 时把 ~/.cc-switch/cc-switch.db 的通用配置（settings 表
-# common_config_claude，JSON）深合并进实例 settings.json（provider meta 均
-# commonConfigEnabled=true）。~/.claude/settings.json 与实例文件都会被 cc-switch
-# 覆盖，通用配置是 hooks 的唯一持久真源。检测到 cc-switch 时装/卸/完整性只操作
-# 该库；sqlite3 缺失等一切门禁不过 → 整体回退传统文件模式。
+# `switch` 命令启动 claude 时把「共享配置」深合并进实例 settings.json
+# （provider meta 均 commonConfigEnabled=true）。~/.claude/settings.json 与实例
+# 文件都会被 cc-switch 覆盖，共享配置才是 hooks 的唯一持久真源。
+#
+# 共享配置的真源位置随 cc-switch 版本变化（规则与 cc-switch CLI 的
+# detectSharedConfigMode 保持一致）：
+#   - legacy（< 4.0.2 / db PRAGMA user_version < 20）：
+#       真源 = db settings 表的 common_config_claude（JSON）
+#   - live（4.0.2+ / user_version >= 20）：
+#       真源 = ~/.claude/settings.json —— 4.0.2 起 cc-switch 不再读库里的
+#       common_config_claude（仅作迁移快照），所以新机器上写库等于写进死信。
+#   - CC_SWITCH_SHARED_SOURCE=live|legacy 可显式覆盖（cc-switch 同款逃生阀）
+# 门禁不过（db/表/sqlite3 缺失）→ none，整体回退传统文件模式。
 
 _ccswitch_db() { printf '%s\n' "${HOME}/.cc-switch/cc-switch.db"; }
 
-# 门禁：db 存在 && sqlite3 可用 && settings 表可查。不要求 key 存在
-# （从未编辑过通用配置的用户由 install 的 upsert 建行；若此处要求 key，
-# 会静默回退文件模式 → 实例永不含 hooks + 自修复空转）。
-_ccswitch_active() {
-    local db
+# live 模式真源：cc-switch 硬编码 $HOME/.claude/settings.json，
+# 不随 CLAUDE_CONFIG_DIR 变化（后者指向的是 switch 实例目录）。
+_ccswitch_live_file() { printf '%s\n' "${HOME}/.claude/settings.json"; }
+
+# 输出 live|legacy|none；恒返回 0（调用方无需容忍失败分支）。
+_ccswitch_mode() {
+    local db override version
     db="$(_ccswitch_db)"
-    [ -f "$db" ] || return 1
-    command -v sqlite3 >/dev/null 2>&1 || return 1
-    sqlite3 -readonly "$db" \
+    if [ ! -f "$db" ] || ! command -v sqlite3 >/dev/null 2>&1; then
+        printf 'none\n'
+        return 0
+    fi
+    if ! sqlite3 -readonly "$db" \
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'" 2>/dev/null \
-        | grep -q 1
+        | grep -q 1; then
+        printf 'none\n'
+        return 0
+    fi
+    override=$(printf '%s' "${CC_SWITCH_SHARED_SOURCE:-}" | tr '[:upper:]' '[:lower:]')
+    case "$override" in
+        live|legacy) printf '%s\n' "$override"; return 0 ;;
+    esac
+    # 读不到版本（空/非数字）按 legacy——与 cc-switch CLI 的 null → legacy 一致
+    version=$(sqlite3 -readonly "$db" "PRAGMA user_version" 2>/dev/null | tr -cd '0-9')
+    if [ -n "$version" ] && [ "$version" -ge 20 ]; then
+        printf 'live\n'
+    else
+        printf 'legacy\n'
+    fi
 }
 
-# cc-switch GUI 运行中会把内存缓存的通用配置全量写回 db（实测发生过），警告不阻塞。
+# cc-switch GUI 运行中会把内存缓存的共享配置全量写回真源（实测发生过），警告不阻塞。
 _ccswitch_warn_gui() {
     if pgrep -ix "cc-switch" >/dev/null 2>&1 \
        || pgrep -f "cc-switch.app/Contents/MacOS" >/dev/null 2>&1; then
@@ -190,13 +216,22 @@ ON CONFLICT(key) DO UPDATE SET value = json_patch(settings.value, json($(_sqlquo
 # 存活提取内联在本函数（jq + test），不依赖 lib-install-hooks.sh——本函数同时被
 # 事件路径（lib-tmux-ai-status.sh）与 install wrapper（lib-install-hooks.sh）两个上下文调用。
 adapter_check_integrity() {
-    local src registered ev p ok_events=""
-    if _ccswitch_active; then
-        _ccswitch_dump_common src || return 1
-    else
-        [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
-        src="$ADAPTER_HOOKS_FILE"
-    fi
+    local mode src="" tmp="" registered ev p ok_events=""
+    mode=$(_ccswitch_mode)
+    case "$mode" in
+        live)
+            src=$(_ccswitch_live_file)
+            [ -f "$src" ] || return 1
+            ;;
+        legacy)
+            _ccswitch_dump_common tmp || return 1
+            src="$tmp"
+            ;;
+        *)
+            [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
+            src="$ADAPTER_HOOKS_FILE"
+            ;;
+    esac
     registered=$(_claude_count_registered "$src")
     if [ "${registered:-0}" -ge 10 ]; then
         while IFS=$'\t' read -r ev p; do
@@ -212,9 +247,7 @@ adapter_check_integrity() {
             select(($scripts | length) > 0) |
             $scripts[] | "\($e)\t\(.)"' "$src" 2>/dev/null)
     fi
-    if [ "$src" != "$ADAPTER_HOOKS_FILE" ]; then
-        rm -f "$src"
-    fi
+    [ -z "$tmp" ] || rm -f "$tmp"
     [ "${registered:-0}" -ge 10 ] || return 1
     for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest Notification Stop StopFailure; do
         case ",$ok_events," in *",$ev,"*) ;; *) return 1 ;; esac
@@ -229,20 +262,38 @@ adapter_check_integrity() {
 # status 判定仍由 integrity 本体独立给出，两者永不发散。
 # 任何失败（jq 失败/配置缺失）输出空 events 的降级片段，不 exit 非 0。
 adapter_check_detail() {
-    local mode="file" src="" pairs rows line ev p a
-    if _ccswitch_active; then
-        mode="ccswitch"
-        if ! _ccswitch_dump_common src; then
-            printf '{"mode":"ccswitch","events":{},"plugin":null,"registeredPaths":[]}\n'
-            return 0
-        fi
-    elif [ -f "$ADAPTER_HOOKS_FILE" ]; then
-        src="$ADAPTER_HOOKS_FILE"
-    fi
+    local source_mode src="" tmp="" pairs rows line ev p a
+    source_mode=$(_ccswitch_mode)
+    case "$source_mode" in
+        live)
+            src=$(_ccswitch_live_file)
+            [ -f "$src" ] || src=""
+            ;;
+        legacy)
+            if ! _ccswitch_dump_common tmp; then
+                printf '{"mode":"ccswitch","events":{},"plugin":null,"registeredPaths":[]}\n'
+                return 0
+            fi
+            src="$tmp"
+            ;;
+        *)
+            if [ -f "$ADAPTER_HOOKS_FILE" ]; then src="$ADAPTER_HOOKS_FILE"; fi
+            ;;
+    esac
     if [ -z "$src" ]; then
-        printf '{"mode":"%s","events":{},"plugin":null,"registeredPaths":[]}\n' "$mode"
+        case "$source_mode" in
+            live) source_mode="ccswitch-live" ;;
+            legacy) source_mode="ccswitch" ;;
+            *) source_mode="file" ;;
+        esac
+        printf '{"mode":"%s","events":{},"plugin":null,"registeredPaths":[]}\n' "$source_mode"
         return 0
     fi
+    case "$source_mode" in
+        live) source_mode="ccswitch-live" ;;
+        legacy) source_mode="ccswitch" ;;
+        *) source_mode="file" ;;
+    esac
     # TSV：event\tscript（不去重、保留零事件——计数与去重交给下游 jq 聚合）
     pairs=$(jq -r '.hooks as $h |
         ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
@@ -250,9 +301,7 @@ adapter_check_detail() {
         $events[] as $e |
         $h[$e][]?.hooks[]?.command // empty |
         select(contains("tmux-ai-status")) | split(" ")[0] | "\($e)\t\(.)"' "$src" 2>/dev/null)
-    if [ "$src" != "$ADAPTER_HOOKS_FILE" ]; then
-        rm -f "$src"
-    fi
+    [ -z "$tmp" ] || rm -f "$tmp"
     # TSV：event\tscript\talive(0|1)。bash 3.2 无关联数组，逐行展开后由 jq 一次聚合。
     rows=""
     while IFS= read -r line; do
@@ -264,7 +313,7 @@ adapter_check_detail() {
     done <<EOF
 $pairs
 EOF
-    jq -R -s --arg mode "$mode" --arg events "$_CLAUDE_EVENTS" '
+    jq -R -s --arg mode "$source_mode" --arg events "$_CLAUDE_EVENTS" '
         (reduce ($events | split(" ")[]) as $e
             ({}; .[$e] = {registered: 0, alive: 0, scriptPaths: []})) as $base
         | reduce (split("\n") | .[] | select(length > 0) | split("\t")) as $r (
@@ -279,68 +328,90 @@ EOF
     ' <<<"$rows"
 }
 
-# 安装：合并式更新，保留他人（masko 等）注册的 hook。cc-switch 模式只写库
-# （~/.claude/settings.json 与实例文件都会被 cc-switch 覆盖，写了也不持久）。
+# 安装：合并式更新，保留他人（masko 等）注册的 hook。
+# legacy 模式只写库（~/.claude/settings.json 与实例文件都会被旧版 cc-switch 覆盖）；
+# live 模式（4.0.2+）写 ~/.claude/settings.json —— 新版 cc-switch 以它为共享真源，
+# 实例 settings 在 switch/漂移收敛时从该文件重新派生。
 adapter_install_hooks() {
     _install_require_jq
-    if _ccswitch_active; then
-        local tmp merged hooks_patch full_doc
-        _ccswitch_warn_gui
-        _ccswitch_dump_common tmp || return 1
-        merged=$(_claude_apply_merge "$tmp")
-        rm -f "$tmp"
-        hooks_patch=$(jq -c '{hooks: (.hooks // {})}' <<<"$merged")
-        full_doc=$(jq -c . <<<"$merged")
-        _ccswitch_upsert_hooks "$hooks_patch" "$full_doc" || return 1
-        echo "Claude hooks installed to cc-switch common config: $(_ccswitch_db)"
-        echo "Events: $_CLAUDE_EVENTS"
-        return 0
-    fi
-    [ -f "$ADAPTER_HOOKS_FILE" ] || _install_atomic_write '{}' "$ADAPTER_HOOKS_FILE"
-    local updated
-    updated=$(_claude_apply_merge "$ADAPTER_HOOKS_FILE")
-    _install_atomic_write "$updated" "$ADAPTER_HOOKS_FILE"
-    echo "Claude hooks installed to $ADAPTER_HOOKS_FILE"
+    local mode target updated
+    mode=$(_ccswitch_mode)
+    case "$mode" in
+        legacy)
+            local tmp merged hooks_patch full_doc
+            _ccswitch_warn_gui
+            _ccswitch_dump_common tmp || return 1
+            merged=$(_claude_apply_merge "$tmp")
+            rm -f "$tmp"
+            hooks_patch=$(jq -c '{hooks: (.hooks // {})}' <<<"$merged")
+            full_doc=$(jq -c . <<<"$merged")
+            _ccswitch_upsert_hooks "$hooks_patch" "$full_doc" || return 1
+            echo "Claude hooks installed to cc-switch common config (legacy): $(_ccswitch_db)"
+            echo "Events: $_CLAUDE_EVENTS"
+            return 0
+            ;;
+        live)
+            _ccswitch_warn_gui
+            target=$(_ccswitch_live_file)
+            ;;
+        *)
+            target="$ADAPTER_HOOKS_FILE"
+            ;;
+    esac
+    [ -f "$target" ] || _install_atomic_write '{}' "$target"
+    updated=$(_claude_apply_merge "$target")
+    _install_atomic_write "$updated" "$target"
+    echo "Claude hooks installed to $target"
     echo "Events: $_CLAUDE_EVENTS"
 }
 
 # 卸载：单次 jq pipeline 移除所有指向本插件的 hooks，保留他人条目。
-# cc-switch 模式：剥离前后对照生成 patch（被清空的事件键置 null = RFC 7396 删键），
+# legacy 模式：剥离前后对照生成 patch（被清空的事件键置 null = RFC 7396 删键），
 # 顶层其他字段（model/env/…）由 json_patch 天然保留。
+# live 模式：与文件模式同一套原子写（真源就是 ~/.claude/settings.json）。
 adapter_uninstall_hooks() {
     _install_require_jq
-    if _ccswitch_active; then
-        local tmp stripped cur_hooks final_hooks patch managed top_patch
-        _ccswitch_warn_gui
-        _ccswitch_dump_common tmp || return 1
-        cur_hooks=$(jq -c '.hooks // {}' "$tmp")
-        # 已无本插件条目 → no-op（否则会把保留的他人 hook 重写一遍）
-        managed=$(jq '[to_entries[] | select(.value | any(.hooks[]?.command | contains("tmux-ai-status")))] | length' <<<"$cur_hooks")
-        if [ "${managed:-0}" -eq 0 ]; then
+    local mode target updated
+    mode=$(_ccswitch_mode)
+    case "$mode" in
+        legacy)
+            local tmp stripped cur_hooks final_hooks patch managed top_patch
+            _ccswitch_warn_gui
+            _ccswitch_dump_common tmp || return 1
+            cur_hooks=$(jq -c '.hooks // {}' "$tmp")
+            # 已无本插件条目 → no-op（否则会把保留的他人 hook 重写一遍）
+            managed=$(jq '[to_entries[] | select(.value | any(.hooks[]?.command | contains("tmux-ai-status")))] | length' <<<"$cur_hooks")
+            if [ "${managed:-0}" -eq 0 ]; then
+                rm -f "$tmp"
+                echo "Claude hooks: nothing to uninstall (cc-switch common config)"
+                return 0
+            fi
+            stripped=$(_claude_apply_strip "$tmp")
+            final_hooks=$(jq -c '.hooks // {}' <<<"$stripped")
             rm -f "$tmp"
-            echo "Claude hooks: nothing to uninstall (cc-switch common config)"
+            patch=$(jq -cn --argjson cur "$cur_hooks" --argjson fin "$final_hooks" '
+                reduce ($cur | keys[]) as $k ({};
+                    if ($fin | has($k)) then .[$k] = $fin[$k] else .[$k] = null end)')
+            if [ "$patch" = "{}" ]; then
+                echo "Claude hooks: nothing to uninstall (cc-switch common config)"
+                return 0
+            fi
+            # patch 是事件级键，需包一层 {hooks: …} 才是顶层 patch（json_patch 只动 hooks）
+            top_patch=$(jq -cn --argjson p "$patch" '{hooks: $p}')
+            _ccswitch_upsert_hooks "$top_patch" "$top_patch" || return 1
+            echo "Claude hooks uninstalled from cc-switch common config (legacy)"
             return 0
-        fi
-        stripped=$(_claude_apply_strip "$tmp")
-        final_hooks=$(jq -c '.hooks // {}' <<<"$stripped")
-        rm -f "$tmp"
-        patch=$(jq -cn --argjson cur "$cur_hooks" --argjson fin "$final_hooks" '
-            reduce ($cur | keys[]) as $k ({};
-                if ($fin | has($k)) then .[$k] = $fin[$k] else .[$k] = null end)')
-        if [ "$patch" = "{}" ]; then
-            echo "Claude hooks: nothing to uninstall (cc-switch common config)"
-            return 0
-        fi
-        # patch 是事件级键，需包一层 {hooks: …} 才是顶层 patch（json_patch 只动 hooks）
-        local top_patch
-        top_patch=$(jq -cn --argjson p "$patch" '{hooks: $p}')
-        _ccswitch_upsert_hooks "$top_patch" "$top_patch" || return 1
-        echo "Claude hooks uninstalled from cc-switch common config"
-        return 0
-    fi
-    [ -f "$ADAPTER_HOOKS_FILE" ] || { echo "Claude hooks: nothing to uninstall"; return 0; }
-    local updated
-    updated=$(_claude_apply_strip "$ADAPTER_HOOKS_FILE")
-    _install_atomic_write "$updated" "$ADAPTER_HOOKS_FILE"
-    echo "Claude hooks uninstalled from $ADAPTER_HOOKS_FILE"
+            ;;
+        live)
+            _ccswitch_warn_gui
+            target=$(_ccswitch_live_file)
+            ;;
+        *)
+            target="$ADAPTER_HOOKS_FILE"
+            ;;
+    esac
+    [ -f "$target" ] || { echo "Claude hooks: nothing to uninstall"; return 0; }
+    updated=$(_claude_apply_strip "$target")
+    _install_atomic_write "$updated" "$target"
+    echo "Claude hooks uninstalled from $target"
 }
