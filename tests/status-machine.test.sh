@@ -37,6 +37,7 @@ tmux() {
             case "$fmt" in
                 # pane 解析快照：pane|path|cmd|pane_pid|server_pid|attached|title
                 *'#{pane_title}'*)
+                    : > "$FAKE_TMUX_DIR/snapshot-called"
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
                         "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
@@ -210,5 +211,12 @@ all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
 case "$all" in
     *'1.1'*) printf 'FAIL: 无 seen 标记不应显示 pane\n' >&2; exit 1 ;;
 esac
+
+# _refresh 只重建聚合，不应触发 pane 解析快照（避免每次生命周期 hook 做 BFS）
+reset_state
+rm -f "$FAKE_TMUX_DIR/snapshot-called"
+run_event claude _refresh '{}'
+[ ! -f "$FAKE_TMUX_DIR/snapshot-called" ] \
+    || { echo "FAIL: _refresh 不应解析 pane" >&2; exit 1; }
 
 printf 'status-machine tests passed\n'

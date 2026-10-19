@@ -20,7 +20,12 @@ IFS=$'\t' read -r SESSION_ID HOOK_CWD <<< "$_hook_fields"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
-resolve_tmux_pane
+# tmux 生命周期伪事件（_refresh / _session-switched）只重建聚合，
+# 不写 per-pane 状态，无需解析 pane——避免每次 refresh 都做快照/候选 BFS。
+case "$EVENT" in
+    _refresh|_session-switched) ;;
+    *) resolve_tmux_pane ;;
+esac
 # 同 pane 的并发 hooks 必须完整串行化，否则一个事件可能用过期派生结果覆盖另一个
 # PermissionRequest 已写入的审批态。
 if [ -n "$TMUX_PANE" ]; then
