@@ -108,6 +108,7 @@ tmux-ai-status <TOOL_ID> <EVENT> 脚本
     ├─ source lib-tmux-ai-status.sh
     ├─ resolve_tmux_pane()（祖先链 → session 映射 → 同工具进程树 →
     │   adapter 提示 → cwd；只有唯一候选才采用）
+    │   _refresh / _session-switched 伪事件跳过解析（只重建聚合）
     │   解析失败：不写任何 per-pane 状态，日志记录 PANE: unresolved
     ├─ case "$EVENT" → 维护 pending 集合 + 派生 STATUS 符号
     │   PreToolUse:        pending-pre += id
