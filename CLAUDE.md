@@ -53,6 +53,7 @@ scripts/
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
 - `adapter_check_detail()` — `check --json` 明细 JSON 片段（可选实现；仅 install wrapper 的 check --json 上下文调用，失败输出降级片段不报错；不得依赖 lib-install-hooks.sh——status/suppress/drift 由 wrapper 层 `_wrapper_check_json` 拼装）
+- `adapter_pane_hints()` — 可选：`TMUX_PANE` 无法由祖先链确定时，输出可能所属的 pane id（每行一个）。只读、不调用 tmux（复用核心 `_PANE_SNAPSHOT`），结果与进程树候选取交集；codex 用 `session_index.jsonl` 的 `thread_name` 匹配 pane title
 - `adapter_install_hooks()` / `adapter_uninstall_hooks()` — 安装/卸载 hooks（合并式，保留他人 hook）
 
 install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch，另含 `check` 模式输出 `ok`/`missing` 供 TUI 侦测）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
@@ -90,7 +91,7 @@ opencode 的 plugin 文件与 cc-switch 写入的 provider 条目同目录但不
 被 `tmux-ai-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"`/`"codex"`）、`SESSION_ID`。source 后自动 `_load_adapter` 载入对应适配器。提供：
 
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
-- **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
+- **TMUX_PANE 解析** `resolve_tmux_pane()` — 先看祖先链（hook 进程向上能否命中 pane_pid，权威）；祖先链不通 = daemon/脱离上下文，**继承的 TMUX_PANE 一律丢弃**（它可能指向当前 server 中真实存在但无关的 pane），再按 `pane-${SESSION_ID}` 映射 → 同工具进程树候选 → `adapter_pane_hints` → hook cwd 逐级收敛；唯一才采用，多候选不猜（保留 monitor 的 idle `-`）。失败 5s 负缓存避免高频 BFS
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`。无显式状态时补 idle `-`：前台命令是 AI 进程，或该 pane 的 `@ai_monitor_seen_<tool>` 为 1（monitor 进程树探测，覆盖 `switch`/launcher 启动场景）
 - **cc-switch provider 段（仅 codex）** — cc-switch（`switch` 命令）launch 时向 CLI 注入 `CC_SWITCH_PROVIDER`/`CC_SWITCH_PROVIDER_ID` 环境变量，CLI hooks 进程继承；**仅 `TOOL_ID=codex` 的事件捕获**并写入 pane option `@ai_provider`/`@ai_provider_id`——claude 的 provider 标签由 wrapper 在 CLI 内 statusline 显示，tmux 状态栏刻意不重复渲染，claude/opencode 的事件一律走清理分支（`set-option -u` × 2，顺带清同 pane 之前的残留），codex 无 env（非 switch 启动）同样清理。聚合行在状态符号后渲染彩色 `[provider]` 段。颜色真源 `~/.cc-switch/statusline-preferences.json`（claude/codex 桶按 providerId 合并查，显式 SGI 码映射 tmux colourN），缺省 auto = FNV-1a(name) 落在与 cc-switch wrapper 相同的 6 色 bright 调色板（64 位精确积 `& 0xFFFFFFFF` 复刻 JS `Math.imul` 的 32 位截断乘）。**非 switch 场景零存在感契约**：provider 能力本质是 switch 的需求，本插件只是承载方——无 env 时只做幂等清理，不产生任何输出（stdout 恒空满足 codex hook 契约）、不改变退出码（恒 0）、不渲染任何 provider 内容；该场景实测 exit 0 + stdout/stderr 0 字节。
   - **⚠️ 迁移备忘（2026-10-17）**：本段是过渡方案——Codex TUI 内无法显示 provider（原生 status_line 无外部命令渲染，openai/codex#17827）。**当该上游能力落地时，整体移除本段功能**：删掉 `tmux-ai-status` 入口的 env 捕获/清理块、`build_all_status` 的 provider 渲染、`_provider_prefs_lines`/`_provider_tag_colour` 与 list-panes format 中的 `#{@ai_provider}|#{@ai_provider_id}` 字段，由 cc-switch 直接在 Codex TUI 内注入标签（cc-switch-parallel 仓库 CLAUDE.md 有对应迁移条目）。迁移前保持现状。
@@ -103,8 +104,11 @@ opencode 的 plugin 文件与 cc-switch 写入的 provider 条目同目录但不
 AI CLI 事件（Claude Code / Codex）
     ↓
 tmux-ai-status <TOOL_ID> <EVENT> 脚本
+    ├─ 从 stdin JSON 提取 session_id + cwd（cwd 供 pane 消歧）
     ├─ source lib-tmux-ai-status.sh
-    ├─ resolve_tmux_pane()（进程树遍历）
+    ├─ resolve_tmux_pane()（祖先链 → session 映射 → 同工具进程树 →
+    │   adapter 提示 → cwd；只有唯一候选才采用）
+    │   解析失败：不写任何 per-pane 状态，日志记录 PANE: unresolved
     ├─ case "$EVENT" → 维护 pending 集合 + 派生 STATUS 符号
     │   PreToolUse:        pending-pre += id
     │   PermissionRequest: 早写 !/? + pending-perm += "id !/?" (优先级最高)
@@ -129,6 +133,7 @@ tmux session/client 生命周期 hook
     写 @ai_entered_time 进入时间）+ rebuild
 
 Codex 生命周期 monitor（每秒）
+    ├─ 每 60 tick 对比脚本目录内容指纹；变化 → 同 PID exec 自重启（升级自愈）
     ├─ pane_current_command=codex* 且无显式状态 → rebuild 时补 `-`
     ├─ launcher（switch/volta-shim/node…）启动时前台命令不是 codex：
     │   每 5 tick 探测进程树，命中则写 @ai_monitor_seen_codex=1；
@@ -183,6 +188,10 @@ legacy（cc-switch < 4.0.2）模式下 hooks 真源在 db 通用配置，只有�
 cc-switch 为每个 codex provider 创建独立 `CODEX_HOME`（`~/.cc-switch/instances/codex/<providerId>`），`hooks.json` 是符号链接（共享我们的安装），但 codex 的 hook 授信记录 `[hooks.state].trusted_hash` 写在**实例自己的 `config.toml`** 里。cc-switch 把 `hooks.state` 视为运行时状态、排除在共享配置之外，也不会复制到新实例 → 新 provider 首次启动时 codex 弹「Hooks need review」，未选 **Trust all** 则 hooks 全部不执行，状态栏收不到任何事件（pane 可能只显示 monitor 补的 `-`）。
 
 `trusted_hash` 是 codex 对归一化 hook 配置的指纹，bash 侧无法可靠复现（与 0.144 的结论一致），因此插件**不预写/不复制信任记录**——需用户在 codex TUI 内对每个新实例授信一次。判定方法：实例 `config.toml` 无 `hooks.state` 键 → 未授信。
+
+**codex daemon 的 pane 归属是启发式（2026-10-19）**
+
+codex 0.163 managed app-server daemon 常驻（ppid=1），hooks 在 daemon 中执行，继承的 `TMUX_PANE` 不可信（可能是当前 server 中无关的 pane）。插件用「同工具进程树候选 → thread title → cwd」收敛，只有唯一候选才采用；同名 thread 且 cwd 相同的多个 pane 会故意保持 idle `-`，不猜。根治需上游：codex 在 hook 事件中携带 pane/客户端上下文，或 cc-switch 为每个 pane 启动独立 daemon。**升级 monitor 无需手动重载**（内容指纹自检 + exec），但 hook 脚本本身仍随 npm 包路径生效。
 
 **PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
 当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
@@ -288,6 +297,8 @@ TMUXCLIHOOK_SOURCE=$PWD node installer/bin/cli.js check
 bash tests/check-json.test.sh
 bash tests/ccswitch-install.test.sh
 bash tests/opencode-config-dir.test.sh
+bash tests/pane-resolve.test.sh
+bash tests/monitor-selfcheck.test.sh
 bash tests/suppress-cross-source.test.sh
 bash tests/status-machine.test.sh
 ```
@@ -316,11 +327,11 @@ bash tests/status-machine.test.sh
 - **共享库架构**：通过 `lib-tmux-ai-status.sh` 提供通用功能，`TOOL_ID` 区分状态变量和临时文件
 - **Attached-only 显示**：`build_all_status()` 按「进入时间 → 创建时间」两级升序排列（`window_index`/`pane_index` 次之），仅显示 attached session。进入时间 = `client-session-changed` hook（attach 与 switch-client 的共同汇聚点）时 `_session-switched` 写入的 session option `@ai_entered_time`（刚进入的 session 排最后；无记录回退 `session_created`）。该 hook 对自指 switch 也触发（tmux 源码无 `old != s` 守卫），handler 用 per-client 自维护的上次 session（server option `@ai_prev_sess_<client>`）对比过滤：`cur != prev` 才算真进入。不用 `session_last_attached`：tmux 对该时间戳无条件刷新（自指 switch 也算），会污染「刚进入的排最后」的预期。不用 `client-attached`：switch-client 进入（tmuxtui 在已 attach 的 client 里切项目）不触发它。hook 命令传 `#{hook_client}`（3.7c/3.8 均展开为触发 client 名）——**不存在 `#{hook_client_name}` 变量**（tmux 任何版本都没有；误用恒展开为空，handler 的 `[ -n "$3" ]` 守卫静默跳过，entered_time 从不写入、排序退化 created 序，2026-10-16 实测踩坑）
 - **set-hook 是 upsert**：改 hook 名或从入口删除 hook 行时，tmux server 里已注册的旧 hook 不会消失（prefix+r 重载不清），需手动 `tmux set-hook -ug <hook>` 清除，否则旧命令继续触发（case 无匹配时静默 no-op，但属脏状态）
-- **进程树解析**：hook 子进程不继承 `$TMUX_PANE`，通过 `ps -o ppid` 向上遍历找到 pane PID
+- **Pane 解析与 daemon 适配（2026-10-19）**：祖先链（`ps -o ppid` 向上匹配 pane_pid）是权威信号；**祖先链不通说明 hook 跑在脱离 pane 的常驻进程里（如 codex 0.163 managed app-server daemon，ppid=1），此时继承的 `$TMUX_PANE` 一律丢弃**——实测它可能指向当前 server 中真实存在但无关的 pane（不只是「指向不存在的 pane」）。兜底顺序：session 映射（`.pane-meta-*` 校验 tool/server_pid/pane_pid/cwd，防 server 重启后 pane id 复用）→ 当前工具的进程树候选 → `adapter_pane_hints`（codex: `thread_name` ↔ pane title）→ hook cwd 与 `pane_current_path`；只有唯一候选才采用，多候选保持空（monitor 补 idle `-`）。失败结果 5s 负缓存，避免 daemon 高频 hook 反复 BFS。`adapter_pane_hints` 只读、不调用 tmux（复用核心一次性 `_PANE_SNAPSHOT`）
+- **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为。**launcher 识别（2026-10-19）**：cc-switch 的 `switch` 启动时 `pane_current_command` 是 `switch`/`volta-shim`/`node` 而非 `codex`，原实现既补不出 idle `-`、`/exit` 后也不会清状态；现对 attached 的 launcher pane 每 5 tick 做一次进程树探测（`_pane_has_tool_process`），命中即写 `@ai_monitor_seen_<tool>`，`build_all_status` 用该标记补 `-`，退出时沿用既有清理分支。**升级自重启（2026-10-19）**：monitor 启动时记录脚本目录内容指纹（`cksum`），每 60 tick 对比；npm 升级/重装替换文件后同 PID `exec` 自身重载新代码（保留 generation/server pid，`@ai_monitor_pid` 不变）。用内容指纹而非 mtime——npm 可能保留 tarball 旧 mtime。`TMUX_AI_MONITOR_RELOAD_DISABLE=1` 可关闭
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
-- **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为。**launcher 识别（2026-10-19）**：cc-switch 的 `switch` 启动时 `pane_current_command` 是 `switch`/`volta-shim`/`node` 而非 `codex`，原实现既补不出 idle `-`、`/exit` 后也不会清状态；现对 attached 的 launcher pane 每 5 tick 做一次进程树探测（`_pane_has_tool_process`），命中即写 `@ai_monitor_seen_<tool>`，`build_all_status` 用该标记补 `-`，退出时沿用既有清理分支
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
 - **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop

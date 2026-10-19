@@ -113,6 +113,49 @@ EOF
     ' <<<"$rows"
 }
 
+# 可选：TMUX_PANE 无法由祖先链确定时，提示 thread 所在 pane（供核心收窄候选）。
+# 参数: $1=session_id $2=hook_cwd；只读、不调用 tmux（复用核心 _PANE_SNAPSHOT）。
+# codex 实例配置 terminal_title=["thread"]，pane title 形如 "✳ <thread_name>"；
+# ${CODEX_HOME}/session_index.jsonl 每行 {id, thread_name, updated_at}，
+# hook 输入的 session_id 与其中的 id 一致。用归一化后的精确标题匹配，
+# 不依赖 ✳/spinner 前缀；结果再与进程树候选取交集，降低误配。
+_codex_session_index_files() {
+    local f seen=""
+    if [ -n "${CODEX_HOME:-}" ] && [ -f "${CODEX_HOME}/session_index.jsonl" ]; then
+        printf '%s\n' "${CODEX_HOME}/session_index.jsonl"
+        seen="${CODEX_HOME}/session_index.jsonl"
+    fi
+    f="${HOME}/.codex/session_index.jsonl"
+    if [ -f "$f" ] && [ "$f" != "$seen" ]; then printf '%s\n' "$f"; fi
+    for f in "${HOME}"/.cc-switch/instances/codex/*/session_index.jsonl; do
+        [ -f "$f" ] || continue
+        [ "$f" = "$seen" ] || printf '%s\n' "$f"
+    done
+}
+
+adapter_pane_hints() {
+    local sid="${1:-}" name="" idx target pane path cmd pid server attached title out=""
+    [ -n "$sid" ] || return 1
+    while IFS= read -r idx; do
+        [ -f "$idx" ] || continue
+        name=$(jq -r --arg id "$sid" 'select(.id == $id) | .thread_name // empty' \
+            "$idx" 2>/dev/null | tail -n 1)
+        [ -n "$name" ] && break
+    done < <(_codex_session_index_files)
+    [ -n "$name" ] || return 1
+    target=$(_normalize_title "$name")
+    [ -n "$target" ] || return 1
+    [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
+    while IFS='|' read -r pane path cmd pid server attached title; do
+        [ -n "$pane" ] || continue
+        [ "$(_normalize_title "$title")" = "$target" ] && out="$out $pane"
+    done <<EOF
+$_PANE_SNAPSHOT
+EOF
+    [ -n "$out" ] || return 1
+    printf '%s\n' "${out# }" | tr ' ' '\n'
+}
+
 # 从每个事件数组剔除本插件 group（command 含 tmux-ai-status），事件/hooks 清空后删键。
 _codex_strip_managed() {
     jq '

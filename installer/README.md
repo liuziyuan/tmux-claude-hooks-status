@@ -43,6 +43,8 @@ hooks 安装、tmux 集成写入的路径由「source」决定：环境变量 `T
 
 升级成功，或版本已是最新且显式传入 `--prune` 时，update 会检查另一套安装（volta packages 镜像或当前 npm 全局 prefix）是否还留有副本。发现副本时：TTY 下询问是否删除（默认不删）；非交互环境只打印警告；`--prune` 跳过询问直接删除。删除前会校验该副本未被任何 hooks 与 `~/.tmux.conf` 引用——任一检查无法确认就保留并提示先重装 hooks。**生效入口永远不删**，清理失败不影响升级结果。也可以手动收敛：卸载不再使用的那份（`npm uninstall -g tmuxclihook` 或 `volta uninstall tmuxclihook`），再从生效入口重新安装 hooks。
 
+升级后无需手动重载 tmux 插件：运行中的 `tmux-ai-monitor` 每 60 tick 对比脚本目录内容指纹，发现文件被替换会自动 `exec` 自身重载新代码（保留同一 PID 与 generation）。`TMUX_AI_MONITOR_RELOAD_DISABLE=1` 可关闭该行为。
+
 ## 功能
 
 | 菜单项 | 说明 |

@@ -7,7 +7,12 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 
 export FAKE_TMUX_DIR="$TEST_TMP/tmux"
 export TMUX_AI_STATUS_DIR="$TEST_TMP/status"
-mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR"
+# 祖先链解析：hook 进程的父进程就是本测试脚本 → 用 $$ 作为假 pane_pid，
+# 让 resolve_tmux_pane 的 ancestry 路径稳定命中 %1。
+export FAKE_PANE_PID="$$"
+export FAKE_SERVER_PID="${FAKE_SERVER_PID:-1234}"
+export FAKE_PANE_PATH="${FAKE_PANE_PATH:-$TEST_TMP/project}"
+mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR" "$FAKE_PANE_PATH"
 
 tmux() {
     local command="${1:-}"
@@ -27,12 +32,30 @@ tmux() {
             fi
             ;;
         list-panes)
-            local status="" cmd="${FAKE_PANE_CMD:-opencode}"
+            local status="" cmd="${FAKE_PANE_CMD:-opencode}" fmt="${4:-}"
             [ -f "$FAKE_TMUX_DIR/pane-status" ] && status=$(command cat "$FAKE_TMUX_DIR/pane-status")
-            # 字段：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id
-            #       |seen_claude|seen_codex|seen_opencode（monitor 标记，按 adapter 顺序）
-            printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
-                "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
+            case "$fmt" in
+                # pane 解析快照：pane|path|cmd|pane_pid|server_pid|attached|title
+                *'#{pane_title}'*)
+                    printf '%%1|%s|%s|%s|%s|1|%s\n' \
+                        "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
+                    ;;
+                # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
+                *'@ai_pane_status'*)
+                    printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
+                        "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
+                    ;;
+                # pane 前台命令 / 进程树查找
+                *'#{pane_current_command}'*) printf '%%1|%s\n' "$cmd" ;;
+                *'#{pane_pid}'*)
+                    case "$fmt" in
+                        *'|'*) printf '%%1|%s\n' "$FAKE_PANE_PID" ;;
+                        *) printf '%%1 %s\n' "$FAKE_PANE_PID" ;;
+                    esac
+                    ;;
+                *) printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
+                        "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}" ;;
+            esac
             ;;
         refresh-client)
             ;;

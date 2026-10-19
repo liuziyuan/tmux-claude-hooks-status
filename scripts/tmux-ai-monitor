@@ -20,6 +20,8 @@ MONITOR_INTERVAL="${TMUX_AI_MONITOR_INTERVAL:-1}"
 # 进程树探测节流：launcher pane 每 N 个 tick 做一次 BFS（run 循环内 _TICK 持续累加）。
 _MONITOR_PROBE_EVERY=5
 _MONITOR_TICK=0
+# 升级自检：每 N tick 对比脚本内容指纹，变化则 exec 自身重载新代码。
+_MONITOR_RECHECK_EVERY=60
 
 # 常见 launcher：switch/volta/npm 系脚本在前台时，目标 CLI 位于其子进程树中，
 # pane_current_command 不会直接等于 codex/opencode（cc-switch 的 switch 启动即如此）。
@@ -34,10 +36,11 @@ _tmux_server_pid() {
     tmux display-message -p '#{pid}' 2>/dev/null
 }
 
-_pane_current_command() {
-    local pane_id="$1"
-    tmux list-panes -a -F "#{pane_id}|#{pane_current_command}" 2>/dev/null \
-        | awk -F'|' -v id="$pane_id" '$1==id{print $2; exit}'
+# 脚本内容指纹：npm 升级可能保留 tarball 旧 mtime，用内容而不是 mtime 判升级。
+# 文件顺序固定（显式文件 + 排序后的 adapters/*.sh），cksum 跨平台可用。
+_scripts_fingerprint() {
+    ( cd "$SCRIPT_DIR" 2>/dev/null || return 1
+      cat tmux-ai-monitor lib-tmux-ai-status.sh adapters/*.sh 2>/dev/null | cksum )
 }
 
 # 无 SessionEnd 的工具名集合（惰性求值缓存）。扫 adapters/*.sh 提取
@@ -57,48 +60,9 @@ _collect_no_session_end_tools() {
     echo "$_NO_SESSION_END_TOOLS"
 }
 
-# $1=basename 命令 $2=工具进程名（如 codex/opencode）→ 是否前缀匹配
-_is_tool_command() {
-    local base="$1" name="$2"
-    case "$base" in
-        "$name"|"$name"-*|"$name"_*) return 0 ;;
-    esac
-    return 1
-}
-
-# 判定 pane 前台命令是否属于给定工具名
-_pane_command_is_tool() {
-    local pane_id="$1" name="$2" current_command
-    current_command=$(_pane_current_command "$pane_id")
-    [ -n "$current_command" ] || return 1
-    _is_tool_command "$(basename "$current_command" 2>/dev/null)" "$name"
-}
-
-# 判定 pane 进程树内是否仍有该工具进程（前台命令优先，再 BFS 遍历进程树）
-_pane_has_tool_process() {
-    local pane_id="$1" name="$2"
-    _pane_command_is_tool "$pane_id" "$name" && return 0
-
-    local pane_pid
-    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
-        | awk -v id="$pane_id" '$1==id{print $2; exit}')
-    [ -n "$pane_pid" ] || return 1
-
-    local pids="$pane_pid" next="" depth=0 p cmd base children
-    while [ "$depth" -lt 10 ] && [ -n "$pids" ]; do
-        for p in $pids; do
-            cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-            base=$(basename "$cmd" 2>/dev/null)
-            _is_tool_command "$base" "$name" && return 0
-            children=$(pgrep -P "$p" 2>/dev/null)
-            [ -n "$children" ] && next="$next $children"
-        done
-        pids="${next# }"
-        next=""
-        depth=$((depth + 1))
-    done
-    return 1
-}
+# 进程树 / 前台命令判定 helper（_is_tool_process_name、_pane_command_is_tool、
+# _pane_has_tool_process、_pane_current_command）已统一放在 lib-tmux-ai-status.sh，
+# run/tick 模式 source 后可直接使用，避免两份实现漂移。
 
 # 对每个无 SessionEnd 的工具名做生命周期检测：前台命令匹配或 launcher 进程树命中
 # → 标记见过；曾标记但前台已切走且进程树也无该工具 → 清空 pane 状态（该工具已退出）。
@@ -110,7 +74,7 @@ _monitor_no_session_end_lifecycle() {
     [ -n "$tools" ] || return 0
     for name in $tools; do
         while IFS='|' read -r pane_id current_command seen attached; do
-            if [ -n "$current_command" ] && _is_tool_command "$(basename "$current_command" 2>/dev/null)" "$name"; then
+            if [ -n "$current_command" ] && _is_tool_process_name "$(basename "$current_command" 2>/dev/null)" "$name"; then
                 [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
             elif [ "$seen" = "1" ] && ! _pane_has_tool_process "$pane_id" "$name"; then
                 tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
@@ -171,6 +135,10 @@ case "$MODE" in
         EVENT="_monitor"
         source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
 
+        # 升级自检基线；exec 失败时继续运行（execfail），避免 npm 替换文件瞬间导致 monitor 死亡。
+        _MONITOR_FP=$(_scripts_fingerprint)
+        shopt -s execfail 2>/dev/null || true
+
         cleanup_monitor_option() {
             local registered_pid
             registered_pid=$(tmux show-option -gv @ai_monitor_pid 2>/dev/null || true)
@@ -188,6 +156,17 @@ case "$MODE" in
 
             current_generation=$(tmux show-option -gv @ai_monitor_generation 2>/dev/null || true)
             [ "$current_generation" = "$generation" ] || break
+
+            # 脚本内容变化（npm 升级/重装）→ 同 PID exec 自重启，重载新代码。
+            # TMUX_AI_MONITOR_RELOAD_DISABLE=1 可关闭（运维逃生阀）。
+            if [ $((_MONITOR_TICK % _MONITOR_RECHECK_EVERY)) -eq 0 ] \
+               && [ "${TMUX_AI_MONITOR_RELOAD_DISABLE:-}" != "1" ]; then
+                _now_fp=$(_scripts_fingerprint)
+                if [ -n "$_now_fp" ] && [ "$_now_fp" != "$_MONITOR_FP" ] \
+                   && [ -x "$SCRIPT_DIR/tmux-ai-monitor" ]; then
+                    exec "$SCRIPT_DIR/tmux-ai-monitor" run "$expected_server_pid" "$generation"
+                fi
+            fi
 
             # 单次 tmux 查询失败不应永久杀死 monitor；server/generation 检查负责终止。
             _monitor_tick || true
@@ -208,8 +187,17 @@ case "$MODE" in
         _monitor_tick
         ;;
 
+    selfcheck)
+        # 诊断/测试用：当前脚本目录指纹与 $2 不同 → exit 0（需要重载）。
+        expected_fp="${2:-}"
+        [ -n "$expected_fp" ] || exit 1
+        current_fp=$(_scripts_fingerprint)
+        [ -n "$current_fp" ] && [ "$current_fp" != "$expected_fp" ] && exit 0
+        exit 1
+        ;;
+
     *)
-        echo "Usage: $0 [start|run|stop|tick]" >&2
+        echo "Usage: $0 [start|run|stop|tick|selfcheck <fingerprint>]" >&2
         exit 2
         ;;
 esac

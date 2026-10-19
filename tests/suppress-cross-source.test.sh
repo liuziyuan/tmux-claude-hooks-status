@@ -19,8 +19,12 @@ OPENCODE_WRAPPER="$ROOT/scripts/install-opencode-hooks.sh"
 ENGINE="$ROOT/scripts/tmux-ai-status"
 
 FAKE_TMUX_DIR="$TEST_TMP/tmux"
+export FAKE_TMUX_DIR
 export TMUX_AI_STATUS_DIR="$TEST_TMP/status"
-mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR"
+export FAKE_PANE_PID="$$"
+export FAKE_SERVER_PID="${FAKE_SERVER_PID:-1234}"
+export FAKE_PANE_PATH="${FAKE_PANE_PATH:-$TEST_TMP/project}"
+mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR" "$FAKE_PANE_PATH"
 
 # status-machine.test.sh 同款 fake tmux（_refresh 的 build_all_status 需要）
 tmux() {
@@ -41,7 +45,25 @@ tmux() {
             fi
             ;;
         list-panes)
-            printf '%s\n' '%1|test|1|1||1|1|bash'
+            local fmt="${4:-}" cmd="${FAKE_PANE_CMD:-bash}" status=""
+            [ -f "$FAKE_TMUX_DIR/pane-status" ] && status=$(command cat "$FAKE_TMUX_DIR/pane-status")
+            case "$fmt" in
+                *'#{pane_title}'*)
+                    printf '%%1|%s|%s|%s|%s|1|%s\n' \
+                        "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
+                    ;;
+                *'@ai_pane_status'*)
+                    printf '%s\n' '%1|test|1|1||1|1|bash'
+                    ;;
+                *'#{pane_current_command}'*) printf '%%1|%s\n' "$cmd" ;;
+                *'#{pane_pid}'*)
+                    case "$fmt" in
+                        *'|'*) printf '%%1|%s\n' "$FAKE_PANE_PID" ;;
+                        *) printf '%%1 %s\n' "$FAKE_PANE_PID" ;;
+                    esac
+                    ;;
+                *) printf '%s\n' '%1|test|1|1||1|1|bash' ;;
+            esac
             ;;
         refresh-client)
             ;;
