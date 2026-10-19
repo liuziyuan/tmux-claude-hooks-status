@@ -24,8 +24,37 @@ ADAPTER_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest Permi
 # 前台进程名：opencode 二进制无 arch 后缀（区别于 codex 的 codex-aarch64-* 等）
 ADAPTER_PROCESS_NAMES="opencode"
 
-# plugin 文件路径（XDG 全局目录，OPENCODE_CONFIG_DIR 可覆盖）
-ADAPTER_HOOKS_FILE="${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/plugins/tmux-ai-status.ts"
+# 配置目录解析（与 opencode 原生规则 + cc-switch 4.0 的设备级目录覆盖一致）：
+#   1. OPENCODE_CONFIG_DIR 环境变量——opencode 原生支持；cc-switch GUI（模型探测/WSL
+#      启动）会注入该变量
+#   2. cc-switch `~/.cc-switch/settings.json` 的 `opencodeConfigDir`（cc-switch 的
+#      「目录覆盖」真源；旧版无此键 → 自动落到 3，向后兼容）
+#   3. XDG 默认：`$XDG_CONFIG_HOME/opencode`（通常 ~/.config/opencode）
+# 注意：opencode 不像 claude/codex 那样有 per-provider 实例目录——cc-switch 对它是
+# 「additive live config」，provider 条目直接写进该目录下的 opencode.json(c)；
+# 本插件的 plugin 文件与它同目录共存，互不覆盖。
+_opencode_config_dir() {
+    if [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
+        printf '%s\n' "$OPENCODE_CONFIG_DIR"
+        return 0
+    fi
+    local settings="$HOME/.cc-switch/settings.json" dir=""
+    if [ -f "$settings" ]; then
+        dir=$(sed -n 's/.*"opencodeConfigDir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$settings" 2>/dev/null | head -n 1)
+        case "$dir" in
+            "~") dir="$HOME" ;;
+            "~/"*) dir="${HOME}/${dir:2}" ;;
+        esac
+    fi
+    if [ -n "$dir" ]; then
+        printf '%s\n' "$dir"
+    else
+        printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    fi
+}
+
+# plugin 文件路径（配置目录解析见 _opencode_config_dir）
+ADAPTER_HOOKS_FILE="$(_opencode_config_dir)/plugins/tmux-ai-status.ts"
 
 # opencode 无 SessionEnd → 退出由 tmux-ai-monitor 做进程检测
 ADAPTER_HAS_SESSION_END="false"

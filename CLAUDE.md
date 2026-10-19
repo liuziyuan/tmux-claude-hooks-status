@@ -75,6 +75,16 @@ claude adapter 的模式与行为：
 - **文件模式**：非 cc-switch 用户，行为与历史版本逐字节一致
 - TUI 侧 `adapters-meta.js` 声明 `checkViaWrapper` + `ccSwitchDb`，`detect.js` 在 db 存在时改走 wrapper `check`（bash 内按 user_version 选真源），避免 JS 文件计数误报；`check --json` 的 mode 为 `ccswitch-live` / `ccswitch`
 
+### cc-switch 下 codex / opencode 的真源（与 claude 对照）
+
+| 工具 | cc-switch 4.0 的 hooks 真源 | 本插件行为 | 旧版兼容 |
+|---|---|---|---|
+| claude | live：`~/.claude/settings.json`；legacy：db `common_config_claude` | `_ccswitch_mode` 自动选择（见上节） | legacy 写库逐字节不变 |
+| codex | `~/.codex/hooks.json`；`switch` 为每个 provider 建独立 `CODEX_HOME`，并把该文件**符号链接**进实例 | 写 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`），所有实例共享同一真源 | 写法不变；**per-instance hook 信任**见「已知限制」 |
+| opencode | `<配置目录>/plugins/`；cc-switch 对 opencode 是 additive live config（provider 条目直接写进配置目录的 `opencode.json(c)`，**无 per-provider 实例目录**） | 配置目录 = `OPENCODE_CONFIG_DIR` 环境变量 > cc-switch `settings.json` 的 `opencodeConfigDir` > `${XDG_CONFIG_HOME:-~/.config}/opencode`（`_opencode_config_dir`） | 旧版无 `opencodeConfigDir` 键 → 自动回落默认目录 |
+
+opencode 的 plugin 文件与 cc-switch 写入的 provider 条目同目录但不同文件，互不覆盖；cc-switch 重写 `opencode.json` 时只管理自己的 provider 键与已知 npm plugin 前缀。
+
 ### 共享库 `lib-tmux-ai-status.sh`
 
 被 `tmux-ai-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"`/`"codex"`）、`SESSION_ID`。source 后自动 `_load_adapter` 载入对应适配器。提供：
@@ -167,6 +177,12 @@ cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时
 legacy（cc-switch < 4.0.2）模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。**live（4.0.2+）模式不存在该限制**：真源本身就是 `~/.claude/settings.json`，裸跑与 `switch` 启动都生效。
 
 **决策（2026-10-13）**：评估过「db + 原生 settings.json 双写」方案，不做——针对 legacy 模式，双写唯一收益是覆盖裸跑场景，用户确认几乎不裸跑；代价是原生写入永久处于「被 cc-switch 覆盖 → 60s 自修复重写」的拉锯（CLAUDE.md 前文实测：原生文件会被 cc-switch 覆盖）。live 模式无需双写：原生文件即真源。若 legacy 使用模式变化再重新评估。
+
+**codex 每个新 provider 实例需重新 Trust all（2026-10-19 实测）**
+
+cc-switch 为每个 codex provider 创建独立 `CODEX_HOME`（`~/.cc-switch/instances/codex/<providerId>`），`hooks.json` 是符号链接（共享我们的安装），但 codex 的 hook 授信记录 `[hooks.state].trusted_hash` 写在**实例自己的 `config.toml`** 里。cc-switch 把 `hooks.state` 视为运行时状态、排除在共享配置之外，也不会复制到新实例 → 新 provider 首次启动时 codex 弹「Hooks need review」，未选 **Trust all** 则 hooks 全部不执行，状态栏收不到任何事件（pane 可能只显示 monitor 补的 `-`）。
+
+`trusted_hash` 是 codex 对归一化 hook 配置的指纹，bash 侧无法可靠复现（与 0.144 的结论一致），因此插件**不预写/不复制信任记录**——需用户在 codex TUI 内对每个新实例授信一次。判定方法：实例 `config.toml` 无 `hooks.state` 键 → 未授信。
 
 **PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
 当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
@@ -271,6 +287,7 @@ TMUXCLIHOOK_SOURCE=$PWD node installer/bin/cli.js check
 # bash 集成测试（check --json / cc-switch / suppress / 状态机）
 bash tests/check-json.test.sh
 bash tests/ccswitch-install.test.sh
+bash tests/opencode-config-dir.test.sh
 bash tests/suppress-cross-source.test.sh
 bash tests/status-machine.test.sh
 ```

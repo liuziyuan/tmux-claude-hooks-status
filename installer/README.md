@@ -88,6 +88,11 @@ clack 0.7 只把 ctrl+c 映射为取消（Esc 默认无效果），安装器在 
 
 live 模式以 `~/.claude/settings.json` 为共享配置真源（cc-switch 4.0.2 起不再读库里的 `common_config_claude`），写入用与文件模式相同的原子合并，他人 hook 与配置其他字段保留；legacy 模式用与 cc-switch 自身一致的 `json_patch` 更新 db。注意：cc-switch GUI 运行中会把内存缓存写回真源，安装前建议先退出 GUI（脚本会警告）；legacy 模式下不经 `switch` 直接运行的 `claude` 读不到 db 里的 hooks。
 
+**codex / opencode 的 cc-switch 真源**
+
+- **codex**：`switch` 为每个 provider 创建独立 `CODEX_HOME`（`~/.cc-switch/instances/codex/<providerId>`），并把 `~/.codex/hooks.json` 符号链接进实例，因此插件写默认（或 `$CODEX_HOME`）下的 `hooks.json` 即被所有实例共享。但 `[hooks.state]` 信任记录在实例自己的 `config.toml` 里、cc-switch 不复制——**每个新 provider 实例首次启动需在 codex TUI 内 Trust all 一次**，否则 hooks 不执行（trusted_hash 无法在 bash 侧复现，插件不预写）。
+- **opencode**：cc-switch 对它是 additive live config（无 per-provider 实例目录），provider 条目直接写进配置目录的 `opencode.json(c)`。插件目录解析为 `OPENCODE_CONFIG_DIR` > cc-switch `settings.json` 的 `opencodeConfigDir` > `${XDG_CONFIG_HOME:-~/.config}/opencode`；旧版 cc-switch 无该键时自动回落默认目录。
+
 ## Source 管理（生产默认 / 本地调试切换）
 
 `npm i -g` 装完后，hooks 安装与 tmux 集成默认使用包内自带的 `scripts/`（由 `npm publish` 前的 `prepack` 步骤从仓库根复制打包进来，见「架构」一节），开箱即用，无需仓库 checkout。
