@@ -2,9 +2,11 @@
 # tmux-ai-monitor — tmux server 级单例监控器
 #
 # 部分 AI CLI（codex、opencode）没有 SessionEnd hook，退出无法主动清空状态；codex 的
-# SessionStart 还会延迟到首个 turn。本监控器每秒根据 pane_current_command / 进程树刷新：
+# SessionStart 还会延迟到首个 turn。本监控器每秒刷新：
 #   - 前台启动此类工具、尚无 hook 状态时，显示 idle `-`
-#   - 退出返回 shell 后，清除残留 pane 状态
+#   - cc-switch 的 `switch` 启动时前台命令是 volta-shim/node 而非工具名，改为
+#     （每 N 个 tick）探测 launcher pane 的进程树来识别，并写 seen 标记供聚合补 `-`
+#   - 退出返回 shell（或进程树已无该工具）后，清除残留 pane 状态
 # 泛化实现：扫描 adapters/*.sh 找出 ADAPTER_HAS_SESSION_END="false" 的工具及其
 # ADAPTER_PROCESS_NAMES，逐个工具做生命周期检测——新增同类工具的 adapter 无需改本文件。
 # `/new`（codex）等同工具内会话切换不改变前台进程，因此不会改写已有 `✓`。
@@ -15,6 +17,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _ADAPTER_DIR="${SCRIPT_DIR}/adapters"
 MODE="${1:-start}"
 MONITOR_INTERVAL="${TMUX_AI_MONITOR_INTERVAL:-1}"
+# 进程树探测节流：launcher pane 每 N 个 tick 做一次 BFS（run 循环内 _TICK 持续累加）。
+_MONITOR_PROBE_EVERY=5
+_MONITOR_TICK=0
+
+# 常见 launcher：switch/volta/npm 系脚本在前台时，目标 CLI 位于其子进程树中，
+# pane_current_command 不会直接等于 codex/opencode（cc-switch 的 switch 启动即如此）。
+_is_launcher_command() {
+    case "$(basename "${1:-}" 2>/dev/null)" in
+        switch|volta|volta-shim|node|npx|pnpx|pnpm|yarn|bun|bunx|deno) return 0 ;;
+    esac
+    return 1
+}
 
 _tmux_server_pid() {
     tmux display-message -p '#{pid}' 2>/dev/null
@@ -86,15 +100,16 @@ _pane_has_tool_process() {
     return 1
 }
 
-# 对每个无 SessionEnd 的工具名做生命周期检测：前台命令匹配 → 标记见过；
-# 曾标记但前台已切走且进程树也无该工具 → 清空 pane 状态（该工具已退出）。
-# seen 标记按工具名区分（@ai_monitor_seen_<name>），避免多工具互相踩踏清理语义。
+# 对每个无 SessionEnd 的工具名做生命周期检测：前台命令匹配或 launcher 进程树命中
+# → 标记见过；曾标记但前台已切走且进程树也无该工具 → 清空 pane 状态（该工具已退出）。
+# seen 标记按工具名区分（@ai_monitor_seen_<name>），避免多工具互相踩踏清理语义；
+# 该标记同时是 build_all_status 给 launcher pane 补 idle `-` 的依据。
 _monitor_no_session_end_lifecycle() {
     local tools name pane_id current_command sanitized pane_dir
     tools=$(_collect_no_session_end_tools)
     [ -n "$tools" ] || return 0
     for name in $tools; do
-        while IFS='|' read -r pane_id current_command seen; do
+        while IFS='|' read -r pane_id current_command seen attached; do
             if [ -n "$current_command" ] && _is_tool_command "$(basename "$current_command" 2>/dev/null)" "$name"; then
                 [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
             elif [ "$seen" = "1" ] && ! _pane_has_tool_process "$pane_id" "$name"; then
@@ -103,8 +118,17 @@ _monitor_no_session_end_lifecycle() {
                 sanitized="${pane_id//[^a-zA-Z0-9]/_}"
                 pane_dir="${_STATUS_DIR}/${sanitized}"
                 rm -rf "$pane_dir" 2>/dev/null
+            elif [ "$seen" != "1" ] \
+                 && [ "${attached:-0}" -gt 0 ] \
+                 && [ $((_MONITOR_TICK % _MONITOR_PROBE_EVERY)) -eq 0 ] \
+                 && _is_launcher_command "$current_command" \
+                 && _pane_has_tool_process "$pane_id" "$name"; then
+                # launcher（switch/volta-shim/node）启动：前台命令不是工具名，
+                # 但进程树里有。标记 seen 后 build_all_status 才会补 idle `-`，
+                # 工具退出时也才会走上面的清理分支（否则残留状态永不清）。
+                tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
             fi
-        done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_monitor_seen_${name}}" 2>/dev/null)
+        done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_monitor_seen_${name}}|#{session_attached}" 2>/dev/null)
     done
 }
 
@@ -118,6 +142,7 @@ _monitor_tick() {
         tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || return 1
         tmux refresh-client -S 2>/dev/null || true
     fi
+    _MONITOR_TICK=$((_MONITOR_TICK + 1))
     return 0
 }
 
