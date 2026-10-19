@@ -168,20 +168,13 @@ _provider_tag_colour() {
 build_all_status() {
     ALL=""
     cur_sess=""
-    local _ai_names _fmt _n
+    local _ai_names
     _ai_names=$(_collect_ai_process_names)
-    # 动态追加上 monitor 的 seen 标记（无 SessionEnd 工具的进程树探测结果）。
-    # switch/volta-shim 启动的 pane 前台命令不是 codex，必须靠该标记补 idle `-`。
-    _fmt="#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}|#{@ai_provider}|#{@ai_provider_id}"
-    for _n in $_ai_names; do
-        _fmt="$_fmt|#{@ai_monitor_seen_$_n}"
-    done
-    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _created _entered cur_cmd prov_name prov_id _seen_flags; do
+    while IFS='|' read -r pane_id session_name win_idx pane_idx claude_status _attached _created _entered cur_cmd prov_name prov_id; do
         local pane_status="$claude_status"
         if [ -z "$pane_status" ]; then
             # 无显式状态：若前台是 AI 进程（codex 首个 turn 前空窗期），补 idle。
             # 进程名集合从所有 adapter 汇总，前缀匹配（codex-aarch64-* 等）。
-            # 前台命令是 switch/volta-shim 时改为读 monitor 的进程树标记。
             local _cmd_base _n _is_ai=0
             _cmd_base=$(basename "$cur_cmd" 2>/dev/null)
             for _n in $_ai_names; do
@@ -189,9 +182,6 @@ build_all_status() {
                     "$_n"|"$_n"-*|"$_n"_*) _is_ai=1; break ;;
                 esac
             done
-            if [ "$_is_ai" = "0" ]; then
-                case "$_seen_flags" in *1*) _is_ai=1 ;; esac
-            fi
             [ "$_is_ai" = "1" ] && pane_status="-" || continue
         fi
         local session_block="#[bg=#6272A4,fg=#F8F8F2] ${session_name} #[bg=default,fg=default]"
@@ -222,7 +212,7 @@ build_all_status() {
     # 自指 switch 由 handler 的 per-client prev 对比滤除）
     # ② session_created（无进入记录时回退创建序）。不用 session_last_attached——
     # tmux 的 server_client_set_session 无条件刷新该时间戳（自指 switch 也算），污染排序。
-    done < <(tmux list-panes -a -F "$_fmt" 2>/dev/null | awk -F'|' -v OFS='|' '$6>0{if($8=="")$8=$7; print}' | sort -t'|' -k8,8n -k7,7n -k2,2 -k3,3n -k4,4n)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}|#{@ai_provider}|#{@ai_provider_id}" 2>/dev/null | awk -F'|' -v OFS='|' '$6>0{if($8=="")$8=$7; print}' | sort -t'|' -k8,8n -k7,7n -k2,2 -k3,3n -k4,4n)
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
