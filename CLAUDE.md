@@ -61,12 +61,19 @@ install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原�
 
 ### cc-switch 通用配置真源（claude adapter）
 
-用户经 cc-switch（GUI + `switch` 命令）管理多供应商配置时，claude 的 hooks 唯一持久真源是 `~/.cc-switch/cc-switch.db`（SQLite）`settings` 表的 `common_config_claude`：`switch` 启动时把它深合并进实例 `settings.json`（provider `meta.commonConfigEnabled: true`），而 `~/.claude/settings.json` 与实例文件都会被 cc-switch 覆盖，直接写它们不持久。claude adapter 因此分两种模式：
+用户经 cc-switch（GUI + `switch` 命令）管理多供应商配置时，claude 的 hooks 持久真源随 cc-switch 版本变化（判定规则与 cc-switch CLI `detectSharedConfigMode` 一致，`CC_SWITCH_SHARED_SOURCE=live|legacy` 可显式覆盖）：
 
-- **门禁 `_ccswitch_active`**：db 存在 && `sqlite3` 可用 && `settings` 表可查（不要求 key 存在，缺失由 upsert 建行；sqlite3 缺失 → 整体回退文件模式）
-- **active 模式**：install/uninstall/integrity 只操作通用配置——复用与文件模式相同的 jq 合并/剥离/计数核心（`_CLAUDE_JQ_MERGE/_STRIP/_COUNT`），写入用与 cc-launch 同款 `json_patch` upsert（RFC 7396，只动 `hooks` 键，他人 hook 与顶层其他字段保留）。GUI 运行中写入前 stderr 警告（其内存缓存可能在退出时全量回写覆盖 db，实测发生过；tmux 活跃时 60s 自修复会重写）
+- **live（cc-switch 4.0.2+，db `PRAGMA user_version >= 20`）**：真源是 `~/.claude/settings.json`（cc-switch 把共享配置的「用户键」投影给实例，`hooks` 在投影范围内）。4.0.2 起 cc-switch 不再读库里的 `common_config_claude`，该键仅作迁移快照——**新机器上写库等于写进死信**（2026-10-19 根因：旧版检测只看 db 存在，导致安装报成功但 hooks 从不进入 settings）。
+- **legacy（旧版，`user_version < 20` 或读不到）**：真源是 `~/.cc-switch/cc-switch.db`（SQLite）`settings` 表的 `common_config_claude`，`switch` 启动时深合并进实例 `settings.json`（provider `meta.commonConfigEnabled: true`）。
+
+claude adapter 的模式与行为：
+
+- **模式判定 `_ccswitch_mode`**：db 存在 && `sqlite3` 可用 && `settings` 表可查 → 按 `PRAGMA user_version` 返回 `live`/`legacy`；任一门禁不过（含 sqlite3 缺失）→ `none`，整体回退文件模式。不要求 key 存在（legacy 由 upsert 建行）
+- **legacy 模式**：install/uninstall/integrity 只操作通用配置——复用与文件模式相同的 jq 合并/剥离/计数核心（`_CLAUDE_JQ_MERGE/_STRIP/_COUNT`），写入用与 cc-launch 同款 `json_patch` upsert（RFC 7396，只动 `hooks` 键，他人 hook 与顶层其他字段保留）
+- **live 模式**：写入目标是 `$HOME/.claude/settings.json`（cc-switch 硬编码该路径，**不随 `CLAUDE_CONFIG_DIR` 变**——后者指向 `switch` 实例目录），复用文件模式的原子写与合并逻辑；实例 settings 在下次 `switch`/漂移收敛时从 live 真源重新派生
+- **两种 cc-switch 模式**写入前都做 GUI 运行中 stderr 警告（其内存缓存可能在退出时全量回写覆盖真源，实测发生过；tmux 活跃时 60s 自修复会重写）
 - **文件模式**：非 cc-switch 用户，行为与历史版本逐字节一致
-- TUI 侧 `adapters-meta.js` 声明 `checkViaWrapper` + `ccSwitchDb`，`detect.js` 在 db 存在时改走 wrapper `check`（bash 内 sqlite 判定），避免 JS 文件计数误报
+- TUI 侧 `adapters-meta.js` 声明 `checkViaWrapper` + `ccSwitchDb`，`detect.js` 在 db 存在时改走 wrapper `check`（bash 内按 user_version 选真源），避免 JS 文件计数误报；`check --json` 的 mode 为 `ccswitch-live` / `ccswitch`
 
 ### 共享库 `lib-tmux-ai-status.sh`
 
@@ -153,11 +160,11 @@ cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时
 
 用户显式卸载（suppressed 标记写入）后，GUI 旧内存缓存回写 db 会把本插件条目带回真源。标记只挡自动修复路径，不做「负向修复」主动剥条目——与外部应用对拉风险大于收益。表现为 check 又变 ok（「已装」）。缓解：uninstall 前有 `_ccswitch_warn_gui` 警告；用户退出 GUI 后重跑 uninstall 即可。
 
-**非 `switch` 启动的裸 claude 无状态**
+**非 `switch` 启动的裸 claude 无状态（仅 legacy 模式）**
 
-cc-switch 模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。
+legacy（cc-switch < 4.0.2）模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。**live（4.0.2+）模式不存在该限制**：真源本身就是 `~/.claude/settings.json`，裸跑与 `switch` 启动都生效。
 
-**决策（2026-10-13）**：评估过「db + 原生 settings.json 双写」方案，不做。双写唯一收益是覆盖裸跑场景，用户确认几乎不裸跑；代价是原生写入永久处于「被 cc-switch 覆盖 → 60s 自修复重写」的拉锯（CLAUDE.md 前文实测：原生文件会被 cc-switch 覆盖）。若未来使用模式变化再重新评估，届时应做成 option 开关式、尽力而为的双写。
+**决策（2026-10-13）**：评估过「db + 原生 settings.json 双写」方案，不做——针对 legacy 模式，双写唯一收益是覆盖裸跑场景，用户确认几乎不裸跑；代价是原生写入永久处于「被 cc-switch 覆盖 → 60s 自修复重写」的拉锯（CLAUDE.md 前文实测：原生文件会被 cc-switch 覆盖）。live 模式无需双写：原生文件即真源。若 legacy 使用模式变化再重新评估。
 
 **PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
 当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
