@@ -12,7 +12,10 @@ EVENT="$2"
 
 INPUT=$(cat)
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)
+# 一次 jq 提取：session_id + hook cwd（codex/claude 均提供 cwd；
+# TMUX_PANE 无法解析时 cwd 用于 pane 消歧）
+_hook_fields=$(printf '%s' "$INPUT" | jq -r '[(.session_id // ""), (.cwd // "")] | @tsv' 2>/dev/null)
+IFS=$'\t' read -r SESSION_ID HOOK_CWD <<< "$_hook_fields"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
@@ -252,7 +255,10 @@ case "$EVENT" in
     ;;
 esac
 
-tmux set-option -g @ai_status "$STATUS" 2>/dev/null || true
+# pane 解析失败时不写全局状态（避免把无归属事件当成有效状态）
+if [ -n "$TMUX_PANE" ]; then
+    tmux set-option -g @ai_status "$STATUS" 2>/dev/null || true
+fi
 
 # 构造事件块详情行：
 #   tool:  <tool_name>  id=<short tool_use_id>

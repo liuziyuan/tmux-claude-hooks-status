@@ -61,55 +61,265 @@ _pane_sanitized() {
 }
 
 _pane_dir() {
+    [ -n "$TMUX_PANE" ] || return 1
     echo "${_STATUS_DIR}/$(_pane_sanitized)"
 }
 
 _ensure_pane_dir() {
-    local dir; dir=$(_pane_dir)
+    local dir; dir=$(_pane_dir) || return 1
     [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null
 }
 
-# --- TMUX_PANE 解析 ---
-# hook 子进程不继承 $TMUX_PANE，通过进程树向上查找所属 pane
-resolve_tmux_pane() {
-    if [ -z "$TMUX_PANE" ]; then
-        if [ -n "$TMUX" ]; then
-            :
-        elif command -v tmux &>/dev/null; then
-            :
-        else
-            return
-        fi
-        local check_pid=$$
-        while [ "${check_pid:-0}" -gt 1 ]; do
-            local found
-            found=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
-                    | awk -v pid="$check_pid" '$2==pid{print $1; exit}')
-            if [ -n "$found" ]; then TMUX_PANE="$found"; break; fi
-            check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d '[:space:]')
-        done
-    fi
+# --- Pane 解析 ---
+# 继承的 $TMUX_PANE 可能来自长期存活的进程（如 codex managed app-server daemon）。
+# 关键：daemon 的继承值甚至可能指向当前 server 中真实存在、但与本会话无关的 pane，
+# 所以「server pid 匹配 + pane 存在」不足以信任它。判定顺序：
+#   1) 祖先链：hook 进程向上能否命中某个 pane 的 pane_pid（权威）
+#   2) 祖先链不通 = daemon/脱离上下文 → 继承值一律丢弃
+#   3) session 映射（带 server/pane_pid/tool/cwd 元数据校验）
+#   4) 同工具进程树候选 → adapter 提示 → hook cwd 逐级收敛
+# 只有收敛到唯一候选才采用；多候选不猜（保持空，由 monitor 显示 idle `-`）。
+
+HOOK_CWD="${HOOK_CWD:-}"
+_PANE_SNAPSHOT=""
+_PANE_SNAPSHOT_OK=0
+_CURRENT_SERVER_PID=""
+_TMUX_PANE_SOURCE=""
+
+# 一次性快照：pane_id|path|current_command|pane_pid|server_pid|attached|title
+# title 放最后：read 会把剩余内容（含 '|'）并入最后一个变量。
+_load_pane_snapshot() {
+    _PANE_SNAPSHOT=""
+    _PANE_SNAPSHOT_OK=0
+    _CURRENT_SERVER_PID=""
+    command -v tmux >/dev/null 2>&1 || return 1
+    _PANE_SNAPSHOT=$(tmux list-panes -a -F \
+        '#{pane_id}|#{pane_current_path}|#{pane_current_command}|#{pane_pid}|#{pid}|#{session_attached}|#{pane_title}' \
+        2>/dev/null)
+    [ -n "$_PANE_SNAPSHOT" ] || return 1
+    _PANE_SNAPSHOT_OK=1
+    _CURRENT_SERVER_PID=$(printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' 'NR==1{print $5}')
+    return 0
 }
 
-# --- Pane ID 持久化（供 SessionEnd 回读）---
-# 注意: SessionStart/SessionEnd 事件不含 session_id，_save_pane_id 在这两事件中不会保存。
-# 映射由后续事件（PreToolUse、PermissionRequest 等）建立。
-# SessionEnd 回退链: resolve_tmux_pane → _load_pane_id → _cleanup_stale_panes。
-# 若 Claude 会话全程无工具调用，pane 状态可能残留最多 60s（直到下次 cleanup）。
+_snapshot_field() {  # $1=pane_id $2=字段号
+    [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
+    printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' -v id="$1" -v n="$2" '$1==id{print $n; exit}'
+}
+
+_snapshot_has_pane() {  # $1=pane_id
+    [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
+    printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' -v id="$1" '$1==id{found=1} END{exit !found}'
+}
+
+# 从当前进程沿父链向上匹配 pane_pid；命中即返回该 pane（权威信号）。
+_pane_from_ancestry() {
+    local pid=$$ depth=0 found
+    while [ "${pid:-0}" -gt 1 ] && [ "$depth" -lt 24 ]; do
+        found=$(printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' -v p="$pid" '$4==p{print $1; exit}')
+        if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+# 当前工具在 attached pane 中的候选集合（进程树含 ADAPTER_PROCESS_NAMES）。
+_pane_process_candidates() {
+    local names="${ADAPTER_PROCESS_NAMES:-}" id path cmd pid server attached title
+    [ -n "$names" ] || return 1
+    [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
+    while IFS='|' read -r id path cmd pid server attached title; do
+        [ -n "$id" ] || continue
+        [ "${attached:-0}" -gt 0 ] || continue
+        if _pid_tree_has_names "$pid" "$names"; then printf '%s\n' "$id"; fi
+    done <<EOF
+$_PANE_SNAPSHOT
+EOF
+}
+
+# 取交集（按 $1 的顺序）；过滤结果为空时保持原集合。
+_intersect_panes() {
+    local base="$1" filter="$2" out="" p
+    [ -n "$filter" ] || { printf '%s\n' "$base"; return; }
+    filter=$(printf '%s' "$filter" | tr '\n' ' ')
+    for p in $base; do
+        case " $filter " in *" $p "*) out="$out $p" ;; esac
+    done
+    [ -n "$out" ] && printf '%s\n' "${out# }" || printf '%s\n' "$base"
+}
+
+_narrow_panes_by_adapter() {
+    local base="$1" hints=""
+    declare -f adapter_pane_hints >/dev/null 2>&1 || { printf '%s\n' "$base"; return; }
+    hints=$(adapter_pane_hints "${SESSION_ID:-}" "$HOOK_CWD" 2>/dev/null)
+    _intersect_panes "$base" "$hints"
+}
+
+_narrow_panes_by_cwd() {
+    local base="$1" want="" matches="" id path cmd pid server attached title
+    [ -n "${HOOK_CWD:-}" ] || { printf '%s\n' "$base"; return; }
+    want=$(_normalize_path "$HOOK_CWD") || want="${HOOK_CWD%/}"
+    while IFS='|' read -r id path cmd pid server attached title; do
+        [ -n "$id" ] || continue
+        [ "$(_normalize_path "$path")" = "$want" ] && matches="$matches $id"
+    done <<EOF
+$_PANE_SNAPSHOT
+EOF
+    _intersect_panes "$base" "$matches"
+}
+
+# 路径归一化：去尾斜杠 + 解析符号链接（解析失败时保留原路径）。
+_normalize_path() {
+    local p="$1" phys
+    [ -n "$p" ] || return 1
+    while [ "${p%/}" != "$p" ] && [ "$p" != "/" ]; do p="${p%/}"; done
+    phys=$(cd "$p" 2>/dev/null && pwd -P) && p="$phys"
+    printf '%s' "$p"
+}
+
+# 标题归一化：仅剥已知前缀（✳ / *）与首尾空白；不删非字母字符，避免破坏中文。
+_normalize_title() {
+    local t="$1"
+    t=$(printf '%s' "$t" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    case "$t" in
+        "✳"*) t="${t#✳}" ;;
+        "*"*)  t="${t#\*}" ;;
+    esac
+    printf '%s' "$t" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+# 解析失败的负缓存：避免 daemon 高频事件反复枚举 pane + BFS。
+_resolve_negative_path() { printf '%s/.resolve-ts-%s' "$_STATUS_DIR" "${SESSION_ID:-unknown}"; }
+_resolve_recently_failed() {
+    local f ts age
+    f=$(_resolve_negative_path)
+    [ -f "$f" ] || return 1
+    ts=$(cat "$f" 2>/dev/null)
+    [ -n "$ts" ] || return 1
+    age=$(( $(date +%s) - ts ))
+    [ "$age" -ge 0 ] && [ "$age" -lt 5 ]
+}
+_mark_resolve_failed() {
+    mkdir -p "$_STATUS_DIR" 2>/dev/null || true
+    date +%s > "$(_resolve_negative_path)" 2>/dev/null || true
+}
+_clear_resolve_failed() { rm -f "$(_resolve_negative_path)" 2>/dev/null || true; }
+
+resolve_tmux_pane() {
+    local inherited="${TMUX_PANE:-}" pane candidates n
+
+    TMUX_PANE=""
+    _TMUX_PANE_SOURCE=""
+
+    # 1) 祖先链是权威信号（普通启动 / 旧 cc-switch / Claude 的 pane 内 hook）
+    _load_pane_snapshot || return 1
+    pane=$(_pane_from_ancestry)
+    if [ -n "$pane" ]; then
+        TMUX_PANE="$pane"
+        _TMUX_PANE_SOURCE="ancestry"
+        if [ -n "$inherited" ] && [ "$inherited" != "$pane" ]; then
+            _ai_log "PANE: inherited '$inherited' overridden by ancestry '$pane' (tool=$TOOL_ID)"
+        fi
+        _clear_resolve_failed
+        return 0
+    fi
+
+    # 2) 祖先链没有 pane = daemon / 脱离上下文：继承值可能指向当前 server 中
+    #    真实存在但无关的 pane，一律丢弃，走映射与多信号收敛。
+    if [ -n "${SESSION_ID:-}" ] && _load_pane_id; then
+        _TMUX_PANE_SOURCE="mapping"
+        _clear_resolve_failed
+        return 0
+    fi
+
+    if _resolve_recently_failed; then
+        return 1
+    fi
+
+    # 3) 同工具进程树候选 → adapter 提示 → hook cwd
+    candidates=$(_pane_process_candidates)
+    if [ -n "$candidates" ]; then
+        n=$(printf '%s\n' "$candidates" | grep -c .)
+        if [ "$n" -gt 1 ]; then
+            candidates=$(_narrow_panes_by_adapter "$candidates")
+            n=$(printf '%s\n' "$candidates" | grep -c .)
+        fi
+        if [ "$n" -gt 1 ] && [ -n "${HOOK_CWD:-}" ]; then
+            candidates=$(_narrow_panes_by_cwd "$candidates")
+            n=$(printf '%s\n' "$candidates" | grep -c .)
+        fi
+        if [ "$n" -eq 1 ]; then
+            TMUX_PANE="${candidates%%$'\n'*}"
+            _TMUX_PANE_SOURCE="process"
+            _clear_resolve_failed
+            _ai_log "PANE: '$inherited' → '$TMUX_PANE' (tool=$TOOL_ID, detached, resolved)"
+            return 0
+        fi
+    fi
+
+    _mark_resolve_failed
+    _ai_log "PANE: unresolved (inherited='${inherited}' tool=$TOOL_ID session=${SESSION_ID:-?} cwd=${HOOK_CWD:-?} candidates='${candidates:-}')"
+    return 1
+}
+
+# --- Pane ID 持久化（供后续事件/SessionEnd 回读）---
+# 映射文件 pane-${SESSION_ID} 保持单行 pane id（既有清理逻辑依赖）；
+# 旁路 .pane-meta-${SESSION_ID} 记录 tool/server_pid/pane_pid/cwd，用于识别
+# 「server 重启后 pane id 被复用」等陈旧映射。只有成功解析（_TMUX_PANE_SOURCE
+# 非空）才落盘，避免把猜测持久化。
 _save_pane_id() {
-    [ -n "$TMUX_PANE" ] && [ -n "$SESSION_ID" ] && { _ensure_pane_dir; echo "$TMUX_PANE" > "$(_pane_dir)/pane-${SESSION_ID}"; }
+    [ -n "$TMUX_PANE" ] && [ -n "${SESSION_ID:-}" ] || return 0
+    [ -n "${_TMUX_PANE_SOURCE:-}" ] || return 0
+    _ensure_pane_dir || return 0
+    local dir
+    dir=$(_pane_dir) || return 0
+    printf '%s\n' "$TMUX_PANE" > "$dir/pane-${SESSION_ID}"
+    if [ "$_PANE_SNAPSHOT_OK" = "1" ]; then
+        printf '1\t%s\t%s\t%s\t%s\n' \
+            "${TOOL_ID:-}" "${_CURRENT_SERVER_PID:-}" \
+            "$(_snapshot_field "$TMUX_PANE" 4)" "$(_snapshot_field "$TMUX_PANE" 2)" \
+            > "$dir/.pane-meta-${SESSION_ID}" 2>/dev/null || true
+    fi
 }
 _load_pane_id() {
-    [ -z "$SESSION_ID" ] && return 1
-    local f
+    [ -n "${SESSION_ID:-}" ] || return 1
+    [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
+    local f pane dir meta ver mtool mserver mpid mpath cpid
     for f in "${_STATUS_DIR}"/*/pane-${SESSION_ID}; do
         [ -f "$f" ] || continue
-        TMUX_PANE=$(cat "$f" 2>/dev/null) && [ -n "$TMUX_PANE" ] && return 0
+        pane=$(head -n 1 "$f" 2>/dev/null)
+        [ -n "$pane" ] || continue
+        dir="${f%/*}"
+        meta="$dir/.pane-meta-${SESSION_ID}"
+
+        # pane 已不存在：确定失效，连元数据一起删除
+        if ! _snapshot_has_pane "$pane"; then
+            rm -f "$f" "$meta" 2>/dev/null || true
+            continue
+        fi
+        # 旧版映射（无 meta）不可信：忽略，让本次重新解析覆盖
+        [ -f "$meta" ] || continue
+        IFS=$'\t' read -r ver mtool mserver mpid mpath < "$meta"
+        [ "$ver" = "1" ] || continue
+        [ "$mtool" = "${TOOL_ID:-}" ] || continue
+        [ -n "$_CURRENT_SERVER_PID" ] && [ "$mserver" = "$_CURRENT_SERVER_PID" ] || continue
+        cpid=$(_snapshot_field "$pane" 4)
+        [ "$mpid" = "$cpid" ] || continue
+        # hook cwd 与映射时的 pane 路径不一致 → 会话已迁移，不采用
+        if [ -n "${HOOK_CWD:-}" ] && [ -n "$mpath" ]; then
+            [ "$(_normalize_path "$mpath")" = "$(_normalize_path "$HOOK_CWD")" ] || continue
+        fi
+
+        TMUX_PANE="$pane"
+        return 0
     done
     return 1
 }
 _clear_pane_id() {
-    [ -n "$SESSION_ID" ] && rm -f "$(_pane_dir)/pane-${SESSION_ID}"
+    [ -n "$TMUX_PANE" ] && [ -n "${SESSION_ID:-}" ] || return 0
+    local dir; dir=$(_pane_dir) || return 0
+    rm -f "$dir/pane-${SESSION_ID}" "$dir/.pane-meta-${SESSION_ID}" 2>/dev/null
 }
 
 # --- cc-switch provider 标签 ---
@@ -453,29 +663,40 @@ _new_session_owns_pane() {
 # BFS 遍历 pane 的进程树，检查是否有 AI CLI 进程。
 # 进程名集合从所有 adapter 的 ADAPTER_PROCESS_NAMES 汇总（_collect_ai_process_names），
 # 前缀匹配（codex 二进制常为 codex-aarch64-* 等带后缀名）。
-_pane_has_ai_process() {
+# $1=basename 命令 $2=工具进程名（如 codex/opencode）→ 是否前缀匹配
+_is_tool_process_name() {
+    case "${1:-}" in
+        "$2"|"$2"-*|"$2"_*) return 0 ;;
+    esac
+    return 1
+}
+
+_pane_current_command() {  # $1=pane_id → 前台命令
     local pane_id="$1"
-    local pane_pid
-    # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
-    # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
-    # 邻近 pane 的 AI 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
-    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
-        | awk -v id="$pane_id" '$1==id{print $2; exit}')
-    [ -z "$pane_pid" ] && return 1
-    local ai_names
-    ai_names=$(_collect_ai_process_names)
-    local pids="$pane_pid" next="" depth=0
+    tmux list-panes -a -F "#{pane_id}|#{pane_current_command}" 2>/dev/null \
+        | awk -F'|' -v id="$pane_id" '$1==id{print $2; exit}'
+}
+
+_pane_command_is_tool() {  # $1=pane_id $2=工具名
+    local current_command
+    current_command=$(_pane_current_command "$1")
+    [ -n "$current_command" ] || return 1
+    _is_tool_process_name "$(basename "$current_command" 2>/dev/null)" "$2"
+}
+
+# 从给定 pid 出发 BFS，匹配进程名集合（空格分隔，前缀匹配）。
+_pid_tree_has_names() {  # $1=pane_pid $2=names
+    local pane_pid="$1" names="$2"
+    local pids next depth p cmd base name children
+    [ -n "$pane_pid" ] || return 1
+    pids="$pane_pid"; next=""; depth=0
     while [ $depth -lt 10 ] && [ -n "$pids" ]; do
         for p in $pids; do
-            local cmd base name
             cmd=$(ps -o comm= -p "$p" 2>/dev/null)
             base=$(basename "$cmd" 2>/dev/null)
-            for name in $ai_names; do
-                case "$base" in
-                    "$name"|"$name"-*|"$name"_*) return 0 ;;
-                esac
+            for name in $names; do
+                _is_tool_process_name "$base" "$name" && return 0
             done
-            local children
             children=$(pgrep -P "$p" 2>/dev/null)
             [ -n "$children" ] && next="$next $children"
         done
@@ -484,6 +705,29 @@ _pane_has_ai_process() {
         depth=$((depth + 1))
     done
     return 1
+}
+
+# BFS pane 进程树，匹配给定进程名集合（空格分隔，前缀匹配）。
+_pane_has_process_names() {  # $1=pane_id $2=names
+    local pane_id="$1" pane_pid
+    # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
+    # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
+    # 邻近 pane 的 AI 进程而误判。必须用 -a 全局列 + 精确匹配 pane_id。
+    pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
+        | awk -v id="$pane_id" '$1==id{print $2; exit}')
+    [ -z "$pane_pid" ] && return 1
+    _pid_tree_has_names "$pane_pid" "$2"
+}
+
+# 判定 pane 进程树内是否仍有该工具进程（前台命令优先，再 BFS 遍历进程树）
+_pane_has_tool_process() {  # $1=pane_id $2=工具名
+    _pane_command_is_tool "$1" "$2" && return 0
+    _pane_has_process_names "$1" "$2"
+}
+
+# 所有 adapter 汇总的 AI 进程名
+_pane_has_ai_process() {  # $1=pane_id
+    _pane_has_process_names "$1" "$(_collect_ai_process_names)"
 }
 
 # 检查 pane 的所有 pane-id 文件是否过期（> 5 min），再验证进程树
