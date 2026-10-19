@@ -81,7 +81,7 @@ claude adapter 的模式与行为：
 
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`，自动轮转（>100KB 截断至 50KB）
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 通过进程树向上查找所属 pane
-- **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`
+- **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`。无显式状态时补 idle `-`：前台命令是 AI 进程，或该 pane 的 `@ai_monitor_seen_<tool>` 为 1（monitor 进程树探测，覆盖 `switch`/launcher 启动场景）
 - **cc-switch provider 段（仅 codex）** — cc-switch（`switch` 命令）launch 时向 CLI 注入 `CC_SWITCH_PROVIDER`/`CC_SWITCH_PROVIDER_ID` 环境变量，CLI hooks 进程继承；**仅 `TOOL_ID=codex` 的事件捕获**并写入 pane option `@ai_provider`/`@ai_provider_id`——claude 的 provider 标签由 wrapper 在 CLI 内 statusline 显示，tmux 状态栏刻意不重复渲染，claude/opencode 的事件一律走清理分支（`set-option -u` × 2，顺带清同 pane 之前的残留），codex 无 env（非 switch 启动）同样清理。聚合行在状态符号后渲染彩色 `[provider]` 段。颜色真源 `~/.cc-switch/statusline-preferences.json`（claude/codex 桶按 providerId 合并查，显式 SGI 码映射 tmux colourN），缺省 auto = FNV-1a(name) 落在与 cc-switch wrapper 相同的 6 色 bright 调色板（64 位精确积 `& 0xFFFFFFFF` 复刻 JS `Math.imul` 的 32 位截断乘）。**非 switch 场景零存在感契约**：provider 能力本质是 switch 的需求，本插件只是承载方——无 env 时只做幂等清理，不产生任何输出（stdout 恒空满足 codex hook 契约）、不改变退出码（恒 0）、不渲染任何 provider 内容；该场景实测 exit 0 + stdout/stderr 0 字节。
   - **⚠️ 迁移备忘（2026-10-17）**：本段是过渡方案——Codex TUI 内无法显示 provider（原生 status_line 无外部命令渲染，openai/codex#17827）。**当该上游能力落地时，整体移除本段功能**：删掉 `tmux-ai-status` 入口的 env 捕获/清理块、`build_all_status` 的 provider 渲染、`_provider_prefs_lines`/`_provider_tag_colour` 与 list-panes format 中的 `#{@ai_provider}|#{@ai_provider_id}` 字段，由 cc-switch 直接在 Codex TUI 内注入标签（cc-switch-parallel 仓库 CLAUDE.md 有对应迁移条目）。迁移前保持现状。
 - **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配所有 adapter 汇总的进程名（前缀匹配）
@@ -120,7 +120,9 @@ tmux session/client 生命周期 hook
 
 Codex 生命周期 monitor（每秒）
     ├─ pane_current_command=codex* 且无显式状态 → rebuild 时补 `-`
-    ├─ 对见过 Codex 的 pane 写 @ai_codex_monitor_seen=1
+    ├─ launcher（switch/volta-shim/node…）启动时前台命令不是 codex：
+    │   每 5 tick 探测进程树，命中则写 @ai_monitor_seen_codex=1；
+    │   build_all_status 据此给无显式状态的 pane 补 `-`（cc-switch 场景）
     ├─ `/exit` 后确认进程树无 Codex → 清 @ai_pane_status + marker
     └─ `/new` 进程仍在 → 不改写已有 `✓`
 
@@ -301,7 +303,7 @@ bash tests/status-machine.test.sh
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
-- **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为
+- **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为。**launcher 识别（2026-10-19）**：cc-switch 的 `switch` 启动时 `pane_current_command` 是 `switch`/`volta-shim`/`node` 而非 `codex`，原实现既补不出 idle `-`、`/exit` 后也不会清状态；现对 attached 的 launcher pane 每 5 tick 做一次进程树探测（`_pane_has_tool_process`），命中即写 `@ai_monitor_seen_<tool>`，`build_all_status` 用该标记补 `-`，退出时沿用既有清理分支
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
 - **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
