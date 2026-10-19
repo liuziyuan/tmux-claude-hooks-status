@@ -27,9 +27,12 @@ tmux() {
             fi
             ;;
         list-panes)
-            local status=""
+            local status="" cmd="${FAKE_PANE_CMD:-opencode}"
             [ -f "$FAKE_TMUX_DIR/pane-status" ] && status=$(command cat "$FAKE_TMUX_DIR/pane-status")
-            printf '%%1|test|1|1|%s|1|1|opencode\n' "$status"
+            # 字段：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id
+            #       |seen_claude|seen_codex|seen_opencode（monitor 标记，按 adapter 顺序）
+            printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
+                "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
             ;;
         refresh-client)
             ;;
@@ -163,6 +166,26 @@ case "$PLUGIN_CONTENT" in
         printf 'FAIL: generated OpenCode plugin is missing permission ID/reply mapping\n' >&2
         exit 1
         ;;
+esac
+
+# monitor 进程树标记 → switch/volta-shim 前台下补 idle `-`
+# （pane_current_command 不是 codex，但 monitor 已确认进程树里有；见 tmux-ai-monitor）
+reset_state
+rm -f "$FAKE_TMUX_DIR/ai_all_status"
+FAKE_PANE_CMD=volta-shim FAKE_SEEN_CODEX=1 run_event claude SessionEnd '{}'
+all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
+case "$all" in
+    *'1.1'*' - '*) ;;
+    *) printf 'FAIL: monitor seen 标记应补 idle -（got: %s）\n' "$all" >&2; exit 1 ;;
+esac
+
+# 无标记时不应把普通 launcher pane 误显示为 AI
+reset_state
+rm -f "$FAKE_TMUX_DIR/ai_all_status"
+FAKE_PANE_CMD=volta-shim run_event claude SessionEnd '{}'
+all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
+case "$all" in
+    *'1.1'*) printf 'FAIL: 无 seen 标记不应显示 pane\n' >&2; exit 1 ;;
 esac
 
 printf 'status-machine tests passed\n'
