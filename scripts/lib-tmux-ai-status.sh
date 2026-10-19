@@ -684,31 +684,95 @@ _pane_command_is_tool() {  # $1=pane_id $2=工具名
     _is_tool_process_name "$(basename "$current_command" 2>/dev/null)" "$2"
 }
 
+# 全量进程快照（一次 ps）：每行 "pid ppid comm"。供多次进程树 BFS 复用。
+# 旧的逐 pid `ps -o comm=` + `pgrep -P` 实现在 pane 多的 tick 内会放大到秒级
+# （monitor 每 tick 要对每个 launcher pane × 每个工具做一次），改为一次快照 + 内存 BFS。
+_ps_process_snapshot() {
+    ps -axo pid=,ppid=,comm= 2>/dev/null
+}
+
 # 从给定 pid 出发 BFS，匹配进程名集合（空格分隔，前缀匹配）。
-_pid_tree_has_names() {  # $1=pane_pid $2=names
-    local pane_pid="$1" names="$2"
-    local pids next depth p cmd base name children
+# 名称前缀匹配语义同 _is_tool_process_name（codex 匹配 codex-aarch64-*）。
+_pid_tree_has_names() {  # $1=pane_pid $2=names [$3=进程快照]
+    local pane_pid="$1" names="$2" snapshot="${3:-}"
     [ -n "$pane_pid" ] || return 1
-    pids="$pane_pid"; next=""; depth=0
-    while [ $depth -lt 10 ] && [ -n "$pids" ]; do
-        for p in $pids; do
-            cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-            base=$(basename "$cmd" 2>/dev/null)
-            for name in $names; do
-                _is_tool_process_name "$base" "$name" && return 0
-            done
-            children=$(pgrep -P "$p" 2>/dev/null)
-            [ -n "$children" ] && next="$next $children"
-        done
-        pids="${next# }"
-        next=""
-        depth=$((depth + 1))
-    done
-    return 1
+    [ -n "$snapshot" ] || snapshot=$(_ps_process_snapshot)
+    [ -n "$snapshot" ] || return 1
+    printf '%s\n' "$snapshot" | awk -v root="$pane_pid" -v names="$names" '
+        { cmd[$1] = $3; if ($2 != "") children[$2] = children[$2] " " $1 }
+        END {
+            n = split(names, want, " ")
+            frontier = root
+            depth = 0
+            while (frontier != "" && depth < 10) {
+                m = split(frontier, pids, " ")
+                nxt = ""
+                for (i = 1; i <= m; i++) {
+                    base = cmd[pids[i]]
+                    sub(/.*\//, "", base)
+                    for (j = 1; j <= n; j++) {
+                        nm = want[j]
+                        if (base == nm \
+                            || substr(base, 1, length(nm) + 1) == nm "-" \
+                            || substr(base, 1, length(nm) + 1) == nm "_") exit 0
+                    }
+                    c = split(children[pids[i]], kids, " ")
+                    for (k = 1; k <= c; k++) {
+                        if (kids[k] == "") continue
+                        nxt = nxt (nxt == "" ? "" : " ") kids[k]
+                    }
+                }
+                frontier = nxt
+                depth++
+            }
+            exit 1
+        }'
+}
+
+# 批量版：一次快照 + 一次 awk，判定每个 root × 每个 name。
+# 输出命中行 "<pid><TAB><name>"；monitor 用它把多个 pane 的存活探测合并成一次
+# awk（逐 pane 调用 _pid_tree_has_names 会重复解析同一份快照）。
+_pid_trees_hits() {  # $1=起点 pid 列表 $2=进程名列表 [$3=进程快照]
+    local roots="$1" names="$2" snapshot="${3:-}"
+    [ -n "$roots" ] && [ -n "$names" ] || return 0
+    [ -n "$snapshot" ] || snapshot=$(_ps_process_snapshot)
+    [ -n "$snapshot" ] || return 0
+    printf '%s\n' "$snapshot" | awk -v roots="$roots" -v names="$names" '
+        { cmd[$1] = $3; if ($2 != "") children[$2] = children[$2] " " $1 }
+        END {
+            nr = split(roots, r, " ")
+            nn = split(names, n, " ")
+            for (i = 1; i <= nr; i++)
+                for (j = 1; j <= nn; j++)
+                    if (_tree_has(r[i], n[j])) print r[i] "\t" n[j]
+        }
+        function _tree_has(root, want,    frontier, nxt, depth, m, pids, i, k, base, c, kids) {
+            frontier = root
+            depth = 0
+            while (frontier != "" && depth < 10) {
+                m = split(frontier, pids, " ")
+                nxt = ""
+                for (i = 1; i <= m; i++) {
+                    base = cmd[pids[i]]
+                    sub(/.*\//, "", base)
+                    if (base == want \
+                        || substr(base, 1, length(want) + 1) == want "-" \
+                        || substr(base, 1, length(want) + 1) == want "_") return 1
+                    c = split(children[pids[i]], kids, " ")
+                    for (k = 1; k <= c; k++) {
+                        if (kids[k] == "") continue
+                        nxt = nxt (nxt == "" ? "" : " ") kids[k]
+                    }
+                }
+                frontier = nxt
+                depth++
+            }
+            return 0
+        }'
 }
 
 # BFS pane 进程树，匹配给定进程名集合（空格分隔，前缀匹配）。
-_pane_has_process_names() {  # $1=pane_id $2=names
+_pane_has_process_names() {  # $1=pane_id $2=names [$3=进程快照]
     local pane_id="$1" pane_pid
     # 注意：list-panes -t "%N" 会返回该 pane 所在 window 的全部 pane，
     # 直接取 #{pane_pid} 会混入同 window 其他 pane 的 pid，导致 BFS 爬到
@@ -716,13 +780,13 @@ _pane_has_process_names() {  # $1=pane_id $2=names
     pane_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" 2>/dev/null \
         | awk -v id="$pane_id" '$1==id{print $2; exit}')
     [ -z "$pane_pid" ] && return 1
-    _pid_tree_has_names "$pane_pid" "$2"
+    _pid_tree_has_names "$pane_pid" "$2" "${3:-}"
 }
 
 # 判定 pane 进程树内是否仍有该工具进程（前台命令优先，再 BFS 遍历进程树）
-_pane_has_tool_process() {  # $1=pane_id $2=工具名
+_pane_has_tool_process() {  # $1=pane_id $2=工具名 [$3=进程快照]
     _pane_command_is_tool "$1" "$2" && return 0
-    _pane_has_process_names "$1" "$2"
+    _pane_has_process_names "$1" "$2" "${3:-}"
 }
 
 # 所有 adapter 汇总的 AI 进程名
