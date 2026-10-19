@@ -5,7 +5,7 @@
 # SessionStart 还会延迟到首个 turn。本监控器每秒刷新：
 #   - 前台启动此类工具、尚无 hook 状态时，显示 idle `-`
 #   - cc-switch 的 `switch` 启动时前台命令是 volta-shim/node 而非工具名，改为
-#     （每 N 个 tick）探测 launcher pane 的进程树来识别，并写 seen 标记供聚合补 `-`
+#     每 tick 探测 launcher pane 的进程树来识别，并写 seen 标记供聚合补 `-`
 #   - 退出返回 shell（或进程树已无该工具）后，清除残留 pane 状态
 # 泛化实现：扫描 adapters/*.sh 找出 ADAPTER_HAS_SESSION_END="false" 的工具及其
 # ADAPTER_PROCESS_NAMES，逐个工具做生命周期检测——新增同类工具的 adapter 无需改本文件。
@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _ADAPTER_DIR="${SCRIPT_DIR}/adapters"
 MODE="${1:-start}"
 MONITOR_INTERVAL="${TMUX_AI_MONITOR_INTERVAL:-1}"
-# 进程树探测节流：launcher pane 每 N 个 tick 做一次 BFS（run 循环内 _TICK 持续累加）。
-_MONITOR_PROBE_EVERY=5
+# 进程树探测不再跨 tick 节流：lib 用一次 ps 快照 + 一次 awk 批量判定所有 pane，
+# 单 tick 成本 ~30ms，每 tick 探测让新启动的工具在 ≤1 个 tick（≈1s）内显示。
 _MONITOR_TICK=0
 # 升级自检：每 N tick 对比脚本内容指纹，变化则 exec 自身重载新代码。
 _MONITOR_RECHECK_EVERY=60
@@ -68,31 +68,64 @@ _collect_no_session_end_tools() {
 # → 标记见过；曾标记但前台已切走且进程树也无该工具 → 清空 pane 状态（该工具已退出）。
 # seen 标记按工具名区分（@ai_monitor_seen_<name>），避免多工具互相踩踏清理语义；
 # 该标记同时是 build_all_status 给 launcher pane 补 idle `-` 的依据。
+#
+# 性能：每 tick 只取一次进程快照，并把「待识别 launcher」与「已见 pane 存活确认」
+# 合并成一次 _pid_trees_hits（一次 awk）。旧实现逐 pane 调 _pane_has_tool_process，
+# 每个 pid 各起一次 ps/pgrep，launcher 多的环境单 tick 可达 1.8s，叠加 5 tick 节流
+# 后新启动 codex 要 7-8s 才显示（2026-10-19 实测）。
 _monitor_no_session_end_lifecycle() {
-    local tools name pane_id current_command sanitized pane_dir
+    local tools name pane_id current_command seen attached pane_pid
     tools=$(_collect_no_session_end_tools)
     [ -n "$tools" ] || return 0
+    local snapshot
+    snapshot=$(_ps_process_snapshot)
     for name in $tools; do
-        while IFS='|' read -r pane_id current_command seen attached; do
+        local probe="" watch="" roots="" hits="" hit_pid hit_name hit_pids=" "
+        local entry sanitized pane_dir
+        while IFS='|' read -r pane_id current_command seen attached pane_pid; do
+            [ -n "$pane_id" ] || continue
             if [ -n "$current_command" ] && _is_tool_process_name "$(basename "$current_command" 2>/dev/null)" "$name"; then
+                # 前台命令即目标工具：直接标记见过（无需 BFS）
                 [ "$seen" = "1" ] || tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
-            elif [ "$seen" = "1" ] && ! _pane_has_tool_process "$pane_id" "$name"; then
-                tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
-                tmux set-option -pu -t "$pane_id" "@ai_monitor_seen_${name}" 2>/dev/null || true
-                sanitized="${pane_id//[^a-zA-Z0-9]/_}"
-                pane_dir="${_STATUS_DIR}/${sanitized}"
-                rm -rf "$pane_dir" 2>/dev/null
-            elif [ "$seen" != "1" ] \
-                 && [ "${attached:-0}" -gt 0 ] \
-                 && [ $((_MONITOR_TICK % _MONITOR_PROBE_EVERY)) -eq 0 ] \
-                 && _is_launcher_command "$current_command" \
-                 && _pane_has_tool_process "$pane_id" "$name"; then
+            elif [ "$seen" = "1" ] && [ -n "$pane_pid" ]; then
+                # 曾见过：确认进程树里是否还有该工具（前台命令已在上一分支排除）
+                watch="$watch $pane_id:$pane_pid"
+            elif [ "${attached:-0}" -gt 0 ] && _is_launcher_command "$current_command" && [ -n "$pane_pid" ]; then
                 # launcher（switch/volta-shim/node）启动：前台命令不是工具名，
-                # 但进程树里有。标记 seen 后 build_all_status 才会补 idle `-`，
-                # 工具退出时也才会走上面的清理分支（否则残留状态永不清）。
-                tmux set-option -pt "$pane_id" "@ai_monitor_seen_${name}" 1 2>/dev/null || true
+                # 但进程树里可能有。标记 seen 后 build_all_status 才会补 idle `-`，
+                # 工具退出时也才会走清理分支（否则残留状态永不清）。
+                probe="$probe $pane_id:$pane_pid"
             fi
-        done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_monitor_seen_${name}}|#{session_attached}" 2>/dev/null)
+        done < <(tmux list-panes -a -F "#{pane_id}|#{pane_current_command}|#{@ai_monitor_seen_${name}}|#{session_attached}|#{pane_pid}" 2>/dev/null)
+
+        for entry in $probe $watch; do roots="$roots ${entry#*:}"; done
+        [ -n "$roots" ] && hits=$(_pid_trees_hits "$roots" "$name" "$snapshot")
+        while IFS=$'\t' read -r hit_pid hit_name; do
+            [ -n "$hit_pid" ] && hit_pids="$hit_pids$hit_pid "
+        done <<EOF
+$hits
+EOF
+
+        for entry in $probe; do
+            pane_pid="${entry#*:}"
+            case "$hit_pids" in
+                *" $pane_pid "*) tmux set-option -pt "${entry%%:*}" "@ai_monitor_seen_${name}" 1 2>/dev/null || true ;;
+            esac
+        done
+        for entry in $watch; do
+            pane_pid="${entry#*:}"
+            case "$hit_pids" in
+                *" $pane_pid "*) ;;
+                *)
+                    pane_id="${entry%%:*}"
+                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
+                    tmux set-option -pu -t "$pane_id" "@ai_monitor_seen_${name}" 2>/dev/null || true
+                    sanitized="${pane_id//[^a-zA-Z0-9]/_}"
+                    pane_dir="${_STATUS_DIR}/${sanitized}"
+                    rm -rf "$pane_dir" 2>/dev/null
+                    ;;
+            esac
+        done
     done
 }
 
