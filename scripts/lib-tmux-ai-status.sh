@@ -962,12 +962,14 @@ _check_hooks_integrity() {
     fi
 }
 
-# 兜底自修复：tmux 端事件路径调用，配置被外部覆盖时自动重装。
-# 不依赖 SESSION_ID/EVENT，可被 _refresh 触发。60s 节流。
+# 兜底自修复：tmux 端事件路径与 SessionStart hook 共用，配置被外部覆盖时自动重装。
+# 不依赖 SESSION_ID/EVENT，可被 _refresh 与 SessionStart 触发。60s 节流退避
+# （窗口内不重复 integrity 检查；修复失败 60s 后才重试）。
 # 安装器由 adapter 声明（ADAPTER_INSTALLER）。
 _maybe_repair_hooks() {
     # 用户显式卸载意图（suppressed-<tool>）→ 不自动修复，尊重到显式安装为止。
     if [ -f "${_SUPPRESS_DIR}/suppressed-${TOOL_ID:-claude}" ]; then
+        _ai_log "REPAIR: suppressed by uninstall marker, skip (${TOOL_ID:-claude})"
         return 0
     fi
     local marker="${_STATUS_DIR}/.hooks-repair-${TOOL_ID:-claude}-ts"
@@ -983,9 +985,9 @@ _maybe_repair_hooks() {
     local installer="${ADAPTER_INSTALLER}"
     if ! _check_hooks_integrity; then
         _ai_log "REPAIR: hooks integrity check failed, reinstalling (${TOOL_ID:-claude})"
-        # 浮出提示与 SessionStart 修复路径（tmux-ai-status）对齐：修复不再完全静默。
-        # 本函数仅经 _run_refresh 被 tmux hook 事件触发（run-shell 上下文，不在 AI CLI
-        # 同步 hook 路径）；display-message 无 -p 写 client tty 而非调用方 stdout。
+        # 浮出提示（成败区分）：SessionStart（Claude Code hook 进程内）与
+        # _run_refresh（tmux run-shell）两个上下文都会到这里；hook 进程继承
+        # TMUX env，display-message 无 -p 写 client tty 而非调用方 stdout。
         if [ -x "$installer" ] && "$installer" >/dev/null 2>&1; then
             tmux display-message "✓ ${TOOL_ID:-claude} hooks 已自动修复（检测到缺失）" 2>/dev/null || true
         else

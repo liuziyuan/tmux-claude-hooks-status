@@ -221,14 +221,12 @@ case "$EVENT" in
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{source, model}' 2>/dev/null)
     STATUS="-"
     _clear_pending
-    if ! _check_hooks_integrity; then
-        if [ -f "${_SUPPRESS_DIR}/suppressed-${TOOL_ID}" ]; then
-            _ai_log "REPAIR: suppressed by uninstall marker, skip (${TOOL_ID})"
-        else
-            "${ADAPTER_INSTALLER}" >/dev/null 2>&1
-            tmux display-message "⚠ ${TOOL_ID} hooks 已自动修复（检测到缺失）" 2>/dev/null || true
-        fi
-    fi
+    # 自修复归并到 _maybe_repair_hooks：60s 节流退避（旧实现每次 SessionStart——
+    # 含 resume/clear/fork——都全量 integrity + 失败即重装且无 exit code 检查），
+    # 并统一 suppress 检查与成功/失败区分的 display-message。节流语义：窗口内
+    # 新会话不重复检查 integrity（外部改 settings 后最多延迟 60s 才被发现）；
+    # 修复失败 60s 后由 _run_refresh 或下一次 SessionStart 重试。
+    _maybe_repair_hooks
     ;;
   SessionEnd)
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{reason}' 2>/dev/null)
