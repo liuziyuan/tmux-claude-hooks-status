@@ -37,6 +37,7 @@ tmux() {
             [ "${2:-}" = "-g" ] && printf '%s' "${FAKE_OPTIONS:-}"
             ;;
         list-clients)
+            [ -n "${FAKE_LIST_CLIENTS_FAIL:-}" ] && return 1
             printf '%s\n' "${FAKE_CLIENTS:-}"
             ;;
         list-panes)
@@ -330,6 +331,14 @@ if _maybe_cleanup_stale; then :; fi
 gu=$(command cat "$FAKE_TMUX_DIR/gu.log" 2>/dev/null || true)
 case "$gu" in *"@ai_prev_sess__dev_ttys999"*) ;; *) printf 'FAIL: 已断开 client 的 prev_sess 未清理（got: %s）\n' "$gu" >&2; exit 1 ;; esac
 case "$gu" in *"@ai_prev_sess__dev_ttys001"*) printf 'FAIL: 存活 client 的 prev_sess 被误清\n' >&2; exit 1 ;; esac
+
+# tmux 抖动（list-clients 失败）时不得把键全删光
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" "$FAKE_TMUX_DIR/gu.log"
+FAKE_LIST_CLIENTS_FAIL=1
+if _maybe_cleanup_stale; then :; fi
+unset FAKE_LIST_CLIENTS_FAIL
+[ ! -s "$FAKE_TMUX_DIR/gu.log" ] \
+    || { echo "FAIL: list-clients 失败时不应剪枝" >&2; exit 1; }
 
 reset_state
 
