@@ -41,6 +41,11 @@ tmux() {
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
                         "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
+                # 孤儿清理查询（fmt 恰以 |#{@ai_pane_status} 结尾）：哨兵 + 两字段行
+                *'|#{@ai_pane_status}')
+                    : > "$FAKE_TMUX_DIR/full-cleanup-called"
+                    printf '%%1|%s\n' "$status"
+                    ;;
                 # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
                 *'@ai_pane_status'*)
                     printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
@@ -78,6 +83,10 @@ assert_status() {
     [ -f "$FAKE_TMUX_DIR/pane-status" ] && actual=$(command cat "$FAKE_TMUX_DIR/pane-status")
     if [ "$actual" != "$expected" ]; then
         printf 'FAIL: %s: expected status %s, got %s\n' "$context" "$expected" "${actual:-<empty>}" >&2
+        printf '  pending-perm: [%s]\n' "$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-perm 2>/dev/null)" >&2
+        printf '  pending-pre:  [%s]\n' "$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-pre 2>/dev/null)" >&2
+        printf '  status dir:   [%s]\n' "$(ls "$TMUX_AI_STATUS_DIR"/_1/ 2>/dev/null | tr '\n' ' ')" >&2
+        printf '  log tail:     [%s]\n' "$(tail -3 /tmp/tmux-ai-status.log 2>/dev/null | tr '\n' '|')" >&2
         exit 1
     fi
 }
@@ -134,6 +143,9 @@ run_event codex PreToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool
 run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool_name":"Bash"}'
 assert_status '!' 'Other Codex tools cannot clear request_permissions state'
 run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"rp-1","tool_name":"request_permissions"}'
+echo "DEBUG status=[$(command cat "$FAKE_TMUX_DIR/pane-status" 2>/dev/null)]"
+echo "DEBUG perm=[$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-perm 2>/dev/null)]"
+echo "DEBUG pre=[$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-pre 2>/dev/null)]"
 assert_status '>' 'Matching request_permissions PostToolUse resumes processing'
 
 reset_state
@@ -218,5 +230,35 @@ rm -f "$FAKE_TMUX_DIR/snapshot-called"
 run_event claude _refresh '{}'
 [ ! -f "$FAKE_TMUX_DIR/snapshot-called" ] \
     || { echo "FAIL: _refresh 不应解析 pane" >&2; exit 1; }
+
+# _run_refresh 的清理走 60s 节流版（_maybe_cleanup_stale）：
+# marker 新鲜时 _refresh 跳过全价清理（哨兵文件由 tmux stub 的清理分支触发）
+reset_state
+echo "$(( $(date +%s) + 3600 ))" > "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+rm -f "$FAKE_TMUX_DIR/full-cleanup-called"
+run_event claude _refresh '{}'
+[ ! -f "$FAKE_TMUX_DIR/full-cleanup-called" ] \
+    || { echo "FAIL: marker 新鲜时 _refresh 应跳过全价清理" >&2; exit 1; }
+# 无 marker → 全价清理执行一次
+reset_state
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+run_event claude _refresh '{}'
+[ -f "$FAKE_TMUX_DIR/full-cleanup-called" ] \
+    || { echo "FAIL: 无 marker 时 _refresh 应跑全价清理" >&2; exit 1; }
+
+# _cleanup_stale_panes 批量快照：多个 pane 需要进程判定时 ps 只取一次。
+# run_event 是子进程、stub 传不进去，改为进程内 source lib 直接调用。
+reset_state
+TOOL_ID="claude"
+source "$ROOT/scripts/lib-tmux-ai-status.sh"
+ps_count_file="$TEST_TMP/ps-count"
+: > "$ps_count_file"
+_ps_process_snapshot() { echo x >> "$ps_count_file"; printf '%s\n' "$$ 1 zsh"; }
+run_event claude Stop '{}'   # 留下 ✓ 状态（pane-status=%1|✓）
+# if 条件上下文豁免 set -e：_ai_log 末行 `[ size -gt MAX ] && rotate` 在
+# 日志未超限时短路返回 1，会让进程内直接调用炸掉 set -e
+if _cleanup_stale_panes; then :; fi
+[ "$(wc -l < "$ps_count_file" | tr -d ' ')" = "1" ] \
+    || { echo "FAIL: cleanup 应只取一次进程快照" >&2; exit 1; }
 
 printf 'status-machine tests passed\n'

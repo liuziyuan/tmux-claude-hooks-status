@@ -67,7 +67,10 @@ _current_pane_status() {
 # 重建聚合状态（_refresh / _entered 共用）
 _run_refresh() {
     _maybe_repair_hooks
-    _cleanup_stale_panes
+    # 节流版清理（60s）：tmux 生命周期 hook（pane-focus-in 等）高频触发，
+    # 全价 _cleanup_stale_panes 实测 ~455ms；卡死状态清理有 :37 的事件路径
+    # 节流兜底，此处无需每次全价。Stop/SessionEnd fallback 仍走全价精准清理。
+    _maybe_cleanup_stale
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
 }

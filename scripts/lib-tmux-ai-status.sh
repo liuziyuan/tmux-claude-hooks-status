@@ -825,13 +825,15 @@ _pane_has_tool_process() {  # $1=pane_id $2=工具名 [$3=进程快照]
 }
 
 # 所有 adapter 汇总的 AI 进程名
-_pane_has_ai_process() {  # $1=pane_id
-    _pane_has_process_names "$1" "$(_collect_ai_process_names)"
+# $2 可选进程快照：调用方批量场景（_cleanup_stale_panes）传入以共用一次 ps
+_pane_has_ai_process() {  # $1=pane_id [$2=进程快照]
+    _pane_has_process_names "$1" "$(_collect_ai_process_names)" "${2:-}"
 }
 
 # 检查 pane 的所有 pane-id 文件是否过期（> 5 min），再验证进程树
+# $2 可选进程快照（批量调用方传入，避免逐 pane 一次 ps）
 _is_pane_session_dead() {
-    local pane_id="$1"
+    local pane_id="$1" snapshot="${2:-}"
     local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
     local pane_dir="${_STATUS_DIR}/${sanitized}"
     [ -d "$pane_dir" ] || return 0
@@ -844,7 +846,7 @@ _is_pane_session_dead() {
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
-    ! _pane_has_ai_process "$pane_id"
+    ! _pane_has_ai_process "$pane_id" "$snapshot"
 }
 
 # --- 孤儿状态清理（_refresh 用）---
@@ -860,6 +862,11 @@ _cleanup_stale_panes() {
         [ -n "$pane_id" ] && active_panes="$active_panes $pane_id"
     done
 
+    # 进程快照取一次循环共用：✓/- 分支与死会话判定逐 pane 调 _pane_has_ai_process
+    # 时，旧实现每个 pane 各起一次 ps（pane 多时放大明显）
+    local ps_snap
+    ps_snap=$(_ps_process_snapshot)
+
     while IFS='|' read -r pane_id pane_status; do
         case "$pane_status" in
             "!"|"?"|">")
@@ -869,14 +876,14 @@ _cleanup_stale_panes() {
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
-                elif _is_pane_session_dead "$pane_id"; then
+                elif _is_pane_session_dead "$pane_id" "$ps_snap"; then
                     _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_ai_process "$pane_id"; then
+                if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
                     _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                 fi
