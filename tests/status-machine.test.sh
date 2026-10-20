@@ -12,7 +12,15 @@ export TMUX_AI_STATUS_DIR="$TEST_TMP/status"
 export FAKE_PANE_PID="$$"
 export FAKE_SERVER_PID="${FAKE_SERVER_PID:-1234}"
 export FAKE_PANE_PATH="${FAKE_PANE_PATH:-$TEST_TMP/project}"
-mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR" "$FAKE_PANE_PATH"
+# 隔离修复路径：本文件不测 hooks 修复——HOME 指向临时目录，并预置三个
+# suppressed 标记，让 _maybe_repair_hooks / _maybe_repair_other_tools 零子进程。
+export HOME="$TEST_TMP/home"
+export TMUX_AI_SUPPRESS_DIR="$TEST_TMP/suppress"
+unset CLAUDE_CONFIG_DIR CODEX_HOME OPENCODE_CONFIG_DIR XDG_CONFIG_HOME || true
+mkdir -p "$FAKE_TMUX_DIR" "$TMUX_AI_STATUS_DIR" "$FAKE_PANE_PATH" "$HOME" "$TMUX_AI_SUPPRESS_DIR"
+: > "$TMUX_AI_SUPPRESS_DIR/suppressed-claude"
+: > "$TMUX_AI_SUPPRESS_DIR/suppressed-codex"
+: > "$TMUX_AI_SUPPRESS_DIR/suppressed-opencode"
 
 tmux() {
     local command="${1:-}"
@@ -54,10 +62,12 @@ tmux() {
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
                         "$_sp" "$_sc" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
-                # 孤儿清理查询（fmt 恰以 |#{@ai_pane_status} 结尾）：哨兵 + 两字段行
-                *'|#{@ai_pane_status}')
+                # 孤儿清理查询：pane|status|seen_claude|seen_codex|seen_opencode
+                # （动态 seen 字段——终态清理认 monitor 标记）
+                *'|#{@ai_pane_status}|#{@ai_monitor_seen_'*)
                     : > "$FAKE_TMUX_DIR/full-cleanup-called"
-                    printf '%%1|%s\n' "$status"
+                    printf '%%1|%s|%s|%s|%s\n' "$status" \
+                        "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
                     ;;
                 # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
                 *'@ai_pane_status'*)
@@ -363,6 +373,20 @@ rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
 run_event claude _refresh '{}'
 [ -f "$FAKE_TMUX_DIR/full-cleanup-called" ] \
     || { echo "FAIL: 无 marker 时 _refresh 应跑全价清理" >&2; exit 1; }
+
+# 终态清理认 monitor seen：launcher/daemon 场景进程树不可见时保留 ✓
+reset_state
+printf '✓' > "$FAKE_TMUX_DIR/pane-status"
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+FAKE_PANE_CMD=bash FAKE_SEEN_CODEX=1 run_event claude _refresh '{}'
+assert_status '✓' 'seen=1 时 ✓ 不被进程树清理'
+
+# 对照组：无 seen 且无 AI 进程 → 清
+reset_state
+printf '✓' > "$FAKE_TMUX_DIR/pane-status"
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+FAKE_PANE_CMD=bash run_event claude _refresh '{}'
+assert_status '' '无 seen 且无 AI 进程时 ✓ 被清除'
 
 # _cleanup_stale_panes 批量快照：多个 pane 需要进程判定时 ps 只取一次。
 # run_event 是子进程、stub 传不进去，改为进程内 source lib 直接调用。

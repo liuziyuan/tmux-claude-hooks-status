@@ -918,7 +918,15 @@ _cleanup_stale_panes() {
     local ps_snap
     ps_snap=$(_ps_process_snapshot)
 
-    while IFS='|' read -r pane_id pane_status; do
+    # 动态追加 monitor seen 字段（与 build_all_status 同一组名字，复用其收集器）。
+    # launcher/daemon 场景工具进程可能脱离 pane 进程树，进程树 BFS 看不到；
+    # seen=1 是 monitor 用 launcher 进程树探测得出的「工具确实存活」信号。
+    local seen_fmt="" _seen_name
+    for _seen_name in $(_collect_ai_process_names); do
+        seen_fmt="${seen_fmt}|#{@ai_monitor_seen_${_seen_name}}"
+    done
+
+    while IFS='|' read -r pane_id pane_status _seen_flags; do
         case "$pane_status" in
             "!"|"?"|">")
                 local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
@@ -934,13 +942,20 @@ _cleanup_stale_panes() {
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
-                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
-                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
-                fi
+                # 终态只认「进程存活」证据：seen=1 时保留（launcher/daemon 场景
+                # 进程树不可见）；活跃态 !/?/> 的判据是归属证据，不使用 seen。
+                case "$_seen_flags" in
+                    *1*) ;;
+                    *)
+                        if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
+                            _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
+                            tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
+                        fi
+                        ;;
+                esac
                 ;;
         esac
-    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}" 2>/dev/null)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}${seen_fmt}" 2>/dev/null)
 
     # 清理孤儿目录：目录存在但对应 pane 已不在 tmux 中
     local all_pane_ids
