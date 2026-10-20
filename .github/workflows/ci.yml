@@ -46,6 +46,7 @@ jobs:
         run: |
           set -e
           bash tests/ccswitch-install.test.sh
+          bash tests/check-json.test.sh
           bash tests/status-machine.test.sh
           bash tests/suppress-cross-source.test.sh
           bash tests/symlink-write.test.sh
