@@ -45,6 +45,9 @@ esac
 case "${1:-install}" in
     uninstall)
         adapter_uninstall_hooks
+        # 先清安装意图再写卸载意图：suppress 写失败时 errexit 会退出，此顺序
+        # 保证 installed 不残留（残留会让 _refresh 把刚卸载的 hooks 装回来）。
+        _hooks_installed_clear claude || true
         _hooks_suppress_write claude
         ;;
     check)
@@ -66,15 +69,18 @@ case "${1:-install}" in
         # install 收敛。结构漂移（async/matcher 被外部改）不在判定内，auto 跳过
         # 不修复，显式 install 仍强收敛。
         if adapter_check_converged; then
+            _hooks_installed_ensure claude || true
             echo "claude hooks already converged (skip install)"
             exit 0
         fi
         adapter_install_hooks
         _hooks_suppress_clear claude || true
+        _hooks_installed_ensure claude || true
         ;;
     install)
         adapter_install_hooks
         _hooks_suppress_clear claude || true
+        _hooks_installed_ensure claude || true
         ;;
     *)
         echo "Usage: $0 [install|uninstall|check [--json]|auto]" >&2

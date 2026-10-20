@@ -86,6 +86,32 @@ _hooks_suppress_clear() {
     fi
 }
 
+# --- 安装意图标记（installed marker）---
+# 显式 install / claude auto（含已收敛跳过）→ 写；显式 uninstall → 删。
+# 语义 = 用户装过该工具；跨工具自修复（_maybe_repair_other_tools）据此决定
+# hooks 丢失时是否允许自动重装。无标记 + check 失败时绝不安装——尊重
+# 「codex/opencode 非人人安装」的现状。
+# ⚠️ 与 suppressed 同属 _SUPPRESS_DIR 两处同步约束（另一处见 lib-tmux-ai-status.sh）。
+_hooks_installed_file() { printf '%s/installed-%s' "$_SUPPRESS_DIR" "$1"; }
+_hooks_installed_write() {
+    if ! mkdir -p "$_SUPPRESS_DIR" 2>/dev/null \
+       || ! date +%s > "$(_hooks_installed_file "$1")" 2>/dev/null; then
+        echo "WARN: 安装意图标记写入失败——该工具 hooks 丢失后不会自动修复；" \
+             "请检查 $_SUPPRESS_DIR 可写性" >&2
+        return 1
+    fi
+}
+_hooks_installed_clear() {
+    if [ -e "$(_hooks_installed_file "$1")" ] \
+       && ! rm -f "$(_hooks_installed_file "$1")" 2>/dev/null; then
+        echo "WARN: 安装意图标记删除失败（卸载仍由 suppressed 标记兜底）" >&2
+        return 1
+    fi
+}
+_hooks_installed_ensure() {  # 已登记则不动，避免 mtime 抖动
+    [ -e "$(_hooks_installed_file "$1")" ] || _hooks_installed_write "$1"
+}
+
 # --- 安装/卸载读-改-写互斥锁 ---
 # 写路径的并发方：TUI 显式装 / tmux 入口 auto / SessionStart 自修复 / _maybe_repair_hooks /
 # drift 收敛——五方都经 wrapper dispatch，锁在此层一处覆盖三 adapter。

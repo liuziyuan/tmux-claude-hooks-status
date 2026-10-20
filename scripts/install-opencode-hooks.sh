@@ -40,6 +40,8 @@ esac
 case "${1:-install}" in
     uninstall)
         adapter_uninstall_hooks
+        # 先清安装意图再写卸载意图（理由同 claude wrapper）
+        _hooks_installed_clear opencode || true
         _hooks_suppress_write opencode
         ;;
     check)
@@ -55,6 +57,7 @@ case "${1:-install}" in
     install)
         adapter_install_hooks
         _hooks_suppress_clear opencode || true
+        _hooks_installed_ensure opencode || true
         ;;
     *)
         echo "Usage: $0 [install|uninstall|check [--json]]" >&2
