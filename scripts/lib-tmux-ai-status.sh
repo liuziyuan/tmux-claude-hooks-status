@@ -456,8 +456,13 @@ _acquire_event_lock() {
     [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
     local lock; lock=$(_event_lock_dir)
+    # 重试预算 ~2s。sleep 0.01 不被支持时退化为无 sleep 自旋（mkdir+stat 系统调用，
+    # ~几百 ms 耗尽预算）——绝不能回落 sleep 1：200×1s 病态忙等，而 sync hook 的
+    # 上游 timeout 是 600s，不会打断它（实测 macOS/Linux sleep 均支持小数，此为
+    # 其他平台兜底）。时间基准用 $SECONDS（builtin，零 fork；date +%s 每迭代一次 fork）。
+    local _start=$SECONDS
     local i
-    for i in $(seq 1 200); do
+    for i in {1..200}; do
         if mkdir "$lock" 2>/dev/null; then
             echo "$$" > "$lock/owner"
             return 0
@@ -470,11 +475,11 @@ _acquire_event_lock() {
             continue
         fi
         mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
-        if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge 10 ]; then
+        if [ -n "$mtime" ] && [ $(( _start + SECONDS - mtime )) -ge 10 ]; then
             rm -f "$lock/owner" 2>/dev/null
             rmdir "$lock" 2>/dev/null
         fi
-        sleep 0.01 2>/dev/null || sleep 1
+        sleep 0.01 2>/dev/null || :
     done
     _ai_log "EVENT_LOCK: acquire timeout on $lock"
     return 1
@@ -487,12 +492,14 @@ _release_event_lock() {
 }
 
 # Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
+# sleep 回落策略同 _acquire_event_lock（不支持小数 sleep 时无 sleep 自旋，不回落 sleep 1）。
 _acquire_lock() {
     [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
     local lock; lock=$(_lock_dir)
+    local _start=$SECONDS
     local i
-    for i in $(seq 1 20); do
+    for i in {1..20}; do
         if mkdir "$lock" 2>/dev/null; then
             return 0
         fi
@@ -500,13 +507,13 @@ _acquire_lock() {
         local mtime
         mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
         if [ -n "$mtime" ]; then
-            local age=$(( $(date +%s) - mtime ))
+            local age=$(( _start + SECONDS - mtime ))
             if [ "$age" -ge 5 ]; then
                 rmdir "$lock" 2>/dev/null
                 mkdir "$lock" 2>/dev/null && return 0
             fi
         fi
-        sleep 0.01 2>/dev/null || sleep 1
+        sleep 0.01 2>/dev/null || :
     done
     _ai_log "LOCK: acquire timeout on $lock"
     return 1
