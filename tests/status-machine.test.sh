@@ -155,6 +155,26 @@ assert_status '>' 'Claude serial permission resumes after tool completion'
 
 reset_state
 
+# Notification 隐式路径不得降级活跃状态（async 通知可能乱序晚到）
+# 1) 工具有 pending：idle_prompt 迟到 → 保持 '>'
+run_event claude PreToolUse '{"session_id":"ntf","tool_use_id":"t1","tool_name":"Bash"}'
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '>' 'Late idle_prompt keeps pending tool state'
+
+# 2) live 审批态：idle_prompt 不得清 !（claude 不写 pending-perm，需 live 守卫）
+reset_state
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '!' 'Idle prompt preserves live permission state'
+
+# 3) 显式 denial 消息仍无条件重置为 '-'
+reset_state
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+run_event claude Notification '{"session_id":"ntf","notification_type":"permission_prompt","message":"Permission denied by user"}'
+assert_status '-' 'Explicit denial message resets to idle'
+
+reset_state
+
 # OpenCode 用 request ID 精确清理：回复一个请求后，另一个请求仍保持审批态。
 run_event opencode PreToolUse '{"session_id":"open-s","tool_use_id":"call-a","tool_name":"bash"}'
 run_event opencode PreToolUse '{"session_id":"open-s","tool_use_id":"call-b","tool_name":"bash"}'

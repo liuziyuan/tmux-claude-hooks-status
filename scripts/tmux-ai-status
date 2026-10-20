@@ -78,6 +78,25 @@ _current_pane_status() {
     tmux display-message -pt "$TMUX_PANE" -p "#{@ai_pane_status}" 2>/dev/null
 }
 
+# Notification「隐式」路径（idle_prompt / waiting for your input）的状态解析：
+# 通知可能乱序晚到（async hook 无顺序保证），不能无条件降级为 idle '-'。
+# 优先级：pending 派生（工具确实在跑 → '>'）> live 审批态（!/?；claude 不写
+# pending-perm，纯派生看不见审批态）> idle '-'。
+# 显式重置消息（denied/cancelled/rejected）不走本函数——denial 携带「等待已结束」
+# 语义，应无条件置 '-'。
+_notification_implicit_status() {
+    if _derive_status_from_pending; then
+        printf '%s' "$DERIVED"
+        return
+    fi
+    local live
+    live=$(_current_pane_status)
+    case "$live" in
+        "!"|"?") printf '%s' "$live"; return ;;
+    esac
+    printf '%s' "-"
+}
+
 # 重建聚合状态（_refresh / _entered 共用）
 _run_refresh() {
     _maybe_repair_hooks
@@ -102,14 +121,15 @@ case "$EVENT" in
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{notification_type, message}' 2>/dev/null)
     case "$NOTIF_TYPE" in
       idle_prompt)
-        STATUS="-"
+        STATUS=$(_notification_implicit_status)
         ;;
       *)
         case "$MSG" in
           *"waiting for your input"*)
-            STATUS="-"
+            STATUS=$(_notification_implicit_status)
             ;;
           *"denied"*|*"cancelled"*|*"canceled"*|*"rejected"*)
+            # 显式重置：denial 表示等待已结束，无条件 idle（即便有 pending 残项）
             STATUS="-"
             ;;
           *)
@@ -118,6 +138,8 @@ case "$EVENT" in
         esac
         ;;
     esac
+    # 写入循环内不再对 Notification 重复 re-derive：事件锁（tmux-ai-status 头部）
+    # 已串行化同 pane 事件，分支内判定即最终判定。
     ;;
   PermissionRequest)
     # 一次 @tsv 提取 tool_name/tool_use_id（digest 单独一次；stdin 只能读一次，
