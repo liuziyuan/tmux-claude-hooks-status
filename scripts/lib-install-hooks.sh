@@ -29,14 +29,31 @@ _install_atomic_write() {
 # 显式 uninstall 成功 → 写 suppressed-<tool>；显式 install 成功 → 清。
 # 自动修复路径（_maybe_repair_hooks / 入口 auto / SessionStart 重装）见标记一律不装。
 # ⚠️ _SUPPRESS_DIR 与 lib-tmux-ai-status.sh 中的定义保持一致（两处同步改）。
+#
+# 失败语义（两个方向都告警，不对称）：
+# - write 失败：hooks 已剥离但标记没落 → auto 会静默装回（用户显式卸载被反转）
+#   → return 1，wrapper uninstall 分支 errexit 使其以非 0 退出，用户可见。
+# - clear 失败：install 已成功但残留标记会把 auto 永久挡住（比 write 失败更隐蔽）
+#   → 告警但 return 0（主操作已成功，调用方 wrapper 的 clear 调用需 || true 容忍）。
 _SUPPRESS_DIR="${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/tmuxclihook}"
 
 _hooks_suppress_file() { printf '%s/suppressed-%s' "$_SUPPRESS_DIR" "$1"; }
 _hooks_suppress_write() {
-    mkdir -p "$_SUPPRESS_DIR" 2>/dev/null || true
-    date +%s > "$(_hooks_suppress_file "$1")" 2>/dev/null || true
+    if ! mkdir -p "$_SUPPRESS_DIR" 2>/dev/null \
+       || ! date +%s > "$(_hooks_suppress_file "$1")" 2>/dev/null; then
+        echo "WARN: 抑制标记写入失败——hooks 已卸载，但 tmux 重载/新会话可能自动装回；" \
+             "请检查 $_SUPPRESS_DIR 可写性" >&2
+        return 1
+    fi
 }
-_hooks_suppress_clear() { rm -f "$(_hooks_suppress_file "$1")" 2>/dev/null || true; }
+_hooks_suppress_clear() {
+    if [ -e "$(_hooks_suppress_file "$1")" ] \
+       && ! rm -f "$(_hooks_suppress_file "$1")" 2>/dev/null; then
+        echo "WARN: 卸载意图标记清除失败——tmux 自动安装将持续跳过；" \
+             "请检查 $_SUPPRESS_DIR 可写性" >&2
+        return 1
+    fi
+}
 
 # --- check --json：完整性明细 JSON（wrapper 专用，事件热路径不触达）---
 # stdout = 单行紧凑 JSON；exit code 与默认 check 一致（ok→0 / missing→1）。

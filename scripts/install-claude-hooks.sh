@@ -38,10 +38,10 @@ case "${1:-install}" in
             exit 0
         fi
         adapter_install_hooks
-        _hooks_suppress_clear claude
+        _hooks_suppress_clear claude || true
         ;;
     *)
         adapter_install_hooks
-        _hooks_suppress_clear claude
+        _hooks_suppress_clear claude || true
         ;;
 esac

@@ -32,6 +32,6 @@ case "${1:-install}" in
         ;;
     *)
         adapter_install_hooks
-        _hooks_suppress_clear opencode
+        _hooks_suppress_clear opencode || true
         ;;
 esac
