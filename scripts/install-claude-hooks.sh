@@ -18,6 +18,15 @@ _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "${_LIB_DIR}/lib-install-hooks.sh"
 source "${_LIB_DIR}/adapters/claude.sh"
 
+# 子命令白名单：必须在取锁前校验——拼错的子命令不应先白等最多 10s 锁超时
+case "${1:-install}" in
+    install|uninstall|check|auto) ;;
+    *)
+        echo "Usage: $0 [install|uninstall|check [--json]|auto]" >&2
+        exit 2
+        ;;
+esac
+
 # 写路径互斥（check 只读不锁）：临界区覆盖 adapter 调用 + suppress 标记读-改-写，
 # 串行化 auto 与显式 uninstall 的标记 TOCTOU。失败语义见 _install_acquire_lock：
 # 降级无锁（rc=2）继续；等待超时（rc=1）退出。

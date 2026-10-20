@@ -53,7 +53,7 @@ tmux() {
             ;;
         list-keys)
             case "$*" in
-                *"-n Escape"*) [ -n "${FAKE_ESC_BIND:-}" ] && printf '%s\n' "$FAKE_ESC_BIND" ;;
+                *"-T root Escape"*) [ -n "${FAKE_ESC_BIND:-}" ] && printf '%s\n' "$FAKE_ESC_BIND" ;;
                 *"-T prefix r"*) [ -n "${FAKE_R_BIND:-}" ] && printf '%s\n' "$FAKE_R_BIND" ;;
             esac
             ;;

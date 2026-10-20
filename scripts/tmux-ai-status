@@ -80,20 +80,28 @@ _current_pane_status() {
 
 # Notification「隐式」路径（idle_prompt / waiting for your input）的状态解析：
 # 通知可能乱序晚到（async hook 无顺序保证），不能无条件降级为 idle '-'。
-# 优先级：pending 派生（工具确实在跑 → '>'）> live 审批态（!/?；claude 不写
-# pending-perm，纯派生看不见审批态）> idle '-'。
+# 判定顺序（⚠️ 不能颠倒）：
+#   1. live 审批态 !/? → 保持。审批等待期间 pending-pre 非空（PreToolUse 先于
+#      PermissionRequest），若先看 pending 会派生出 '>' 把 '!' 降级——违反
+#      「审批态永不覆盖」
+#   2. pending 派生出 !/? → 采用（codex/opencode 的审批集合；claude 不写 perm）
+#   3. pending 派生出 '>' → **仅当存在 10s 内的新条目才可信**（并发 hook 抢锁
+#      超时会让清理静默放弃，集合可能残留陈旧 id），否则视为残留
+#   4. 其余 → '-'
 # 显式重置消息（denied/cancelled/rejected）不走本函数——denial 携带「等待已结束」
 # 语义，应无条件置 '-'。
 _notification_implicit_status() {
-    if _derive_status_from_pending; then
-        printf '%s' "$DERIVED"
-        return
-    fi
     local live
     live=$(_current_pane_status)
     case "$live" in
         "!"|"?") printf '%s' "$live"; return ;;
     esac
+    if _derive_status_from_pending; then
+        case "$DERIVED" in
+            "!"|"?") printf '%s' "$DERIVED"; return ;;
+        esac
+        if _pending_recent 10; then printf '%s' ">"; return; fi
+    fi
     printf '%s' "-"
 }
 
