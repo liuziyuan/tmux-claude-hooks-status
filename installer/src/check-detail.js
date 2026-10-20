@@ -95,6 +95,14 @@ export async function checkToolDetail(tool, { run } = {}) {
   };
 }
 
+// 重复注册检测：同事件下 registered > 1 表示有多条本插件 command（跨 group 或多 group）。
+// 只用于提示——codex 重写 hooks.json 会使 trusted_hash 失效，因此不自动收敛。
+export function findDuplicateEvents(detail) {
+  return Object.entries(detail?.events || {})
+    .filter(([, e]) => Number(e?.registered) > 1)
+    .map(([event, e]) => ({ event, registered: Number(e.registered) }));
+}
+
 // 渲染单工具明细为人类可读行。drift 行用 ⚠ 前缀（脚本仍可用，功能未坏，
 // 但指向的安装源不是当前 source——收敛入口在 TUI 侧）。
 export function renderToolDetail(detail) {
@@ -106,6 +114,17 @@ export function renderToolDetail(detail) {
     lines.push(`  ${NO} hooks 缺失或损坏（真源：${modeNote}）`);
   } else {
     lines.push(`  ${NO} 无法判定：${detail.error || '未知错误'}`);
+  }
+
+  // codex 重复注册：功能性提示（status 仍 ok、exit code 不变），收敛需显式操作
+  if (detail.tool === 'codex') {
+    const dups = findDuplicateEvents(detail);
+    if (dups.length > 0) {
+      const list = dups.map((d) => `${d.event}×${d.registered}`).join('、');
+      lines.push(
+        `  ${WARN} codex hooks 重复注册：${list}——codex 不会自动收敛（重写 hooks.json 会使 trusted_hash 失效，需要重新 Trust all）；可用 TMUX_AI_FORCE_INSTALL=1 重跑 install-codex-hooks.sh，或使用 TUI 收敛入口（会先确认 re-trust 代价）`
+      );
+    }
   }
 
   if (detail.suppress) {

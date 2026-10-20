@@ -169,6 +169,25 @@ assert_eq "2" "$(jqa "$out" '.trust.instances | length')" "instances 汇总当�
 assert_eq "1" "$(jqa "$out" '[.trust.instances[] | select(.trusted == false)] | length')" "未授信实例被标出"
 assert_eq "false" "$(jqa "$out" '[.trust.instances[] | select(.configFile | contains("/instances/codex/abc/"))] | .[0].trusted')" "abc 实例判为未授信"
 
+# ── 用例 7c: codex 重复注册——status 仍 ok、exit 0、普通 install 不自动收敛 ──
+H=$(new_home c7c); export HOME="$H"
+bash "$W_CODEX" >/dev/null
+jq '.hooks.PreToolUse += [.hooks.PreToolUse[0]]' "$H/.codex/hooks.json" > "$H/.codex/hooks.json.tmp" \
+    && mv "$H/.codex/hooks.json.tmp" "$H/.codex/hooks.json"
+rc=0; out=$(bash "$W_CODEX" check --json) || rc=$?
+assert_eq "0" "$rc" "重复条目 check --json 仍 exit 0"
+assert_eq "ok" "$(jqa "$out" .status)" "重复条目 status 仍 ok"
+assert_eq "2" "$(jqa "$out" '.events.PreToolUse.registered')" "重复条目 registered=2"
+assert_eq "ok" "$(bash "$W_CODEX" check)" "重复条目默认 check 仍 ok"
+# 普通 install 走 no-op 门禁（重写会 re-trust），重复保持——这是修复 2 提示的前提
+no_op_out=$(bash "$W_CODEX")
+case "$no_op_out" in
+    *"no-op"*) ;;
+    *) echo "FAIL: 重复条目普通 install 应 no-op"; exit 1 ;;
+esac
+out=$(bash "$W_CODEX" check --json)
+assert_eq "2" "$(jqa "$out" '.events.PreToolUse.registered')" "no-op 后重复仍在"
+
 # ── 用例 8: opencode plugin 漂移 + force 收敛 ──
 H=$(new_home c8); export HOME="$H"
 bash "$W_OPENCODE" >/dev/null
