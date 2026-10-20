@@ -55,6 +55,60 @@ _hooks_suppress_clear() {
     fi
 }
 
+# --- 安装/卸载读-改-写互斥锁 ---
+# 写路径的并发方：TUI 显式装 / tmux 入口 auto / SessionStart 自修复 / _maybe_repair_hooks /
+# drift 收敛——五方都经 wrapper dispatch，锁在此层一处覆盖三 adapter。
+# mkdir mutex（项目风格同 .lock/.event-lock；macOS 无 flock(1)）。两种失败语义区分：
+# - 锁目录建不出来（权限/ENOTDIR）→ 降级无锁继续 + 告警（历史行为是无锁写；install
+#   真正写目标与锁目录不同权限域，锁失败不代表写不了）
+# - 他人持锁 → 等待（0.2s × 50 ≈ 10s）→ stale（10s）强夺 → 超时报错 return 1（显式操作可见）。
+#   ⚠️ codex SessionStart 是同步 hook（timeout:5s）：极端并发下锁等待可能超过 5s 使该次
+#   hook 超时——后果轻（该次 hook 不执行、codex 继续、无阻塞），概率极低（repair 60s 一次）。
+# 边界：锁只收敛「我们自己的多方」；Claude Code 自身写 settings.json 不遵守本锁（外部
+# 写者无法防）——这正是 60s 自修复存在的原因。写路径互斥由 wrapper 层负责，adapter
+# 函数不含锁——直接 source adapter 调 install 会绕过锁。
+_install_lock_dir() { printf '%s/.install-lock-%s' "$_SUPPRESS_DIR" "$1"; }
+_install_acquire_lock() {  # $1=tool id → 0=持锁 1=超时（2=降级无锁，调用方继续）
+    local lock; lock=$(_install_lock_dir "$1")
+    if ! mkdir -p "$_SUPPRESS_DIR" 2>/dev/null; then
+        echo "WARN: 锁目录不可创建（$_SUPPRESS_DIR），降级无锁继续安装" >&2
+        return 2
+    fi
+    local _start=$SECONDS i
+    for i in {1..50}; do
+        if mkdir "$lock" 2>/dev/null; then
+            echo "$$" > "$lock/owner"
+            return 0
+        fi
+        # stale 强夺：持锁者进程已死 → 立即夺；锁 mtime 超 10s → 强夺。
+        # 外部命令（stat/sleep/rmdir）逐一防御退出码——ccswitch 用例 8 的 stubbin
+        # 是最小 PATH 沙箱（无 stat/rmdir/sleep），127 会在 errexit 下炸掉 install。
+        local owner mtime
+        owner=$(cat "$lock/owner" 2>/dev/null)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$lock/owner" 2>/dev/null || true
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        mtime=""
+        mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || true)
+        if [ -n "$mtime" ] && [ $(( _start + SECONDS - mtime )) -ge 10 ]; then
+            echo "WARN: 强夺超时的安装锁（owner=${owner:-?}）" >&2
+            rm -f "$lock/owner" 2>/dev/null || true
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        sleep 0.2 2>/dev/null || :
+    done
+    echo "ERROR: 安装锁获取超时（$lock）——另一安装操作可能仍在进行，稍后重试" >&2
+    return 1
+}
+_install_release_lock() {  # $1=tool id
+    local lock; lock=$(_install_lock_dir "$1")
+    rm -f "$lock/owner" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+}
+
 # --- check --json：完整性明细 JSON（wrapper 专用，事件热路径不触达）---
 # stdout = 单行紧凑 JSON；exit code 与默认 check 一致（ok→0 / missing→1）。
 # status 判定复用 adapter_check_integrity 本体（同一真源，与 ok/missing 永不发散）；

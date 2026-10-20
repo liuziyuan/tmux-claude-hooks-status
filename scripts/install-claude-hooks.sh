@@ -18,6 +18,21 @@ _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "${_LIB_DIR}/lib-install-hooks.sh"
 source "${_LIB_DIR}/adapters/claude.sh"
 
+# 写路径互斥（check 只读不锁）：临界区覆盖 adapter 调用 + suppress 标记读-改-写，
+# 串行化 auto 与显式 uninstall 的标记 TOCTOU。失败语义见 _install_acquire_lock：
+# 降级无锁（rc=2）继续；等待超时（rc=1）退出。
+case "${1:-install}" in
+    check) ;;
+    *)
+        _lock_rc=0
+        _install_acquire_lock claude || _lock_rc=$?
+        if [ "$_lock_rc" = 1 ]; then exit 1; fi
+        if [ "$_lock_rc" = 0 ]; then
+            trap '_install_release_lock claude' EXIT
+        fi
+        ;;
+esac
+
 case "${1:-install}" in
     uninstall)
         adapter_uninstall_hooks
