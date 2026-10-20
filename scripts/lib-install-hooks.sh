@@ -15,14 +15,45 @@ _install_require_jq() {
     fi
 }
 
-# 原子写入：mktemp 与目标同目录 → 同文件系统 → mv 原子。
+# 解析符号链接到最终真实路径（不要求目标存在——悬空链接同样要解析）。
+# 相对链接基于链接所在目录解析；循环/超深链（>40 层）返回 1，调用方回退原路径。
+# 用途：cc-switch 为每个 codex provider 建独立 CODEX_HOME，并把 hooks.json 做成
+# 指向 ~/.codex/hooks.json 的符号链接（所有实例共享同一真源）。mv 作用于链接路径
+# 时只替换链接本身，因此写入必须解析到真实目标，否则实例与共享真源分叉。
+_install_real_target() {  # $1=路径 → stdout 最终路径
+    local p="$1" link n=0
+    while [ -L "$p" ]; do
+        n=$((n + 1))
+        [ "$n" -le 40 ] || return 1
+        link=$(readlink "$p" 2>/dev/null) || return 1
+        [ -n "$link" ] || return 1
+        case "$link" in
+            /*) p="$link" ;;
+            *)  p="$(dirname "$p")/$link" ;;
+        esac
+    done
+    printf '%s\n' "$p"
+}
+
+# 原子写入：mktemp 与真实目标同目录 → 同文件系统 → mv 原子。
 # 避免与 AI CLI 并发写产生竞态导致 hooks 字段丢失。
+# 符号链接先解析：临时文件建在真实目标目录，mv 写穿链接（保留链接本身）。
 _install_atomic_write() {
-    local content="$1" target="$2" tmp
-    mkdir -p "$(dirname "$target")" 2>/dev/null || true
-    tmp=$(mktemp "$(dirname "$target")/.hooks.XXXXXX")
+    local content="$1" target="$2" tmp real
+    real=$(_install_real_target "$target") || real="$target"
+    mkdir -p "$(dirname "$real")" 2>/dev/null || true
+    tmp=$(mktemp "$(dirname "$real")/.hooks.XXXXXX")
     printf '%s\n' "$content" > "$tmp"
-    mv -f "$tmp" "$target"
+    mv -f "$tmp" "$real"
+}
+
+# 删除写入目标（uninstall 清空时用）：符号链接解析后只删真实目标，保留链接
+# （指向悬空，下次 install 写穿即恢复共享）。直接 rm 链接会删掉链接本身，把
+# 共享真源留在原地——其他实例仍被注册，语义与「卸载」矛盾。
+_install_remove_target() {  # $1=路径
+    local target="$1" real
+    real=$(_install_real_target "$target") || real="$target"
+    rm -f "$real"
 }
 
 # --- 卸载意图标记（suppression marker）---
