@@ -113,26 +113,51 @@ _snapshot_has_pane() {  # $1=pane_id
 }
 
 # 从当前进程沿父链向上匹配 pane_pid；命中即返回该 pane（权威信号）。
+# $1 可选进程快照（_ps_process_snapshot 输出）：调用方（resolve_tmux_pane）
+# 传入以复用同一份快照（ancestry 与进程树候选共用，每事件一次 ps）；空参自取。
+# 一次 awk 同时建 ppid 映射与 pane_pid→pane_id 表，从 $$ 内存爬链——
+# depth<24 / pid>1 语义与旧逐层 `ps -o ppid=` 版一致；快照是瞬时一致视图，
+# 还消除了逐层实时 ps 的爬链中途进程死亡问题。
 _pane_from_ancestry() {
-    local pid=$$ depth=0 found
-    while [ "${pid:-0}" -gt 1 ] && [ "$depth" -lt 24 ]; do
-        found=$(printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' -v p="$pid" '$4==p{print $1; exit}')
-        if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-        depth=$((depth + 1))
-    done
-    return 1
+    local snapshot="${1:-}"
+    [ -n "$snapshot" ] || snapshot=$(_ps_process_snapshot)
+    [ -n "$snapshot" ] || return 1
+    # ps 快照与 pane 快照均为变量内容（非文件），各经 process substitution 进 awk：
+    # 第一个文件（NR==FNR）建 ppid 映射，第二个建 pane_pid→pane_id 表，END 爬链。
+    # ⚠️ split 必须用单空格 " "（awk 特殊语义：忽略前导/尾部空白、折叠连续分隔），
+    # 不能用 /[ \t]+/——macOS ps 的 pid 列宽随快照最大 pid 位数浮动，4 位 pid 行
+    # 带前导空格，正则 split 的首字段会是空串（pid 全部错位/丢弃），爬链在低位
+    # pid 处断链——表现为偶发 PANE: unresolved（实测踩坑，2026-10-20）。
+    awk -F'|' -v self="$$" '
+        NR==FNR {
+            split($0, a, " ")
+            if (a[1] != "") ppid[a[1]] = a[2]
+            next
+        }
+        $4 != "" { pane_by_pid[$4] = $1 }
+        END {
+            pid = self
+            depth = 0
+            while (pid + 0 > 1 && depth < 24) {
+                if (pid in pane_by_pid) { print pane_by_pid[pid]; exit 0 }
+                if (!(pid in ppid)) exit 1
+                pid = ppid[pid] + 0
+                depth++
+            }
+            exit 1
+        }' <(printf '%s\n' "$snapshot") <(printf '%s\n' "${_PANE_SNAPSHOT:-}")
 }
 
 # 当前工具在 attached pane 中的候选集合（进程树含 ADAPTER_PROCESS_NAMES）。
+# $1 可选进程快照：透传给 _pid_tree_has_names，避免每个候选 pane 各起一次 ps。
 _pane_process_candidates() {
-    local names="${ADAPTER_PROCESS_NAMES:-}" id path cmd pid server attached title
+    local names="${ADAPTER_PROCESS_NAMES:-}" snapshot="${1:-}" id path cmd pid server attached title
     [ -n "$names" ] || return 1
     [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
     while IFS='|' read -r id path cmd pid server attached title; do
         [ -n "$id" ] || continue
         [ "${attached:-0}" -gt 0 ] || continue
-        if _pid_tree_has_names "$pid" "$names"; then printf '%s\n' "$id"; fi
+        if _pid_tree_has_names "$pid" "$names" "$snapshot"; then printf '%s\n' "$id"; fi
     done <<EOF
 $_PANE_SNAPSHOT
 EOF
@@ -214,7 +239,10 @@ resolve_tmux_pane() {
 
     # 1) 祖先链是权威信号（普通启动 / 旧 cc-switch / Claude 的 pane 内 hook）
     _load_pane_snapshot || return 1
-    pane=$(_pane_from_ancestry)
+    # 进程快照取一次，ancestry 爬链与进程树候选共用（每事件 1 次 ps 而非 4-6 次）
+    local ps_snap
+    ps_snap=$(_ps_process_snapshot)
+    pane=$(_pane_from_ancestry "$ps_snap")
     if [ -n "$pane" ]; then
         TMUX_PANE="$pane"
         _TMUX_PANE_SOURCE="ancestry"
@@ -238,7 +266,7 @@ resolve_tmux_pane() {
     fi
 
     # 3) 同工具进程树候选 → adapter 提示 → hook cwd
-    candidates=$(_pane_process_candidates)
+    candidates=$(_pane_process_candidates "$ps_snap")
     if [ -n "$candidates" ]; then
         n=$(printf '%s\n' "$candidates" | grep -c .)
         if [ "$n" -gt 1 ]; then

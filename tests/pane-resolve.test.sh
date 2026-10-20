@@ -35,6 +35,9 @@ TOOL_ID="codex"
 EVENT="PreToolUse"
 source "$ROOT/scripts/lib-tmux-ai-status.sh"
 
+# 保存 source 版真实现（下方 stub 会覆盖；末尾用例恢复验证快照爬链）
+_REAL_ANCESTRY_FN=$(declare -f _pane_from_ancestry)
+
 # 进程树模拟：FAKE_TREE 里列出的 pane_pid 视为有 codex 进程
 FAKE_TREE=""
 _pid_tree_has_names() {
@@ -147,5 +150,49 @@ assert_eq '0' "$scan_count" "negative cache skips scanning"
 assert_eq '回复问候' "$(_normalize_title '✳ 回复问候')" "title ✳ prefix"
 assert_eq 'thread-A' "$(_normalize_title '*   thread-A ')" "title * prefix + spaces"
 assert_eq "$PWD" "$(_normalize_path "$PWD/")" "path trailing slash"
+
+# ── 10: 真实现快照爬链命中（eval 恢复 source 版）──
+reset_case
+eval "$_REAL_ANCESTRY_FN"
+mypid=$$
+_PANE_SNAPSHOT="$(pane_line '%42' "$mypid")"; _PANE_SNAPSHOT_OK=1
+assert_eq '%42' "$(_pane_from_ancestry "4242 $mypid zsh")" "real ancestry: direct hit"
+
+# ── 11: 真实现深度爬链（$$ → 500 → 400 → 300 → 100=pane_pid）──
+_PANE_SNAPSHOT="$(pane_line '%42' 100)"
+assert_eq '%42' "$(_pane_from_ancestry "500 400 a
+400 300 b
+300 100 c
+100 1 init
+$mypid 500 hook")" "real ancestry: deep walk"
+
+# ── 11b: macOS 真实 ps 输出形态（pid 列右对齐 → 行带前导空格）──
+# split 必须用单空格语义：正则 /[ \t]+/ 的首字段是空串，pid 全部错位丢弃，
+# 爬链在低位 pid 断链（偶发 unresolved，2026-10-20 踩坑）
+_PANE_SNAPSHOT="$(pane_line '%42' 100)"
+assert_eq '%42' "$(_pane_from_ancestry "  500   400 a
+  400   300 b
+  300   100 c
+  100     1 init
+  $mypid   500 hook")" "real ancestry: macOS padded ps output"
+
+# ── 12: 真实现无匹配 → return 1 ──
+_PANE_SNAPSHOT="$(pane_line '%42' 999)"
+_pane_from_ancestry "4242 $mypid zsh" >/dev/null 2>&1 \
+    && { echo "FAIL: real ancestry should miss" >&2; exit 1; }
+
+# ── 13: resolve 全程只取一次进程快照（ancestry 与候选共用）──
+reset_case
+# case 8 的计数 stub 覆盖了 FAKE_TREE 版，此处恢复
+_pid_tree_has_names() { case " $FAKE_TREE " in *" $1 "*) return 0 ;; esac; return 1; }
+FAKE_SNAPSHOT="$(pane_line '%16' 100)"
+FAKE_TREE="100"; SESSION_ID="sid-ps"
+# 计数用文件：_ps_process_snapshot 经 $(...) 命令替换执行，子 shell 里的变量
+# 递增对父 shell 不可见，只能落盘
+: > "$TEST_TMP/ps-count"
+_ps_process_snapshot() { echo x >> "$TEST_TMP/ps-count"; printf '%s\n' "$mypid 1 zsh"; }
+resolve_tmux_pane
+assert_eq '%16' "$TMUX_PANE" "resolve via real ancestry + candidates"
+assert_eq '1' "$(wc -l < "$TEST_TMP/ps-count" | tr -d ' ')" "single ps snapshot per resolve"
 
 echo "PASS: pane-resolve 用例全部通过"
