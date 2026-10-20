@@ -342,6 +342,16 @@ adapter_install_hooks() {
             _ccswitch_warn_gui
             _ccswitch_dump_common tmp || return 1
             merged=$(_claude_apply_merge "$tmp")
+            # 语义不变跳写：merge 只动 .hooks，顶层其他字段天然继承 tmp——
+            # 两边 jq -S 规范化对比，相同则跳过 upsert（GUI 冲掉 hooks 时
+            # 库内现值 ≠ merged，恒不跳，对抗不弱化；行缺失时 tmp={}，
+            # merged 恒含 10 事件，同样恒不跳）
+            if [ "$(jq -S . "$tmp" 2>/dev/null)" = "$(jq -S . <<<"$merged" 2>/dev/null)" ]; then
+                rm -f "$tmp"
+                echo "Claude hooks already up to date in cc-switch common config (skip write)"
+                echo "Events: $_CLAUDE_EVENTS"
+                return 0
+            fi
             rm -f "$tmp"
             hooks_patch=$(jq -c '{hooks: (.hooks // {})}' <<<"$merged")
             full_doc=$(jq -c . <<<"$merged")
@@ -360,6 +370,14 @@ adapter_install_hooks() {
     esac
     [ -f "$target" ] || _install_atomic_write '{}' "$target"
     updated=$(_claude_apply_merge "$target")
+    # 语义不变跳写：jq 输出格式与手写文件不同，字节 cmp 不可用——两边 jq -S
+    # 规范化后比较（命令替换对称剥尾换行）。跳写不触碰 mtime，避免触发 Claude
+    # Code file watcher 的无谓 hooks 重载。
+    if [ "$(jq -S . "$target" 2>/dev/null)" = "$(jq -S . <<<"$updated" 2>/dev/null)" ]; then
+        echo "Claude hooks already up to date at $target (skip write)"
+        echo "Events: $_CLAUDE_EVENTS"
+        return 0
+    fi
     _install_atomic_write "$updated" "$target"
     echo "Claude hooks installed to $target"
     echo "Events: $_CLAUDE_EVENTS"
@@ -412,6 +430,11 @@ adapter_uninstall_hooks() {
     esac
     [ -f "$target" ] || { echo "Claude hooks: nothing to uninstall"; return 0; }
     updated=$(_claude_apply_strip "$target")
+    # 无本插件条目时 strip 无变化 → 跳写（不触碰 mtime）
+    if [ "$(jq -S . "$target" 2>/dev/null)" = "$(jq -S . <<<"$updated" 2>/dev/null)" ]; then
+        echo "Claude hooks: nothing to uninstall from $target (skip write)"
+        return 0
+    fi
     _install_atomic_write "$updated" "$target"
     echo "Claude hooks uninstalled from $target"
 }
