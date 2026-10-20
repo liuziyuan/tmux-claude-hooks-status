@@ -130,3 +130,56 @@ test('summarizeDetails aggregates missing/drift/error', () => {
   assert.equal(summarizeDetails([mk({ drift: { drifted: true } })]).hasDrift, true);
   assert.equal(summarizeDetails([mk({ status: 'unknown' })]).hasError, true);
 });
+
+test('checkToolDetail parses codex trust dimension', async () => {
+  const json = JSON.stringify({
+    tool: 'codex', status: 'ok', mode: 'file', suppress: false, events: {},
+    plugin: null, registeredPaths: [],
+    trust: {
+      configFile: '/h/.codex/config.toml', trusted: false, missingEvents: ['stop'],
+      instances: [
+        { configFile: '/h/.codex/config.toml', hooksFile: '/h/.codex/hooks.json', trusted: false, missingEvents: ['stop'] },
+        { configFile: '/h/.cc-switch/instances/codex/a/config.toml', hooksFile: '/h/.cc-switch/instances/codex/a/hooks.json', trusted: false, missingEvents: ['session_start', 'stop'] },
+      ],
+    },
+    drift: { drifted: false, expected: '/a/tmux-ai-status', currentScriptsDir: '/a', stale: [] },
+  });
+  const d = await checkToolDetail({ ...TOOL, id: 'codex' }, { run: runFrom({ stdout: json, exitCode: 0 }) });
+  assert.equal(d.trust.trusted, false);
+  assert.deepEqual(d.trust.missingEvents, ['stop']);
+  assert.equal(d.trust.instances.length, 2);
+});
+
+test('renderToolDetail renders untrusted hooks and other instances', () => {
+  const lines = renderToolDetail({
+    ok: true, status: 'ok', tool: 'codex', label: 'Codex', mode: 'file',
+    suppress: false, events: {}, plugin: null, registeredPaths: [], drift: null, error: null,
+    trust: {
+      configFile: '/h/.codex/config.toml', trusted: false, missingEvents: ['stop'],
+      instances: [
+        { configFile: '/h/.codex/config.toml', trusted: false, missingEvents: ['stop'] },
+        { configFile: '/h/.cc-switch/instances/codex/a/config.toml', trusted: false, missingEvents: ['session_start'] },
+      ],
+    },
+  });
+  const text = lines.join('\n');
+  assert.match(text, /hooks 未授信/);
+  assert.match(text, /Trust all/);
+  assert.match(text, /其他实例未授信/);
+  assert.match(text, /instances\/codex\/a/);
+});
+
+test('renderToolDetail renders trust record / unknown states', () => {
+  const mk = (trust) => ({
+    ok: true, status: 'ok', tool: 'codex', label: 'Codex', mode: 'file', suppress: false,
+    events: {}, plugin: null, registeredPaths: [], drift: null, error: null, trust,
+  });
+  assert.match(
+    renderToolDetail(mk({ configFile: '/x', trusted: null, missingEvents: [], instances: [] })).join('\n'),
+    /无法判定授信状态/
+  );
+  assert.match(
+    renderToolDetail(mk({ configFile: '/x', trusted: true, missingEvents: [], instances: [] })).join('\n'),
+    /授信记录存在/
+  );
+});

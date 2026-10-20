@@ -131,6 +131,44 @@ out=$(bash "$W_CODEX" check --json)
 assert_eq "false" "$(jqa "$out" .drift.drifted)" "force 后漂移消除"
 assert_eq "$ROOT/scripts/tmux-ai-status" "$(jqa "$out" '.events.PreToolUse.scriptPaths[0]')" "force 后路径收敛"
 
+# ── 用例 7b: codex trust 维度（check --json 只读，不重算 trusted_hash）──
+H=$(new_home c7b); export HOME="$H"
+bash "$W_CODEX" >/dev/null
+out=$(bash "$W_CODEX" check --json)
+assert_eq "null" "$(jqa "$out" .trust.trusted)" "无 config.toml 时 trust=null"
+assert_eq "0" "$(jqa "$out" '.trust.instances | length')" "无 config.toml 时 instances 为空"
+
+# 写入 6 个事件的授信键（只判键存在，trusted_hash 值不参与判定）
+write_trust_keys() {  # $1=config.toml $2=hooks.json 路径 $3=事件（缺省全部）
+    local cfg="$1" hooks="$2" ev
+    : > "$cfg"
+    for ev in ${3:-session_start user_prompt_submit pre_tool_use permission_request post_tool_use stop}; do
+        printf '[hooks.state."%s:%s:0:0"]\ntrusted_hash = "sha256:x"\n' "$hooks" "$ev" >> "$cfg"
+    done
+}
+write_trust_keys "$H/.codex/config.toml" "$H/.codex/hooks.json"
+out=$(bash "$W_CODEX" check --json)
+assert_eq "true" "$(jqa "$out" .trust.trusted)" "6 事件受益键齐全 → trust=true"
+assert_eq "0" "$(jqa "$out" '.trust.missingEvents | length')" "无缺失事件"
+
+# 缺一个事件键 → false + missingEvents
+write_trust_keys "$H/.codex/config.toml" "$H/.codex/hooks.json" "session_start user_prompt_submit pre_tool_use permission_request post_tool_use"
+before=$(shasum "$H/.codex/config.toml" | cut -d' ' -f1)
+out=$(bash "$W_CODEX" check --json)
+assert_eq "false" "$(jqa "$out" .trust.trusted)" "缺 1 个事件键 → trust=false"
+assert_eq "stop" "$(jqa "$out" '.trust.missingEvents[0]')" "missingEvents 标出缺失事件"
+after=$(shasum "$H/.codex/config.toml" | cut -d' ' -f1)
+assert_eq "$before" "$after" "trust 判定不改写 config.toml"
+
+# 汇总 cc-switch 实例（当前实例先补齐，验证只有 abc 未授信）
+write_trust_keys "$H/.codex/config.toml" "$H/.codex/hooks.json"
+mkdir -p "$H/.cc-switch/instances/codex/abc"
+write_trust_keys "$H/.cc-switch/instances/codex/abc/config.toml" "$H/.cc-switch/instances/codex/abc/hooks.json" "session_start"
+out=$(bash "$W_CODEX" check --json)
+assert_eq "2" "$(jqa "$out" '.trust.instances | length')" "instances 汇总当前 + cc-switch 实例"
+assert_eq "1" "$(jqa "$out" '[.trust.instances[] | select(.trusted == false)] | length')" "未授信实例被标出"
+assert_eq "false" "$(jqa "$out" '[.trust.instances[] | select(.configFile | contains("/instances/codex/abc/"))] | .[0].trusted')" "abc 实例判为未授信"
+
 # ── 用例 8: opencode plugin 漂移 + force 收敛 ──
 H=$(new_home c8); export HOME="$H"
 bash "$W_OPENCODE" >/dev/null

@@ -52,7 +52,7 @@ scripts/
 - `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
-- `adapter_check_detail()` — `check --json` 明细 JSON 片段（可选实现；仅 install wrapper 的 check --json 上下文调用，失败输出降级片段不报错；不得依赖 lib-install-hooks.sh——status/suppress/drift 由 wrapper 层 `_wrapper_check_json` 拼装）
+- `adapter_check_detail()` — `check --json` 明细 JSON 片段（可选实现；仅 install wrapper 的 check --json 上下文调用，失败输出降级片段不报错；不得依赖 lib-install-hooks.sh——status/suppress/drift 由 wrapper 层 `_wrapper_check_json` 拼装）。codex 额外输出 `trust` 维度：`{configFile, trusted:true|false|null, missingEvents, instances[]}`，只判各实例 `config.toml` 的 `[hooks.state."<hooks路径>:<下划线事件>:<组>:<hook>"]` 键是否存在（不重算 trusted_hash），汇总 `$HOME/.codex` 与所有 cc-switch 实例；`trusted:null` = config.toml 不存在
 - `adapter_pane_hints()` — 可选：`TMUX_PANE` 无法由祖先链确定时，输出可能所属的 pane id（每行一个）。只读、不调用 tmux（复用核心 `_PANE_SNAPSHOT`），结果与进程树候选取交集；codex 用 `session_index.jsonl` 的 `thread_name` 匹配 pane title
 - `adapter_install_hooks()` / `adapter_uninstall_hooks()` — 安装/卸载 hooks（合并式，保留他人 hook）
 
@@ -197,7 +197,7 @@ live 模式真源固定为 `$HOME/.claude/settings.json`（cc-switch 硬编码�
 
 cc-switch 为每个 codex provider 创建独立 `CODEX_HOME`（`~/.cc-switch/instances/codex/<providerId>`），`hooks.json` 是符号链接（共享我们的安装），但 codex 的 hook 授信记录 `[hooks.state].trusted_hash` 写在**实例自己的 `config.toml`** 里。cc-switch 把 `hooks.state` 视为运行时状态、排除在共享配置之外，也不会复制到新实例 → 新 provider 首次启动时 codex 弹「Hooks need review」，未选 **Trust all** 则 hooks 全部不执行，状态栏收不到任何事件（pane 可能只显示 monitor 补的 `-`）。
 
-`trusted_hash` 是 codex 对归一化 hook 配置的指纹，bash 侧无法可靠复现（与 0.144 的结论一致），因此插件**不预写/不复制信任记录**——需用户在 codex TUI 内对每个新实例授信一次。判定方法：实例 `config.toml` 无 `hooks.state` 键 → 未授信。
+`trusted_hash` 是 codex 对归一化 hook 配置的指纹，bash 侧无法可靠复现（与 0.144 的结论一致），因此插件**不预写/不复制信任记录**——需用户在 codex TUI 内对每个新实例授信一次。判定方法：实例 `config.toml` 无 `hooks.state` 键 → 未授信。**可观测性（2026-10-20）**：`check --json` 新增 `trust` 维度，`tmuxclihook check` 与 TUI 明细显示当前实例及其他实例的授信状态；**键缺失 = 一定不执行；键存在 ≠ hash 匹配**（hooks 被改写后旧键仍在，codex 会重新弹 Trust）。
 
 **codex daemon 的 pane 归属是启发式（2026-10-19）**
 
