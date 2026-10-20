@@ -166,7 +166,7 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 - **SessionStart `source` 五值**（官方，2026-10 核实）：`startup`（新会话）/ `resume`（--resume 等）/ `clear`（/clear）/ `compact`（压缩后）/ `fork`（--fork-session 等）——每次 resume/clear/fork 都会重新触发 SessionStart（含其 integrity 校验路径）
 - **Stop 触发语义**：Claude 完成响应即触发（"not only at task completion"）；**用户 interrupt 不触发**
 - **Hooks 合并式安装**：`install-claude-hooks.sh` 仅清理 stale tmux-ai-status 条目并追加本插件命令，保留其他工具（masko-desktop 等）注册的 hook
-- **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`
+- **Notification 事件细分**：idle_prompt / waiting for input 走「隐式路径」——**不无条件写 `-`**（`_notification_implicit_status`）：pending 派生（工具在跑）> live 审批态 `!`/`?` > `-`；denied/cancelled 是「显式重置」，无条件 `-`
   - `idle_prompt`：Claude 完成响应约 60 秒且用户未输入时触发；`permission_prompt`：权限提示**已等待约 6 秒**后才触发（官方 "the prompt has waited about six seconds"，每次按键会推迟计时器）——它到达时 `!` 已经由 sync PermissionRequest 写好，handler 走 PREV 保持分支（安全）
   - 官方明确指引："To run a hook immediately when Claude asks for permission to use a tool, use PermissionRequest instead."——佐证 PermissionRequest 必须保持 sync 的设计
   - `denied/cancelled` 文案匹配是防御性死分支：2026-10 实测（claude 2.1.304）Notification 只有 `idle_prompt`/`permission_prompt` 两类，匹配从未命中（与「点 No 完全静默」记载一致），保留作上游行为变化的哨兵
@@ -188,6 +188,10 @@ cc-switch GUI 会把内存中的通用配置在其某些操作（含退出）时
 legacy（cc-switch < 4.0.2）模式下 hooks 真源在 db 通用配置，只有经 `switch` 启动（`CLAUDE_CONFIG_DIR` 指向实例）的 claude 会读到；用户直接跑 `claude`（读 `~/.claude/settings.json`）时本插件 hooks 不生效，该 pane 无状态。接受为此场景的已知限制（主路径是 `switch`）。**live（4.0.2+）模式不存在该限制**：真源本身就是 `~/.claude/settings.json`，裸跑与 `switch` 启动都生效。
 
 **决策（2026-10-13）**：评估过「db + 原生 settings.json 双写」方案，不做——针对 legacy 模式，双写唯一收益是覆盖裸跑场景，用户确认几乎不裸跑；代价是原生写入永久处于「被 cc-switch 覆盖 → 60s 自修复重写」的拉锯（CLAUDE.md 前文实测：原生文件会被 cc-switch 覆盖）。live 模式无需双写：原生文件即真源。若 legacy 使用模式变化再重新评估。
+
+**live 模式 + 自定义 `CLAUDE_CONFIG_DIR` 的错配（2026-10-20，诊断告警）**
+
+live 模式真源固定为 `$HOME/.claude/settings.json`（cc-switch 硬编码，不随 `CLAUDE_CONFIG_DIR` 变）。若 db 残留（仍判 live）而用户以**自定义** `CLAUDE_CONFIG_DIR` 裸跑 claude，该进程读的是自定义目录，插件写入的真源不生效——check 恒「已装」、自修复永不触发。`adapter_install_hooks` 的 live 分支检测到 `CLAUDE_CONFIG_DIR` 非 `~/.cc-switch/instances/claude/` 前缀时 stderr 告警。**不做双写**（理由同 2026-10-13 决策）。
 
 **codex 每个新 provider 实例需重新 Trust all（2026-10-19 实测）**
 
@@ -307,6 +311,9 @@ bash tests/pane-resolve.test.sh
 bash tests/monitor-selfcheck.test.sh
 bash tests/suppress-cross-source.test.sh
 bash tests/status-machine.test.sh
+bash tests/pid-tree.test.sh
+bash tests/install-idempotency.test.sh
+bash tests/bindings.test.sh
 ```
 
 ### 快捷键
@@ -318,7 +325,9 @@ bash tests/status-machine.test.sh
 | `prefix + M-h` | 安装 Codex hooks |
 | `prefix + M-u` | 卸载 Codex hooks |
 | `prefix + I` | 打开交互式 TUI 安装器（环境检查/侦测CLI/装卸修hooks/软链校验） |
-| `prefix + r` | 重载 tmux 配置（含插件初始化） |
+| `prefix + r` | 重载 tmux 配置（helper 脚本：source 实际存在的配置文件 + 重跑插件初始化；原绑定保存于 `@claude_hooks_saved_bind_r`） |
+
+> 全局 `Escape` 绑定被插件占用（`!`/`?` 状态时拒绝检测）。既有绑定会在覆盖前保存到 `@claude_hooks_saved_bind_escape` 并一次性告警；恢复：`eval "$(tmux show-option -gv @claude_hooks_saved_bind_escape)"`。
 
 ### Node TUI 安装器（installer/）
 
@@ -331,12 +340,17 @@ bash tests/status-machine.test.sh
 ## 关键设计决策
 
 - **共享库架构**：通过 `lib-tmux-ai-status.sh` 提供通用功能，`TOOL_ID` 区分状态变量和临时文件
-- **Attached-only 显示**：`build_all_status()` 按「进入时间 → 创建时间」两级升序排列（`window_index`/`pane_index` 次之），仅显示 attached session。进入时间 = `client-session-changed` hook（attach 与 switch-client 的共同汇聚点）时 `_session-switched` 写入的 session option `@ai_entered_time`（刚进入的 session 排最后；无记录回退 `session_created`）。该 hook 对自指 switch 也触发（tmux 源码无 `old != s` 守卫），handler 用 per-client 自维护的上次 session（server option `@ai_prev_sess_<client>`）对比过滤：`cur != prev` 才算真进入。不用 `session_last_attached`：tmux 对该时间戳无条件刷新（自指 switch 也算），会污染「刚进入的排最后」的预期。不用 `client-attached`：switch-client 进入（tmuxtui 在已 attach 的 client 里切项目）不触发它。hook 命令传 `#{hook_client}`（3.7c/3.8 均展开为触发 client 名）——**不存在 `#{hook_client_name}` 变量**（tmux 任何版本都没有；误用恒展开为空，handler 的 `[ -n "$3" ]` 守卫静默跳过，entered_time 从不写入、排序退化 created 序，2026-10-16 实测踩坑）
+- **Attached-only 显示**：`build_all_status()` 按「进入时间 → 创建时间」两级升序排列（`window_index`/`pane_index` 次之），仅显示 attached session。进入时间 = `client-session-changed` hook（attach 与 switch-client 的共同汇聚点）时 `_session-switched` 写入的 session option `@ai_entered_time`（刚进入的 session 排最后；无记录回退 `session_created`）。该 hook 对自指 switch 也触发（tmux 源码无 `old != s` 守卫），handler 用 per-client 自维护的上次 session（server option `@ai_prev_sess_<client>`）对比过滤：`cur != prev` 才算真进入（已断开 client 的残留键由 `_prune_prev_sess_options` 在 60s 节流清理中剪枝）。不用 `session_last_attached`：tmux 对该时间戳无条件刷新（自指 switch 也算），会污染「刚进入的排最后」的预期。不用 `client-attached`：switch-client 进入（tmuxtui 在已 attach 的 client 里切项目）不触发它。hook 命令传 `#{hook_client}`（3.7c/3.8 均展开为触发 client 名）——**不存在 `#{hook_client_name}` 变量**（tmux 任何版本都没有；误用恒展开为空，handler 的 `[ -n "$3" ]` 守卫静默跳过，entered_time 从不写入、排序退化 created 序，2026-10-16 实测踩坑）
 - **set-hook 是 upsert**：改 hook 名或从入口删除 hook 行时，tmux server 里已注册的旧 hook 不会消失（prefix+r 重载不清），需手动 `tmux set-hook -ug <hook>` 清除，否则旧命令继续触发（case 无匹配时静默 no-op，但属脏状态）
 - **Pane 解析与 daemon 适配（2026-10-19）**：祖先链（`ps -o ppid` 向上匹配 pane_pid）是权威信号；**祖先链不通说明 hook 跑在脱离 pane 的常驻进程里（如 codex 0.163 managed app-server daemon，ppid=1），此时继承的 `$TMUX_PANE` 一律丢弃**——实测它可能指向当前 server 中真实存在但无关的 pane（不只是「指向不存在的 pane」）。兜底顺序：session 映射（`.pane-meta-*` 校验 tool/server_pid/pane_pid/cwd，防 server 重启后 pane id 复用）→ 当前工具的进程树候选 → `adapter_pane_hints`（codex: `thread_name` ↔ pane title）→ hook cwd 与 `pane_current_path`；只有唯一候选才采用，多候选保持空（monitor 补 idle `-`）。失败结果 5s 负缓存，避免 daemon 高频 hook 反复 BFS。`adapter_pane_hints` 只读、不调用 tmux（复用核心一次性 `_PANE_SNAPSHOT`）
 - **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为。**launcher 识别（2026-10-19）**：cc-switch 的 `switch` 启动时 `pane_current_command` 是 `switch`/`volta-shim`/`node` 而非 `codex`，原实现既补不出 idle `-`、`/exit` 后也不会清状态；现对 attached 的 launcher pane 每 tick 做一次进程树探测（每 tick 一次 `ps` 快照 + 一次 awk 批量 BFS），命中即写 `@ai_monitor_seen_<tool>`，`build_all_status` 用该标记补 `-`，退出时沿用既有清理分支。**性能（2026-10-19）**：旧实现逐 pane 调 `_pane_has_tool_process`（每个 pid 各起一次 `ps`/`pgrep`），launcher 多的环境单 tick 达 2.8s，叠加 5 tick 节流后新启动 codex 需 7-8s 才显示；改为一次进程快照 + 内存/awk BFS 后单 tick ~0.23s，探测也改为每 tick（新工具 ≤1 tick 显示）。**升级自重启（2026-10-19）**：monitor 启动时记录脚本目录内容指纹（`cksum`），每 60 tick 对比；npm 升级/重装替换文件后同 PID `exec` 自身重载新代码（保留 generation/server pid，`@ai_monitor_pid` 不变）。用内容指纹而非 mtime——npm 可能保留 tarball 旧 mtime。`TMUX_AI_MONITOR_RELOAD_DISABLE=1` 可关闭
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
-- **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）
+- **写路径互斥与幂等（2026-10-20）**（PR-B）：
+  - **wrapper 层 mkdir mutex**（`_install_acquire_lock`，macOS 无 flock(1)）：临界区覆盖 adapter 装/卸 + suppress 标记读-改-写，串行化 TUI/auto/SessionStart 修复/`_maybe_repair_hooks`/drift 收敛五方。锁目录建不出（ENOTDIR）→ 降级无锁 + 告警；持锁超时（~10s）→ 报错退出。边界：Claude Code 自身写 settings.json 不遵守锁（外部写者）
+  - **语义不变跳写**：merge 输出与现值两边 `jq -S` 规范化对比，相同则不写（不触碰 mtime，避免 file watcher 无谓重载）
+  - **auto 幂等（`adapter_check_converged`）**：integrity + 全部条目指向当前源（无漂移/死条目）+ 每事件条目 ≤1（无重复）→ tmux reload 不再全量重写真源；强收敛保留（任一异常仍重装收敛）。已知 trade-off：结构漂移（async/matcher 被外部改）auto 跳过，显式 install 仍强收敛。参照系仅限 wrapper 上下文（事件路径 `pwd` 逻辑路径 vs wrapper `pwd -P` 物理路径）
+  - **suppress 标记双向告警**：write/clear 失败不再吞错（clear 失败会让残留标记把 auto 永久挡住）
+- **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）。**reload 自愈（2026-10-20）**：绑定指向 `scripts/tmux-ai-reload`（按 `#{config_files}` 候选列表逐个 `[ -f ]` 过滤后 source，再重跑入口），且**每次加载都重绑**（旧一次性哨兵会让 source 配置内的用户 `bind r` 重置绑定后不再重装，纯 TPM 模式第二次重载起初始化静默停止）。原 `prefix+r` / 全局 `Escape` 绑定在覆盖前保存到 `@claude_hooks_saved_bind_r` / `@claude_hooks_saved_bind_escape`（供手动恢复；Escape 冲突一次性告警 `@claude_hooks_esc_warned`）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
@@ -352,7 +366,7 @@ bash tests/status-machine.test.sh
 - **默认 `check` 输出契约不变**（`ok`/`missing` + exit code，被 TUI `hooksInstalledAsync` 与 tmux 自修复依赖）；明细走 wrapper 第二参 `check --json`（单行 JSON：status/mode/events/plugin/suppress/drift），由 `lib-install-hooks.sh` 的 `_wrapper_check_json` 拼装。status 判定复用 `adapter_check_integrity` 本体 → 与 ok/missing 永不发散
 - **drift 参照系 = 执行中 wrapper 自身的 `_LIB_DIR`**：Node 经 execa 调的正是其解析出的 `SCRIPTS_DIR` 下的 wrapper，故 `_LIB_DIR` 即当前 source 的 scripts dir；手动用旧 source 的 wrapper 跑 check 得到「相对该 source 无漂移」也是正确语义（它正是那个源的收敛执行者）。Node 侧不二次计算（避免两处真源），只附加 bash 判不了的 `.tmux.conf` 全局信息
 - 消费方：`tmuxclihook check [tool]` 子命令与 TUI「侦测 AI CLI」共用 `installer/src/check-detail.js`（解析/渲染），漂移项在 TUI 内给收敛入口（收敛策略见上条）；check 子命令有缺失/漂移/无法判定时 exit 1
-- **自修复不再完全静默**：`_maybe_repair_hooks` 实际触发重装后 `tmux display-message` 浮出成功/失败（与 SessionStart 修复路径的既有提示对齐，全链路两个可见点）；该函数仅经 `_run_refresh` 在 tmux run-shell 上下文触发，不在 AI CLI 同步 hook 路径
+- **自修复不再完全静默**：`_maybe_repair_hooks` 实际触发重装后 `tmux display-message` 浮出成功/失败（与 SessionStart 修复路径的既有提示对齐，全链路两个可见点）；自 2026-10-20 起该函数同时被 `_run_refresh`（tmux run-shell）与 SessionStart（AI CLI hook 进程，host 进程 errno 会计入首轮响应延迟，故有 60s 节流与失败退避）调用——SessionStart 原内联修复块已归并至此（顺带修掉「installer 不带 auto 参数绕过 suppress 标记」「失败也显示已修复」两个缺陷）
 
 **Esc 导航（2026-10-17）**：clack 0.7 的 Prompt 仅把 `\x03`（ctrl+c）映射为 cancel，**Esc 默认无任何效果**——各子菜单「Esc 返回」此前只是文案承诺。`installer/src/esc.js` 挂全局 keypress 监听，看到 escape 就 `process.stdin.emit('keypress', '\x03', {name:'c', ctrl:true})` 合成取消（**必须 emit 而非 stdin.write**：raw mode 下向 fd 0 写入不回环成输入）。主菜单 Esc 退出 / 子菜单 Esc 返回 / confirm Esc 取消全部真实生效；spinner 期间不转译（clack `block()` 给 `\x03` 装了 `process.exit(0)`，转译会让 Esc 在 spinner 期间硬退出且不恢复 raw mode），`cli.js` 的 `spinner()` 包装负责联动。
 

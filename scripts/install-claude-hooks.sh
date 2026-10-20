@@ -63,8 +63,12 @@ case "${1:-install}" in
         adapter_install_hooks
         _hooks_suppress_clear claude || true
         ;;
-    *)
+    install)
         adapter_install_hooks
         _hooks_suppress_clear claude || true
+        ;;
+    *)
+        echo "Usage: $0 [install|uninstall|check [--json]|auto]" >&2
+        exit 2
         ;;
 esac

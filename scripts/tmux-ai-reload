@@ -1,0 +1,29 @@
+#!/bin/bash
+# tmux-ai-reload — prefix+r 重载：source 实际存在的配置文件后重跑插件入口
+#
+# 背景：入口曾用 mktemp conf 绑定 `source-file ~/.tmux.conf \; run-shell 入口`：
+#   1) 硬编码 ~/.tmux.conf（XDG / tmux -f 用户 reload 读错文件）
+#   2) 一次性哨兵：source-file 内用户自己的 `bind r` 会把绑定重置回原命令，
+#      哨兵已置位 → 纯 TPM 模式（配置无 run-shell 行）从第二次重载起插件初始化
+#      静默停止
+# 本 helper 每次由绑定直接调用（入口每次加载都重绑，自愈）：
+#   - 按 tmux 的 #{config_files} 候选列表逐个过滤存在性后 source（顺序同启动）
+#   - 再显式跑一次入口（纯 TPM 模式也能重新初始化；配置里的 run-shell 行会让
+#     入口再跑一次——幂等，仅一次多余启动）
+set -u
+
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_ENTRY="$(cd "${_SELF_DIR}/.." && pwd)/tmux-ai-hooks-status.tmux"
+
+_cfg=$(tmux display-message -p '#{config_files}' 2>/dev/null || true)
+# config_files 实测是「候选列表」而非已加载列表（含不存在路径）→ 逐个 [ -f ] 过滤；
+# 老版本 tmux 无该 format 时回落 ~/.tmux.conf。
+[ -n "$_cfg" ] || _cfg="$HOME/.tmux.conf"
+# 注意用 printf '%s\n'：末项无换行符时 read 返回非零，循环体会漏掉最后一项
+printf '%s\n' "$_cfg" | tr ',' '\n' | while IFS= read -r _f; do
+    [ -n "$_f" ] && [ -f "$_f" ] || continue
+    tmux source-file "$_f" 2>/dev/null || true
+done
+
+[ -f "$_ENTRY" ] && tmux run-shell "$_ENTRY" 2>/dev/null || true
+tmux display-message "配置已重载" 2>/dev/null || true

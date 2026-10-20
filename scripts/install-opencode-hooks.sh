@@ -43,8 +43,12 @@ case "${1:-install}" in
             exit 1
         fi
         ;;
-    *)
+    install)
         adapter_install_hooks
         _hooks_suppress_clear opencode || true
+        ;;
+    *)
+        echo "Usage: $0 [install|uninstall|check [--json]]" >&2
+        exit 2
         ;;
 esac

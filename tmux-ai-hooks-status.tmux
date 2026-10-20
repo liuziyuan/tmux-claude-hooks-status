@@ -43,19 +43,25 @@ tmux set-option -g "status-format[${CLAUDE_ROW}]" "#[align=centre]#{?#{@ai_all_s
 # 不动 status-right，让用户自行管理第 1 行内容
 # Claude 状态通过多行 status-format 的独立行显示，不修改 status-right
 
-# --- Reload 保护：覆盖 prefix+r reload 绑定，source-file 后追加本插件初始化 ---
-# 用哨兵变量防止重复覆盖（tmux server 生命周期内只覆盖一次）
-# 注意：不能在 shell CLI 中用 \; 分隔多条 tmux 命令传给 bind-key，
-# 因为 tmux CLI 会将 \; 作为命令分隔符立即执行后续命令（而不是绑定到按键）。
-# 解决方案：写入临时 tmux config 文件再 source，确保 \; 被 tmux config parser 正确处理。
-if [ -z "$(tmux show-option -gv @claude_hooks_reload_registered 2>/dev/null)" ]; then
-    _bind_tmpfile=$(mktemp /tmp/tmux-ai-bind-XXXXXX.conf)
-    printf "bind-key r source-file ~/.tmux.conf \\; run-shell '%s' \\; display-message '配置已重载'\n" \
-        "${CURRENT_DIR}/tmux-ai-hooks-status.tmux" > "$_bind_tmpfile"
-    tmux source-file "$_bind_tmpfile" 2>/dev/null || true
-    rm -f "$_bind_tmpfile"
-    tmux set-option -g @claude_hooks_reload_registered "1"
-fi
+# --- Reload 保护：prefix+r = source 实际配置文件 + 重跑本插件初始化 ---
+# 绑定单命令指向 scripts/tmux-ai-reload（不再需要 mktemp conf 规避 \;）。
+# ⚠️ 每次加载都重绑（bind-key 是 upsert，幂等）：旧实现用一次性哨兵
+# @claude_hooks_reload_registered，但 source-file 配置内用户自己的 `bind r`
+# 会把绑定重置回原命令，哨兵已置位 → 纯 TPM 模式从第二次重载起插件初始化
+# 静默停止。每次重绑使其自愈。
+# 原绑定保存：覆盖前捕获（排除本插件新旧两种命令形态），供手动恢复：
+#   tmux show-option -gv @claude_hooks_saved_bind_r   # 查看
+#   eval "$(tmux show-option -gv @claude_hooks_saved_bind_r)"  # 回放
+_prev_r=$(tmux list-keys -T prefix r 2>/dev/null || true)
+case "$_prev_r" in
+    ""|*tmux-ai-reload*|*tmux-ai-hooks-status.tmux*) ;;
+    *)
+        if [ -z "$(tmux show-option -gv @claude_hooks_saved_bind_r 2>/dev/null)" ]; then
+            tmux set-option -g @claude_hooks_saved_bind_r "$_prev_r" 2>/dev/null || true
+        fi
+        ;;
+esac
+tmux bind-key r run-shell "'${CURRENT_DIR}/scripts/tmux-ai-reload'" 2>/dev/null || true
 
 # --- 自动注册 Claude hooks（幂等，每次插件加载时确保 hooks 存在）---
 # auto 模式：用户显式卸载过（suppressed-claude 标记在）时静默跳过，尊重卸载意图；
@@ -119,4 +125,20 @@ else
 fi
 
 # Esc 拒绝检测：! / ? 状态下 Esc → -
+# 全局 root 表绑定会覆盖用户既有 Escape 绑定——覆盖前保存 + 一次性告警
+# （无法安全链式调用任意已有绑定，恢复需手动）：
+#   tmux show-option -gv @claude_hooks_saved_bind_escape
+_prev_esc=$(tmux list-keys -n Escape 2>/dev/null || true)
+case "$_prev_esc" in
+    ""|*tmux-ai-esc*) ;;
+    *)
+        if [ -z "$(tmux show-option -gv @claude_hooks_saved_bind_escape 2>/dev/null)" ]; then
+            tmux set-option -g @claude_hooks_saved_bind_escape "$_prev_esc" 2>/dev/null || true
+        fi
+        if [ -z "$(tmux show-option -gv @claude_hooks_esc_warned 2>/dev/null)" ]; then
+            tmux display-message "⚠ tmux-ai-hooks-status 覆盖了全局 Esc 绑定；原绑定已存 @claude_hooks_saved_bind_escape" 2>/dev/null || true
+            tmux set-option -g @claude_hooks_esc_warned "1" 2>/dev/null || true
+        fi
+        ;;
+esac
 tmux bind-key -n Escape run-shell "${CURRENT_DIR}/scripts/tmux-ai-esc"

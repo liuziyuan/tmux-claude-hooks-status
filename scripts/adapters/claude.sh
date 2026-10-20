@@ -175,6 +175,24 @@ _ccswitch_warn_gui() {
     fi
 }
 
+# live 模式的真源是 $HOME/.claude/settings.json（cc-switch 硬编码，不随
+# CLAUDE_CONFIG_DIR 变）。若当前环境的 CLAUDE_CONFIG_DIR 指向非 cc-switch
+# 实例目录（用户自定义目录裸跑 claude），该进程读的是自定义目录，本插件写入
+# 的真源可能不生效——纯诊断告警，不改写入行为（不做双写，理由同 2026-10-13
+# 决策：外部覆盖拉锯风险大于收益）。
+_ccswitch_warn_config_dir_mismatch() {
+    [ -n "${CLAUDE_CONFIG_DIR:-}" ] || return 0
+    local inst="${HOME}/.cc-switch/instances/claude" resolved
+    resolved=$(cd "$CLAUDE_CONFIG_DIR" 2>/dev/null && pwd -P) || resolved="$CLAUDE_CONFIG_DIR"
+    case "$resolved" in
+        "$inst"|"$inst"/*) ;;
+        *)
+            echo "WARN: CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR 不是 cc-switch 实例目录；" \
+                 "live 模式写入 $(_ccswitch_live_file) 可能不被该进程读取" >&2
+            ;;
+    esac
+}
+
 # 读通用配置 value → mktemp 文件，路径写入 $1 命名的变量。
 # 行缺失/空白 → "{}"；非空但非法 JSON → 明确报错 return 1（绝不覆盖用户数据）。
 # 注意：内部临时变量名不得与调用方常用名（tmp 等）同名——bash 动态作用域下
@@ -407,6 +425,7 @@ adapter_install_hooks() {
             ;;
         live)
             _ccswitch_warn_gui
+            _ccswitch_warn_config_dir_mismatch
             target=$(_ccswitch_live_file)
             ;;
         *)

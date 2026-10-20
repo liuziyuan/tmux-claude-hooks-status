@@ -94,7 +94,7 @@ _load_pane_snapshot() {
     _CURRENT_SERVER_PID=""
     command -v tmux >/dev/null 2>&1 || return 1
     _PANE_SNAPSHOT=$(tmux list-panes -a -F \
-        '#{pane_id}|#{pane_current_path}|#{pane_current_command}|#{pane_pid}|#{pid}|#{session_attached}|#{pane_title}' \
+        '#{pane_id}|#{s/[|]/_/:pane_current_path}|#{s/[|]/_/:pane_current_command}|#{pane_pid}|#{pid}|#{session_attached}|#{pane_title}' \
         2>/dev/null)
     [ -n "$_PANE_SNAPSHOT" ] || return 1
     _PANE_SNAPSHOT_OK=1
@@ -184,7 +184,8 @@ _narrow_panes_by_adapter() {
 _narrow_panes_by_cwd() {
     local base="$1" want="" matches="" id path cmd pid server attached title
     [ -n "${HOOK_CWD:-}" ] || { printf '%s\n' "$base"; return; }
-    want=$(_normalize_path "$HOOK_CWD") || want="${HOOK_CWD%/}"
+    # _normalize_path 对非空输入恒返回 0（cd 失败时返回去尾斜杠原串），无需兜底分支
+    want=$(_normalize_path "$HOOK_CWD")
     while IFS='|' read -r id path cmd pid server attached title; do
         [ -n "$id" ] || continue
         [ "$(_normalize_path "$path")" = "$want" ] && matches="$matches $id"
@@ -410,7 +411,10 @@ build_all_status() {
     _ai_names=$(_collect_ai_process_names)
     # 动态追加上 monitor 的 seen 标记（无 SessionEnd 工具的进程树探测结果）。
     # switch/volta-shim 启动的 pane 前台命令不是 codex，必须靠该标记补 idle `-`。
-    _fmt="#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}|#{@ai_provider}|#{@ai_provider_id}"
+    # 自由文本字段就地消毒：tmux format 的 s/[|]/_/ 替换（`|` 是 ERE 交替符，
+    # 必须写成 [|] 或 \|；裸 s/|/…/ 不生效）。session 名/provider 名含 `|` 时
+    # 会劈裂字段——attached 位变状态字符使 $6>0 误判、该 session 整行消失。
+    _fmt="#{pane_id}|#{s/[|]/_/:session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{s/[|]/_/:pane_current_command}|#{s/[|]/_/:@ai_provider}|#{s/[|]/_/:@ai_provider_id}"
     for _n in $_ai_names; do
         _fmt="$_fmt|#{@ai_monitor_seen_$_n}"
     done
@@ -874,7 +878,7 @@ _is_pane_session_dead() {
 # 有对应文件但文件过期且进程已死（Stop 未触发的崩溃场景），也清除。
 _cleanup_stale_panes() {
     local active_panes=""
-    local f pane_id
+    local f pane_id pane_status pane_dir pid pid_file
     for f in "${_STATUS_DIR}"/*/pane-*; do
         [ -f "$f" ] || continue
         pane_id=$(cat "$f" 2>/dev/null)
@@ -925,13 +929,31 @@ _cleanup_stale_panes() {
             # 清理孤儿 poll 进程
             for pid_file in "${pane_dir}"*-poll-pid; do
                 [ -f "$pid_file" ] || continue
-                local pid
                 pid=$(cat "$pid_file" 2>/dev/null)
                 [ -n "$pid" ] && kill "$pid" 2>/dev/null
             done
             _ai_log "ORPHAN: removing $pane_dir (pane no longer exists)"
             rm -rf "$pane_dir" 2>/dev/null
         fi
+    done
+}
+
+# 清理已断开 client 的 @ai_prev_sess_* 残留。key 是写入端有损 sanitize
+# （tr -c 'A-Za-z0-9._-' '_'），无法从 key 反推 client → 反向枚举存活集比对。
+# 实测关注：长期运行的 server 会累积已 detach 的 client 键（8 option / 4 存活）。
+_prune_prev_sess_options() {
+    local alive=" " name key opt
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+        alive="$alive$key "
+    done < <(tmux list-clients -F '#{client_name}' 2>/dev/null)
+    for opt in $(tmux show-options -g 2>/dev/null | awk '/^@ai_prev_sess_/{print $1}'); do
+        key="${opt#@ai_prev_sess_}"
+        case "$alive" in
+            *" $key "*) ;;
+            *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
+        esac
     done
 }
 
@@ -947,6 +969,7 @@ _maybe_cleanup_stale() {
         [ $((now - ${last:-0})) -lt 60 ] && return
     fi
     _cleanup_stale_panes
+    _prune_prev_sess_options
     echo "$now" > "$marker"
 }
 

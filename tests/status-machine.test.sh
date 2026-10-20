@@ -29,7 +29,15 @@ tmux() {
                 [ "${4:-}" = "@ai_pane_status" ] && printf '%s' "${5:-}" > "$FAKE_TMUX_DIR/pane-status"
             elif [ "${2:-}" = "-g" ]; then
                 printf '%s' "${4:-}" > "$FAKE_TMUX_DIR/${3#@}"
+            elif [ "${2:-}" = "-gu" ]; then
+                printf '%s\n' "${3:-}" >> "$FAKE_TMUX_DIR/gu.log"
             fi
+            ;;
+        show-options)
+            [ "${2:-}" = "-g" ] && printf '%s' "${FAKE_OPTIONS:-}"
+            ;;
+        list-clients)
+            printf '%s\n' "${FAKE_CLIENTS:-}"
             ;;
         list-panes)
             local status="" cmd="${FAKE_PANE_CMD:-opencode}" fmt="${4:-}"
@@ -38,8 +46,12 @@ tmux() {
                 # pane 解析快照：pane|path|cmd|pane_pid|server_pid|attached|title
                 *'#{pane_title}'*)
                     : > "$FAKE_TMUX_DIR/snapshot-called"
+                    # 模拟 tmux 的 s/[|]/_/ 替换（仅在 format 带修饰符时）
+                    local _sp="$FAKE_PANE_PATH" _sc="$cmd"
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_path}'*) _sp=$(printf '%s' "$_sp" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_command}'*) _sc=$(printf '%s' "$_sc" | tr '|' '_') ;; esac
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
-                        "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
+                        "$_sp" "$_sc" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
                 # 孤儿清理查询（fmt 恰以 |#{@ai_pane_status} 结尾）：哨兵 + 两字段行
                 *'|#{@ai_pane_status}')
@@ -48,8 +60,14 @@ tmux() {
                     ;;
                 # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
                 *'@ai_pane_status'*)
-                    printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
-                        "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
+                    local _sess="${FAKE_SESSION_NAME:-test}" _cmd="$cmd" _prov="${FAKE_PROVIDER:-}" _provid="${FAKE_PROVIDER_ID:-}"
+                    case "$fmt" in *'#{s/[|]/_/:session_name}'*) _sess=$(printf '%s' "$_sess" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_command}'*) _cmd=$(printf '%s' "$_cmd" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:@ai_provider}'*) _prov=$(printf '%s' "$_prov" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:@ai_provider_id}'*) _provid=$(printf '%s' "$_provid" | tr '|' '_') ;; esac
+                    printf '%%1|%s|1|1|%s|1|1|1|%s|%s|%s|%s|%s|%s\n' \
+                        "$_sess" "$status" "$_cmd" "$_prov" "$_provid" \
+                        "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
                     ;;
                 # pane 前台命令 / 进程树查找
                 *'#{pane_current_command}'*) printf '%%1|%s\n' "$cmd" ;;
@@ -155,6 +173,26 @@ assert_status '>' 'Claude serial permission resumes after tool completion'
 
 reset_state
 
+# Notification 隐式路径不得降级活跃状态（async 通知可能乱序晚到）
+# 1) 工具有 pending：idle_prompt 迟到 → 保持 '>'
+run_event claude PreToolUse '{"session_id":"ntf","tool_use_id":"t1","tool_name":"Bash"}'
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '>' 'Late idle_prompt keeps pending tool state'
+
+# 2) live 审批态：idle_prompt 不得清 !（claude 不写 pending-perm，需 live 守卫）
+reset_state
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '!' 'Idle prompt preserves live permission state'
+
+# 3) 显式 denial 消息仍无条件重置为 '-'
+reset_state
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+run_event claude Notification '{"session_id":"ntf","notification_type":"permission_prompt","message":"Permission denied by user"}'
+assert_status '-' 'Explicit denial message resets to idle'
+
+reset_state
+
 # OpenCode 用 request ID 精确清理：回复一个请求后，另一个请求仍保持审批态。
 run_event opencode PreToolUse '{"session_id":"open-s","tool_use_id":"call-a","tool_name":"bash"}'
 run_event opencode PreToolUse '{"session_id":"open-s","tool_use_id":"call-b","tool_name":"bash"}'
@@ -220,6 +258,60 @@ all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
 case "$all" in
     *'1.1'*) printf 'FAIL: 无 seen 标记不应显示 pane\n' >&2; exit 1 ;;
 esac
+
+# 聚合字段注入防护：session 名/provider 名含 `|` 不得劈裂字段
+# （旧实现：attached 位错位 → $6>0 误判 → 整行消失）
+reset_state
+rm -f "$FAKE_TMUX_DIR/ai_all_status"
+FAKE_SESSION_NAME='evil|sess' FAKE_PROVIDER='prov|name' FAKE_PROVIDER_ID='id|1' \
+    run_event claude PreToolUse '{"session_id":"inj","tool_use_id":"i1","tool_name":"Bash"}'
+all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
+case "$all" in
+    *'evil_sess'*) ;;
+    *) printf 'FAIL: session 名未被消毒（got: %s）\n' "$all" >&2; exit 1 ;;
+esac
+case "$all" in
+    *'evil|sess'*)
+        printf 'FAIL: session 名仍含裸 |（字段会劈裂）\n' >&2; exit 1 ;;
+esac
+case "$all" in
+    *'[prov_name]'*) ;;
+    *) printf 'FAIL: provider 名未被消毒（got: %s）\n' "$all" >&2; exit 1 ;;
+esac
+case "$all" in
+    *'1.1'*) ;;
+    *) printf 'FAIL: 注入字段导致 pane 段落消失\n' >&2; exit 1 ;;
+esac
+
+reset_state
+
+# Stop 在 pane 未解析时不伪造 ✓ 写入日志（真实 pane 可能仍是 !）
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+: > /tmp/tmux-ai-status.log
+FAKE_PANE_PID=999999
+printf '%s' '{"session_id":"stop-u"}' | TMUX=test TMUX_PANE= bash "$ROOT/scripts/tmux-ai-status" claude Stop >/dev/null 2>&1
+FAKE_PANE_PID=$$
+st=$(command cat "$FAKE_TMUX_DIR/pane-status" 2>/dev/null || true)
+[ "$st" != "✓" ] || { echo "FAIL: 未解析 pane 的 Stop 不应写入 ✓" >&2; exit 1; }
+grep -q "PANE=unresolved" /tmp/tmux-ai-status.log \
+    || { echo "FAIL: Stop 未解析日志应标注 PANE=unresolved" >&2; exit 1; }
+
+reset_state
+
+# @ai_prev_sess_* 残留剪枝：只清已断开 client 的键
+# （进程内调用需先 source lib——本用例位于下方批量快照用例之前）
+declare -f _maybe_cleanup_stale >/dev/null 2>&1 || { TOOL_ID="claude"; source "$ROOT/scripts/lib-tmux-ai-status.sh"; }
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" "$FAKE_TMUX_DIR/gu.log"
+FAKE_OPTIONS='@ai_prev_sess__dev_ttys001 x
+@ai_prev_sess__dev_ttys999 y
+'
+FAKE_CLIENTS='/dev/ttys001'
+if _maybe_cleanup_stale; then :; fi
+gu=$(command cat "$FAKE_TMUX_DIR/gu.log" 2>/dev/null || true)
+case "$gu" in *"@ai_prev_sess__dev_ttys999"*) ;; *) printf 'FAIL: 已断开 client 的 prev_sess 未清理（got: %s）\n' "$gu" >&2; exit 1 ;; esac
+case "$gu" in *"@ai_prev_sess__dev_ttys001"*) printf 'FAIL: 存活 client 的 prev_sess 被误清\n' >&2; exit 1 ;; esac
+
+reset_state
 
 # _refresh 只重建聚合，不应触发 pane 解析快照（避免每次生命周期 hook 做 BFS）
 reset_state
