@@ -103,10 +103,12 @@ case "$EVENT" in
     esac
     ;;
   PermissionRequest)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.' 2>/dev/null)
-    _log_full_input=1
+    # 一次 @tsv 提取 tool_name/tool_use_id（digest 单独一次；stdin 只能读一次，
+    # 故从已缓存的 $INPUT 提取）。digest 只取 tool_name/tool_input——全量重序列化
+    # 会把 transcript_path 等无关字段落日志，且大 tool_input 全量展开拖慢 sync 路径。
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
+    INPUT_DIGEST=$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null)
     if [ "$TOOL" = "AskUserQuestion" ]; then
         STATUS="?"
     else
@@ -135,9 +137,9 @@ case "$EVENT" in
     fi
     ;;
   PreToolUse)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
+    INPUT_DIGEST=$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null)
     _add_pending_pre "$TOOL_USE_ID" "$TOOL"
     _permission_pre_tool=0
     for _permission_tool in ${ADAPTER_PERMISSION_PRE_TOOL_NAMES:-}; do
@@ -163,8 +165,8 @@ case "$EVENT" in
     fi
     ;;
   PostToolUse|PostToolUseFailure)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
     _remove_pending_id "$TOOL_USE_ID"
     # 只解除当前工具对应项；其他权限请求仍 pending 时必须保持 !/?。
     if _derive_status_from_pending; then
@@ -274,8 +276,10 @@ if [ -n "$TOOL" ] || [ -n "$TOOL_USE_ID" ]; then
 fi
 _log_input_line=""
 if [ -n "$INPUT_DIGEST" ] && [ "$INPUT_DIGEST" != "null" ]; then
-    if [ "${_log_full_input:-0}" = "1" ]; then
-        _log_input_line="input: $INPUT_DIGEST"
+    # PermissionRequest 曾走完全不截断的 full 路径（9248967），实测大 tool_input
+    # （ExitPlanMode 的 plan、AUQ 的 questions）可达数 KB～数十 KB，改为 16KB 宽松上限。
+    if [ "$EVENT" = "PermissionRequest" ]; then
+        _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST" 16384)"
     else
         _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST")"
     fi
