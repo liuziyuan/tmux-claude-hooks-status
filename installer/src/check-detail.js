@@ -32,6 +32,9 @@ function baseDetail(tool) {
     events: {},
     plugin: null,
     registeredPaths: [],
+    // codex 授信维度：{configFile, trusted: true|false|null, missingEvents, instances}
+    // 仅 codex adapter 提供；null = 该工具无此概念/旧版 adapter。
+    trust: null,
     drift: null,
     error: null,
     raw: null,
@@ -70,6 +73,7 @@ export async function checkToolDetail(tool, { run } = {}) {
       events: parsed.events || {},
       plugin: parsed.plugin ?? null,
       registeredPaths: parsed.registeredPaths || [],
+      trust: parsed.trust ?? null,
       drift: parsed.drift || null,
       error: parsed.error,
       raw: stdout,
@@ -85,6 +89,7 @@ export async function checkToolDetail(tool, { run } = {}) {
     events: parsed.events || {},
     plugin: parsed.plugin ?? null,
     registeredPaths: parsed.registeredPaths || [],
+    trust: parsed.trust ?? null,
     drift: parsed.drift || null,
     raw: stdout,
   };
@@ -105,6 +110,32 @@ export function renderToolDetail(detail) {
 
   if (detail.suppress) {
     lines.push(`  ${WARN} 存在卸载意图标记（suppressed-${detail.tool}）：自动修复已被抑制`);
+  }
+
+  // codex 授信维度：hooks 注册完整 ≠ 会执行。键缺失 = 一定不执行；键存在只说明
+  // 有授信记录（bash 无法复现 trusted_hash，改写后仍可能需重新 Trust）。
+  const trust = detail.trust;
+  if (trust) {
+    if (trust.trusted === false) {
+      const miss = (trust.missingEvents || []).join(', ') || '全部事件';
+      lines.push(
+        `  ${WARN} hooks 未授信：当前实例缺少 [hooks.state] 记录（${miss}）——codex 会跳过这些 hook，请在 codex TUI 选择 "Trust all and continue"`
+      );
+    } else if (trust.trusted === true) {
+      lines.push(`  ${OK} 授信记录存在（键存在不等于 hash 匹配：hooks 改写后仍可能需重新 Trust）`);
+    } else if (detail.status === 'ok') {
+      lines.push(`  ${WARN} 无法判定授信状态：${trust.configFile} 不存在`);
+    }
+    const otherUntrusted = (trust.instances || []).filter(
+      (i) => i.configFile !== trust.configFile && i.trusted === false
+    );
+    if (otherUntrusted.length > 0) {
+      lines.push(`  ${WARN} 其他实例未授信（首次启动会弹 Hooks need review）：`);
+      for (const i of otherUntrusted) {
+        const miss = (i.missingEvents || []).join(', ') || '全部事件';
+        lines.push(`      ${i.configFile}（缺 ${miss}）`);
+      }
+    }
   }
 
   // 逐事件缺失明细（cc-switch/文件模式的 tools）

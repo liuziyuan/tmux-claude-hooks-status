@@ -74,13 +74,65 @@ adapter_check_integrity() {
 _CODEX_EVENTS="SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop"
 _CODEX_LEGACY_TOML="${CODEX_HOME:-$HOME/.codex}/hooks.toml"
 
+# Hook 授信记录（trust 维度，check --json 用）：codex 把 user 来源 hook 的授信写在
+# 每个实例 config.toml 的 [hooks.state."<hooks.json 路径>:<下划线事件>:<组>:<hook>"]。
+# 只判键是否存在——bash 无法复现 trusted_hash；因此：
+#   - 键缺失 = 该 hook 一定不会执行（强信号）
+#   - 键存在 ≠ 一定执行（hooks 被改写后旧键仍在、hash 失效，codex 会重新弹 Trust）
+# config.toml 不存在 → trusted:null（无法判定）。
+_CODEX_TRUST_EVENTS="session_start user_prompt_submit pre_tool_use permission_request post_tool_use stop"
+
+_codex_trust_scan() {  # $1=config.toml $2=hooks.json → 每行 "event<TAB>0|1"
+    local cfg="$1" hooks="$2" keys e
+    [ -f "$cfg" ] || return 1
+    # 只提取键名，绝不读取 trusted_hash 值
+    keys=$(sed -n 's/^\[hooks\.state\."\([^"]*\)"\].*/\1/p' "$cfg" 2>/dev/null)
+    for e in $_CODEX_TRUST_EVENTS; do
+        case "$keys" in
+            *"$hooks:$e:"*) printf '%s\t1\n' "$e" ;;
+            *) printf '%s\t0\n' "$e" ;;
+        esac
+    done
+}
+
+# 汇总 $HOME/.codex 与所有 cc-switch 实例的授信状态（去重；config.toml 不存在则不收录，
+# 当前实例不存在时 trusted:null）。只读。
+_codex_trust_json() {
+    local cfg hooks rows e mark missing trusted seen=""
+    for cfg in "${HOME}/.codex/config.toml" "${HOME}"/.cc-switch/instances/codex/*/config.toml; do
+        [ -f "$cfg" ] || continue
+        [ "$cfg" = "$seen" ] && continue
+        seen="$cfg"
+        hooks="$(dirname "$cfg")/hooks.json"
+        rows=$(_codex_trust_scan "$cfg" "$hooks" 2>/dev/null) || continue
+        missing=""
+        while IFS=$'\t' read -r e mark; do
+            [ "$mark" = "0" ] && missing="${missing}${missing:+,}$e"
+        done <<EOF
+$rows
+EOF
+        if [ -n "$missing" ]; then trusted=0; else trusted=1; fi
+        printf '%s\t%s\t%s\t%s\n' "$cfg" "$hooks" "$trusted" "$missing"
+    done | jq -R -s --arg cur "${CODEX_HOME:-$HOME/.codex}/config.toml" '
+        split("\n") | map(select(length > 0) | split("\t")) as $rows
+        | [$rows[] | {configFile: .[0], hooksFile: .[1],
+                      trusted: (.[2] == "1"),
+                      missingEvents: (if .[3] == "" then [] else (.[3] | split(",")) end)}] as $inst
+        | ($inst | map(select(.configFile == $cur)) | first) as $cur_obj
+        | {configFile: $cur,
+           trusted: (if $cur_obj then $cur_obj.trusted else null end),
+           missingEvents: (if $cur_obj then $cur_obj.missingEvents else [] end),
+           instances: $inst}'
+}
+
 # 明细检查（仅 install wrapper 的 check --json 调用；与 claude adapter 同构）。
 # 差异：无 cc-switch 分支（hooks.json 即文件真源，mode 恒 file）、6 事件、
 # 匹配串为 "tmux-ai-status codex"。失败输出空 events 降级片段，不 exit 非 0。
 adapter_check_detail() {
-    local src="$ADAPTER_HOOKS_FILE" pairs rows line ev p a
+    local src="$ADAPTER_HOOKS_FILE" pairs rows line ev p a trust_json
+    trust_json=$(_codex_trust_json)
     if [ ! -f "$src" ]; then
-        printf '{"mode":"file","events":{},"plugin":null,"registeredPaths":[]}\n'
+        printf '{"mode":"file","events":{},"plugin":null,"registeredPaths":[],"trust":%s}\n' "$trust_json"
         return 0
     fi
     pairs=$(jq -r '.hooks as $h |
@@ -98,7 +150,7 @@ adapter_check_detail() {
     done <<EOF
 $pairs
 EOF
-    jq -R -s --arg mode "file" --arg events "$_CODEX_EVENTS" '
+    jq -R -s --arg mode "file" --arg events "$_CODEX_EVENTS" --argjson trust "$trust_json" '
         (reduce ($events | split(" ")[]) as $e
             ({}; .[$e] = {registered: 0, alive: 0, scriptPaths: []})) as $base
         | reduce (split("\n") | .[] | select(length > 0) | split("\t")) as $r (
@@ -109,7 +161,7 @@ EOF
                 scriptPaths: ((.[$r[0]].scriptPaths + [$r[1]]) | unique)
             })
         | {mode: $mode, events: ., plugin: null,
-           registeredPaths: ([.[] | .scriptPaths[]] | unique)}
+           registeredPaths: ([.[] | .scriptPaths[]] | unique), trust: $trust}
     ' <<<"$rows"
 }
 
