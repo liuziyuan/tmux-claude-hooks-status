@@ -29,7 +29,15 @@ tmux() {
                 [ "${4:-}" = "@ai_pane_status" ] && printf '%s' "${5:-}" > "$FAKE_TMUX_DIR/pane-status"
             elif [ "${2:-}" = "-g" ]; then
                 printf '%s' "${4:-}" > "$FAKE_TMUX_DIR/${3#@}"
+            elif [ "${2:-}" = "-gu" ]; then
+                printf '%s\n' "${3:-}" >> "$FAKE_TMUX_DIR/gu.log"
             fi
+            ;;
+        show-options)
+            [ "${2:-}" = "-g" ] && printf '%s' "${FAKE_OPTIONS:-}"
+            ;;
+        list-clients)
+            printf '%s\n' "${FAKE_CLIENTS:-}"
             ;;
         list-panes)
             local status="" cmd="${FAKE_PANE_CMD:-opencode}" fmt="${4:-}"
@@ -274,6 +282,34 @@ case "$all" in
     *'1.1'*) ;;
     *) printf 'FAIL: 注入字段导致 pane 段落消失\n' >&2; exit 1 ;;
 esac
+
+reset_state
+
+# Stop 在 pane 未解析时不伪造 ✓ 写入日志（真实 pane 可能仍是 !）
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+: > /tmp/tmux-ai-status.log
+FAKE_PANE_PID=999999
+printf '%s' '{"session_id":"stop-u"}' | TMUX=test TMUX_PANE= bash "$ROOT/scripts/tmux-ai-status" claude Stop >/dev/null 2>&1
+FAKE_PANE_PID=$$
+st=$(command cat "$FAKE_TMUX_DIR/pane-status" 2>/dev/null || true)
+[ "$st" != "✓" ] || { echo "FAIL: 未解析 pane 的 Stop 不应写入 ✓" >&2; exit 1; }
+grep -q "PANE=unresolved" /tmp/tmux-ai-status.log \
+    || { echo "FAIL: Stop 未解析日志应标注 PANE=unresolved" >&2; exit 1; }
+
+reset_state
+
+# @ai_prev_sess_* 残留剪枝：只清已断开 client 的键
+# （进程内调用需先 source lib——本用例位于下方批量快照用例之前）
+declare -f _maybe_cleanup_stale >/dev/null 2>&1 || { TOOL_ID="claude"; source "$ROOT/scripts/lib-tmux-ai-status.sh"; }
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" "$FAKE_TMUX_DIR/gu.log"
+FAKE_OPTIONS='@ai_prev_sess__dev_ttys001 x
+@ai_prev_sess__dev_ttys999 y
+'
+FAKE_CLIENTS='/dev/ttys001'
+if _maybe_cleanup_stale; then :; fi
+gu=$(command cat "$FAKE_TMUX_DIR/gu.log" 2>/dev/null || true)
+case "$gu" in *"@ai_prev_sess__dev_ttys999"*) ;; *) printf 'FAIL: 已断开 client 的 prev_sess 未清理（got: %s）\n' "$gu" >&2; exit 1 ;; esac
+case "$gu" in *"@ai_prev_sess__dev_ttys001"*) printf 'FAIL: 存活 client 的 prev_sess 被误清\n' >&2; exit 1 ;; esac
 
 reset_state
 

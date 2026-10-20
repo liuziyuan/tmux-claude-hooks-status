@@ -113,6 +113,7 @@ PREV_STATUS=$(_current_pane_status)
 TOOL=""
 TOOL_USE_ID=""
 INPUT_DIGEST=""
+_log_flags=""
 
 case "$EVENT" in
   Notification)
@@ -231,8 +232,12 @@ case "$EVENT" in
     else
         STATUS="✓"
     fi
-    # fallback: TMUX_PANE 未解析时，精准清理孤儿状态（不碰其他活跃 pane）
+    # fallback: TMUX_PANE 未解析时，精准清理孤儿状态（不碰其他活跃 pane）。
+    # 此时事件无处写入——不要伪造 ✓ 写入日志（真实 pane 可能仍是 !）：
+    # STATUS 置空 + flags 标注，日志显示「无状态转移」。
     if [ -n "$TMUX" ] && [ -z "$TMUX_PANE" ]; then
+        STATUS=""
+        _log_flags="PANE=unresolved"
         _cleanup_stale_panes
         build_all_status
         tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
@@ -316,7 +321,7 @@ if [ -n "$INPUT_DIGEST" ] && [ "$INPUT_DIGEST" != "null" ]; then
         _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST")"
     fi
 fi
-_ai_log_event "$PREV_STATUS" "$STATUS" "" "$_log_tool_line" "$_log_input_line"
+_ai_log_event "$PREV_STATUS" "$STATUS" "$_log_flags" "$_log_tool_line" "$_log_input_line"
 
 if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; then
     # 写入前重新读取 pending，避免并发事件用过期结果覆盖仍有效的审批态。

@@ -938,6 +938,25 @@ _cleanup_stale_panes() {
     done
 }
 
+# 清理已断开 client 的 @ai_prev_sess_* 残留。key 是写入端有损 sanitize
+# （tr -c 'A-Za-z0-9._-' '_'），无法从 key 反推 client → 反向枚举存活集比对。
+# 实测关注：长期运行的 server 会累积已 detach 的 client 键（8 option / 4 存活）。
+_prune_prev_sess_options() {
+    local alive=" " name key opt
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+        alive="$alive$key "
+    done < <(tmux list-clients -F '#{client_name}' 2>/dev/null)
+    for opt in $(tmux show-options -g 2>/dev/null | awk '/^@ai_prev_sess_/{print $1}'); do
+        key="${opt#@ai_prev_sess_}"
+        case "$alive" in
+            *" $key "*) ;;
+            *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
+        esac
+    done
+}
+
 # 频率限制的孤儿清理（每次 hook 调用，最多每 60s 执行一次）
 _maybe_cleanup_stale() {
     local marker="${_STATUS_DIR}/.stale-cleanup-ts"
@@ -950,6 +969,7 @@ _maybe_cleanup_stale() {
         [ $((now - ${last:-0})) -lt 60 ] && return
     fi
     _cleanup_stale_panes
+    _prune_prev_sess_options
     echo "$now" > "$marker"
 }
 
