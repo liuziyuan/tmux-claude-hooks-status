@@ -273,4 +273,18 @@ assert_eq "0" "$r2" "并发 install #2 exit 0"
 jq -e . "$f" >/dev/null || { echo "FAIL: 并发后 settings.json 不是合法 JSON" >&2; exit 1; }
 assert_eq "10" "$(managed_count "$f")" "并发后 10 事件完整"
 
+# ── 19: live 模式下自定义 CLAUDE_CONFIG_DIR（非 cc-switch 实例）→ 告警 ──
+h=$(new_env live-mismatch)
+use_env "$h"
+mkdir -p "$h/.cc-switch" "$h/custom-claude"
+sqlite3 "$h/.cc-switch/cc-switch.db" "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); PRAGMA user_version=20;"
+rc=0; err=$(CLAUDE_CONFIG_DIR="$h/custom-claude" bash "$WRAPPER" 2>&1 >/dev/null) || rc=$?
+assert_eq "0" "$rc" "错配仅告警不改退出码"
+assert_contains "不是 cc-switch 实例目录" "$err" "自定义 CLAUDE_CONFIG_DIR 告警"
+# 实例目录下的 CLAUDE_CONFIG_DIR 不告警
+err=$(CLAUDE_CONFIG_DIR="$h/.cc-switch/instances/claude/uuid-1" bash "$WRAPPER" 2>&1 >/dev/null) || true
+case "$err" in
+    *"不是 cc-switch 实例目录"*) echo "FAIL: 实例目录被误告警" >&2; exit 1 ;;
+esac
+
 printf 'PASS: install-idempotency 用例全部通过\n'
