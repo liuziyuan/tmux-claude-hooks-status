@@ -108,6 +108,9 @@ _notification_implicit_status() {
 # 重建聚合状态（_refresh / _entered 共用）
 _run_refresh() {
     _maybe_repair_hooks
+    # 跨工具修复：_refresh 固定以 claude 身份运行，codex/opencode 的整体丢失
+    # 只能靠这里兜底（仅对 installed-<tool> 已登记的工具）。
+    _maybe_repair_other_tools
     # 节流版清理（60s）：tmux 生命周期 hook（pane-focus-in 等）高频触发，
     # 全价 _cleanup_stale_panes 实测 ~455ms；卡死状态清理有 :37 的事件路径
     # 节流兜底，此处无需每次全价。Stop/SessionEnd fallback 仍走全价精准清理。

@@ -80,4 +80,69 @@ rm -f "$(installed claude)"
 HOME="$TEST_TMP/h-claude" bash "$CLAUDE_WRAPPER" auto >/dev/null
 assert_no_file "$(installed claude)" "auto 被 suppressed 拦截时不应登记"
 
+# ── 跨工具自修复 ──
+refresh() {  # $1=HOME：不清节流 marker，验证 60s 窗口
+    printf '{}' | HOME="$1" bash "$ENGINE" claude _refresh >/dev/null 2>&1
+}
+refresh_fresh() {  # $1=HOME：清所有工具的节流 marker 后触发
+    rm -f "$TMUX_AI_STATUS_DIR"/.hooks-repair-*-ts
+    refresh "$1"
+}
+clear_tool_markers() {  # $1=tool：清 installed/suppressed，避免用例互相污染
+    rm -f "$(installed "$1")" "$(suppressed "$1")"
+}
+
+# 用例 2: hooks.json 整体丢失 → _refresh 恢复
+clear_tool_markers codex
+H2="$TEST_TMP/h2"; mkdir -p "$H2"
+HOME="$H2" bash "$CODEX_WRAPPER" >/dev/null
+rm -f "$H2/.codex/hooks.json"
+refresh_fresh "$H2"
+assert_file "$H2/.codex/hooks.json" "整体丢失后 _refresh 应恢复 hooks.json"
+assert_eq "6" "$(events "$H2/.codex/hooks.json")" "恢复后应含 6 事件"
+
+# 用例 3: 未安装的工具不被自动安装、也不登记
+clear_tool_markers codex
+clear_tool_markers opencode
+H3="$TEST_TMP/h3"; mkdir -p "$H3"
+refresh_fresh "$H3"
+assert_no_file "$H3/.codex/hooks.json" "未安装的 codex 不应被自动安装"
+assert_no_file "$H3/.config/opencode/plugins/tmux-ai-status.ts" "未安装的 opencode 不应被自动安装"
+assert_no_file "$(installed codex)" "未安装的 codex 不应登记"
+assert_no_file "$(installed opencode)" "未安装的 opencode 不应登记"
+
+# 用例 4: installed + suppressed → 不修复
+clear_tool_markers codex
+H4="$TEST_TMP/h4"; mkdir -p "$H4"
+HOME="$H4" bash "$CODEX_WRAPPER" >/dev/null
+rm -f "$H4/.codex/hooks.json"
+: > "$(suppressed codex)"
+refresh_fresh "$H4"
+assert_no_file "$H4/.codex/hooks.json" "suppressed 时不应自动修复"
+
+# 用例 5: 60s 节流——窗口内不重复修复，窗口过后恢复
+clear_tool_markers codex
+H5="$TEST_TMP/h5"; mkdir -p "$H5"
+HOME="$H5" bash "$CODEX_WRAPPER" >/dev/null
+rm -f "$H5/.codex/hooks.json"
+refresh_fresh "$H5"
+assert_file "$H5/.codex/hooks.json" "节流: 首次应修复"
+rm -f "$H5/.codex/hooks.json"
+refresh "$H5"   # 不清 marker
+assert_no_file "$H5/.codex/hooks.json" "节流: 60s 窗口内不应重装"
+rm -f "$TMUX_AI_STATUS_DIR"/.hooks-repair-*-ts
+refresh "$H5"
+assert_file "$H5/.codex/hooks.json" "节流: 窗口过后应恢复"
+
+# 用例 6: 既存安装登记（check 通过才补标记，且 check 只读）
+clear_tool_markers codex
+H6="$TEST_TMP/h6"; mkdir -p "$H6"
+HOME="$H6" bash "$CODEX_WRAPPER" >/dev/null
+rm -f "$(installed codex)"
+before=$(command shasum "$H6/.codex/hooks.json" | cut -d' ' -f1)
+refresh_fresh "$H6"
+assert_file "$(installed codex)" "既存安装应在 _refresh 后补登记"
+after=$(command shasum "$H6/.codex/hooks.json" | cut -d' ' -f1)
+assert_eq "$before" "$after" "登记既存安装时 check 不应改写 hooks.json"
+
 printf 'cross-tool-repair: all cases passed\n'
