@@ -273,7 +273,14 @@ assert_eq "0" "$r2" "并发 install #2 exit 0"
 jq -e . "$f" >/dev/null || { echo "FAIL: 并发后 settings.json 不是合法 JSON" >&2; exit 1; }
 assert_eq "10" "$(managed_count "$f")" "并发后 10 事件完整"
 
-# ── 19: live 模式下自定义 CLAUDE_CONFIG_DIR（非 cc-switch 实例）→ 告警 ──
+# ── 19: 未知子命令 → usage + exit 2（不再静默当 install）──
+for _w in claude codex opencode; do
+    rc=0; err=$(bash "$ROOT/scripts/install-${_w}-hooks.sh" insatll 2>&1 >/dev/null) || rc=$?
+    assert_eq "2" "$rc" "${_w} 未知子命令 exit 2"
+    assert_contains "Usage:" "$err" "${_w} 未知子命令输出 usage"
+done
+
+# ── 20: live 模式下自定义 CLAUDE_CONFIG_DIR（非 cc-switch 实例）→ 告警 ──
 h=$(new_env live-mismatch)
 use_env "$h"
 mkdir -p "$h/.cc-switch" "$h/custom-claude"

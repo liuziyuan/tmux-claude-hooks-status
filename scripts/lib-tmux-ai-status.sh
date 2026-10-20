@@ -184,7 +184,8 @@ _narrow_panes_by_adapter() {
 _narrow_panes_by_cwd() {
     local base="$1" want="" matches="" id path cmd pid server attached title
     [ -n "${HOOK_CWD:-}" ] || { printf '%s\n' "$base"; return; }
-    want=$(_normalize_path "$HOOK_CWD") || want="${HOOK_CWD%/}"
+    # _normalize_path 对非空输入恒返回 0（cd 失败时返回去尾斜杠原串），无需兜底分支
+    want=$(_normalize_path "$HOOK_CWD")
     while IFS='|' read -r id path cmd pid server attached title; do
         [ -n "$id" ] || continue
         [ "$(_normalize_path "$path")" = "$want" ] && matches="$matches $id"
@@ -877,7 +878,7 @@ _is_pane_session_dead() {
 # 有对应文件但文件过期且进程已死（Stop 未触发的崩溃场景），也清除。
 _cleanup_stale_panes() {
     local active_panes=""
-    local f pane_id
+    local f pane_id pane_status pane_dir pid pid_file
     for f in "${_STATUS_DIR}"/*/pane-*; do
         [ -f "$f" ] || continue
         pane_id=$(cat "$f" 2>/dev/null)
@@ -928,7 +929,6 @@ _cleanup_stale_panes() {
             # 清理孤儿 poll 进程
             for pid_file in "${pane_dir}"*-poll-pid; do
                 [ -f "$pid_file" ] || continue
-                local pid
                 pid=$(cat "$pid_file" 2>/dev/null)
                 [ -n "$pid" ] && kill "$pid" 2>/dev/null
             done
