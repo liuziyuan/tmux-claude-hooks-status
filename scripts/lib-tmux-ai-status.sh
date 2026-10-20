@@ -479,17 +479,23 @@ build_all_status() {
 }
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
-# 状态判定基于两个 per-pane 集合:
-#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id
-#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id (含 ! 或 ?)
+# 状态判定基于两个 per-pane 集合（另有一个乱序辅助集合）:
+#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id（行 "id tool ts"）
+#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id（行 "id mark tool ts"）
+#   recent-post   : 已 PostToolUse 完成的 tool_use_id（行 "id ts"）
+#                   Post 先于 Pre 到达时，迟到的 Pre 据此跳过写入，避免状态卡 ">"
 # 派生规则:
 #   perm 含 "!"   → STATUS=!
 #   perm 含 "?"   → STATUS=?
 #   pre 非空      → STATUS=>
 #   都空          → STATUS=""（事件自行决定）
 
+_PENDING_DONE_WINDOW=60    # 迟到 Pre 的拦截窗口（tool_use_id 单次唯一，10x 余量）
+_PENDING_DONE_RETAIN=300   # recent-post 保留时长（写时修剪）
+
 _pending_pre_path()  { echo "$(_pane_dir)/pending-pre"; }
 _pending_perm_path() { echo "$(_pane_dir)/pending-perm"; }
+_pending_done_path() { echo "$(_pane_dir)/recent-post"; }
 _lock_dir()          { echo "$(_pane_dir)/.lock"; }
 _event_lock_dir()    { echo "$(_pane_dir)/.event-lock"; }
 
@@ -586,17 +592,73 @@ _release_lock() {
     rmdir "$(_lock_dir)" 2>/dev/null
 }
 
+# --- recent-post（已完成 id 的 tombstone）---
+# 调用方必须持 .lock。只读：id 是否在窗口内已完成。
+_recent_done_has() {  # $1=id
+    local id="$1" f now
+    [ -n "$id" ] || return 1
+    f=$(_pending_done_path)
+    [ -s "$f" ] || return 1
+    now=$(date +%s)
+    awk -v id="$id" -v now="$now" -v max="$_PENDING_DONE_WINDOW" '
+        $1 == id && $2 ~ /^[0-9]+$/ && now - $2 <= max { found = 1; exit }
+        END { exit !found }' "$f" 2>/dev/null
+}
+
+# 调用方必须持 .lock。一次 awk 同时完成「同 id 去重 + 过期修剪 + 追加」。
+_record_pending_done() {  # $1=id
+    local id="$1" f now tmp
+    [ -n "$id" ] || return 0
+    f=$(_pending_done_path)
+    now=$(date +%s)
+    tmp="${f}.tmp.$$"
+    if [ -f "$f" ]; then
+        awk -v id="$id" -v cutoff="$((now - _PENDING_DONE_RETAIN))" '
+            $1 != id && $2 ~ /^[0-9]+$/ && $2 >= cutoff { print }' "$f" > "$tmp" 2>/dev/null
+    else
+        : > "$tmp"
+    fi
+    printf '%s %s\n' "$id" "$now" >> "$tmp"
+    mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+}
+
+# 调用方必须持 .lock。按首列精确比较（id 可能含 . [ 等 BRE 元字符）。
+_remove_pending_id_locked() {  # $1=id
+    local id="$1" pre perm
+    [ -n "$id" ] || return 0
+    pre=$(_pending_pre_path)
+    perm=$(_pending_perm_path)
+    if [ -f "$pre" ]; then
+        awk -v id="$id" '$1 != id' "$pre" > "${pre}.tmp" 2>/dev/null
+        mv -f "${pre}.tmp" "$pre" 2>/dev/null || rm -f "${pre}.tmp"
+    fi
+    if [ -f "$perm" ]; then
+        awk -v id="$id" '$1 != id' "$perm" > "${perm}.tmp" 2>/dev/null
+        mv -f "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
+    fi
+}
+
 # 在锁内追加一行到 pending-pre。$1=tool_use_id $2=tool_name
+# Post 已先到达的同 id（recent-post 窗口内）→ 跳过并置 _pending_pre_skipped=1，
+# 调用方据此保持已完成状态（不能把迟到的 Pre 重新抬成处理中/审批态）。
+_pending_pre_skipped=0
 _add_pending_pre() {
-    local id="$1" tool="$2"
-    [ -z "$id" ] && return
-    _acquire_lock || return
-    local f; f=$(_pending_pre_path)
-    # 已存在则不重复
-    if ! grep -q "^${id} " "$f" 2>/dev/null; then
-        echo "${id} ${tool:-?} $(date +%s)" >> "$f"
+    local id="$1" tool="$2" pre
+    _pending_pre_skipped=0
+    [ -z "$id" ] && return 0
+    _acquire_lock || return 0
+    pre=$(_pending_pre_path)
+    if _recent_done_has "$id"; then
+        _pending_pre_skipped=1
+        # 防御：Post 的清理曾因 IO/锁失败残留同 id 时，顺手清掉
+        _remove_pending_id_locked "$id"
+    elif ! awk -v id="$id" '$1 == id { found = 1; exit } END { exit !found }' "$pre" 2>/dev/null; then
+        printf '%s %s %s\n' "$id" "${tool:-?}" "$(date +%s)" >> "$pre"
     fi
     _release_lock
+    if [ "$_pending_pre_skipped" = "1" ]; then
+        _ai_log "PENDING: SKIP stale Pre id=${id} tool=${tool:-?} (completed within ${_PENDING_DONE_WINDOW}s)"
+    fi
 }
 
 # 在锁内追加一行到 pending-perm。$1=tool_use_id $2=! 或 ? $3=tool_name
@@ -605,8 +667,9 @@ _add_pending_perm() {
     [ -z "$id" ] && return
     _acquire_lock || return
     local f; f=$(_pending_perm_path)
-    if ! grep -q "^${id} " "$f" 2>/dev/null; then
-        echo "${id} ${mark} ${tool:-?} $(date +%s)" >> "$f"
+    # 首列精确比较（id 可能含 BRE 元字符）
+    if ! awk -v id="$id" '$1 == id { found = 1; exit } END { exit !found }' "$f" 2>/dev/null; then
+        printf '%s %s %s %s\n' "$id" "$mark" "${tool:-?}" "$(date +%s)" >> "$f"
     fi
     _release_lock
 }
@@ -636,40 +699,36 @@ _bind_pending_perm_to_pre() {
     [ -n "$BOUND_PERMISSION_ID" ]
 }
 
-# 从 pending-pre 和 pending-perm 同时移除 id（配对清除）
+# 从 pending-pre 和 pending-perm 同时移除 id（配对清除）。
+# 无论 pending 文件是否存在都记录 tombstone：Post 先于 Pre 到达时，后者是唯一
+# 能拦住迟到 Pre 的证据（见 _add_pending_pre）。
 _remove_pending_id() {
     local id="$1"
-    [ -z "$id" ] && return
-    _acquire_lock || return
-    local pre; pre=$(_pending_pre_path)
-    local perm; perm=$(_pending_perm_path)
-    # 注意: grep -v 无匹配行时退出 1,不能用 && 串接 mv;改用无条件 mv
-    if [ -f "$pre" ]; then
-        grep -v "^${id} " "$pre" > "${pre}.tmp" 2>/dev/null
-        mv "${pre}.tmp" "$pre" 2>/dev/null || rm -f "${pre}.tmp"
-    fi
-    if [ -f "$perm" ]; then
-        grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
-        mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
-    fi
+    [ -z "$id" ] && return 0
+    _acquire_lock || return 0
+    _record_pending_done "$id"
+    _remove_pending_id_locked "$id"
     _release_lock
 }
 
 # 仅移除已回复的权限请求。OpenCode 的 request ID 与 tool call ID 独立，不能同时清
 # pending-pre；后续 PostToolUse 会用 call ID 清理工具执行项。
+# 不记 tombstone：request id 与 callID 命名空间不同，记了也拦不到迟到的 Pre。
 _remove_pending_perm_id() {
     local id="$1"
     [ -z "$id" ] && return
     _acquire_lock || return
     local perm; perm=$(_pending_perm_path)
     if [ -f "$perm" ]; then
-        grep -v "^${id} " "$perm" > "${perm}.tmp" 2>/dev/null
-        mv "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
+        awk -v id="$id" '$1 != id' "$perm" > "${perm}.tmp" 2>/dev/null
+        mv -f "${perm}.tmp" "$perm" 2>/dev/null || rm -f "${perm}.tmp"
     fi
     _release_lock
 }
 
-# 清空两个 pending 文件（Stop/SessionStart/SessionEnd/UserPromptSubmit/Esc 用）
+# 清空两个 pending 文件（Stop/SessionStart/SessionEnd/UserPromptSubmit/Esc 用）。
+# recent-post 刻意不清：turn/session 边界之后仍可能收到同 turn 迟到的 Pre，
+# 删掉 tombstone 会在边界重新引入残留；其生命周期由 300s 修剪与 pane 目录销毁负责。
 _clear_pending() {
     [ -n "$TMUX_PANE" ] || return
     _acquire_lock || return
@@ -677,16 +736,18 @@ _clear_pending() {
     _release_lock
 }
 
-# pending 集合中是否有 N 秒内的条目（每行 "id tool ts"）。用于区分「工具确实在
-# 跑」与「泄漏/中断残留的旧条目」——并发 hook 抢锁超时会让 _remove_pending_id
-# 静默放弃，集合可能长期残留陈旧 id（实测存在），不能只按非空判定活跃。
+# pending 集合中是否有 N 秒内的条目。用于区分「工具确实在跑」与「泄漏/中断残留
+# 的旧条目」——并发 hook 抢锁超时会让 _remove_pending_id 静默放弃，集合可能长期
+# 残留陈旧 id（实测存在），不能只按非空判定活跃。
+# 时间戳取末列：pending-pre 是 "id tool ts"（3 列），pending-perm 是
+# "id mark tool ts"（4 列）——固定 $3 对 perm 永远不命中（历史 bug）。
 _pending_recent() {  # $1=秒数 → 0=有新鲜条目
     local max="${1:-10}" now f
     now=$(date +%s)
     for f in "$(_pending_pre_path)" "$(_pending_perm_path)"; do
         [ -s "$f" ] || continue
         if awk -v now="$now" -v max="$max" '
-            $3 ~ /^[0-9]+$/ && now - $3 <= max { found = 1; exit }
+            $NF ~ /^[0-9]+$/ && now - $NF <= max { found = 1; exit }
             END { exit !found }' "$f" 2>/dev/null; then
             return 0
         fi
