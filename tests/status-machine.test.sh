@@ -438,4 +438,77 @@ run_event claude PreToolUse '{"session_id":"dg-s","tool_use_id":"x","tool_name":
 [ ! -f "$FAKE_TMUX_DIR/pane-status" ] \
     || { echo "FAIL: 锁占用下 PreToolUse 不应写状态" >&2; exit 1; }
 
+# ── Post 先于 Pre 到达（乱序）：recent-post 拦截迟到的 Pre ──
+PANE_DIR="$TMUX_AI_STATUS_DIR/_1"
+recent_has() { grep -q "^$1 " "$PANE_DIR/recent-post" 2>/dev/null; }
+pre_has() { grep -q "^$1 " "$PANE_DIR/pending-pre" 2>/dev/null; }
+perm_has() { grep -q "^$1 " "$PANE_DIR/pending-perm" 2>/dev/null; }
+
+# 1) Post 先到 → 迟到 Pre 不重建 pending，状态保持 >
+reset_state
+run_event codex PostToolUse '{"session_id":"late-s","tool_use_id":"late-a","tool_name":"Bash"}'
+assert_status '>' 'Post 先到：状态为处理中'
+run_event codex PreToolUse '{"session_id":"late-s","tool_use_id":"late-a","tool_name":"Bash"}'
+assert_status '>' '迟到 Pre 不应改变已完成状态'
+pre_has 'late-a' && { echo "FAIL: 迟到 Pre 不应写 pending-pre" >&2; exit 1; }
+recent_has 'late-a' || { echo "FAIL: recent-post 应记录已完成 id" >&2; exit 1; }
+
+# 2) 过期 tombstone（>60s）不拦截合法 Pre
+reset_state
+run_event codex PostToolUse '{"session_id":"exp-s","tool_use_id":"exp-a","tool_name":"Bash"}'
+now=$(date +%s)
+awk -v ts="$((now - 61))" '{ print $1, ts }' "$PANE_DIR/recent-post" > "$PANE_DIR/recent-post.tmp"
+mv "$PANE_DIR/recent-post.tmp" "$PANE_DIR/recent-post"
+run_event codex PreToolUse '{"session_id":"exp-s","tool_use_id":"exp-a","tool_name":"Bash"}'
+pre_has 'exp-a' || { echo "FAIL: 过期 tombstone 不应拦截 Pre" >&2; exit 1; }
+assert_status '>' '过期 tombstone 后 Pre 正常进入处理中'
+
+# 3) 正常 Pre → Post 不回归
+reset_state
+run_event codex PreToolUse '{"session_id":"ord-s","tool_use_id":"ord-a","tool_name":"Bash"}'
+pre_has 'ord-a' || { echo "FAIL: 正常 Pre 应写 pending-pre" >&2; exit 1; }
+run_event codex PostToolUse '{"session_id":"ord-s","tool_use_id":"ord-a","tool_name":"Bash"}'
+pre_has 'ord-a' && { echo "FAIL: Post 应清 pending-pre" >&2; exit 1; }
+recent_has 'ord-a' || { echo "FAIL: Post 应写 recent-post" >&2; exit 1; }
+
+# 4) Stop 清 pending 后，迟到的 Pre 仍被 tombstone 拦截
+reset_state
+run_event codex PostToolUse '{"session_id":"stop-s","tool_use_id":"stop-a","tool_name":"Bash"}'
+run_event codex Stop '{"session_id":"stop-s"}'
+assert_status '✓' 'Stop 后状态为 ✓'
+run_event codex PreToolUse '{"session_id":"stop-s","tool_use_id":"stop-a","tool_name":"Bash"}'
+assert_status '✓' 'Stop 后迟到 Pre 不应回退状态'
+pre_has 'stop-a' && { echo "FAIL: Stop 后迟到 Pre 不应写 pending-pre" >&2; exit 1; }
+
+# 5) codex request_permissions：迟到 Pre 不得复活审批态
+reset_state
+run_event codex PostToolUse '{"session_id":"rp-s","tool_use_id":"rp-a","tool_name":"request_permissions"}'
+run_event codex PreToolUse '{"session_id":"rp-s","tool_use_id":"rp-a","tool_name":"request_permissions"}'
+assert_status '>' 'request_permissions 迟到 Pre 不应复活 !'
+perm_has 'rp-a' && { echo "FAIL: 迟到 Pre 不应写 pending-perm" >&2; exit 1; }
+
+# 6) opencode 同构（callID）
+reset_state
+run_event opencode PostToolUse '{"session_id":"oc-s","tool_use_id":"oc-a","tool_name":"bash"}'
+run_event opencode PreToolUse '{"session_id":"oc-s","tool_use_id":"oc-a","tool_name":"bash"}'
+pre_has 'oc-a' && { echo "FAIL: opencode 迟到 Pre 不应写 pending-pre" >&2; exit 1; }
+run_event opencode PreToolUse '{"session_id":"oc-s","tool_use_id":"oc-b","tool_name":"bash"}'
+run_event opencode PostToolUse '{"session_id":"oc-s","tool_use_id":"oc-b","tool_name":"bash"}'
+pre_has 'oc-b' && { echo "FAIL: opencode 正常配对应清理" >&2; exit 1; }
+
+# 7) 重复 Post 只保留一条 tombstone
+reset_state
+run_event codex PostToolUse '{"session_id":"dup-s","tool_use_id":"dup-a","tool_name":"Bash"}'
+run_event codex PostToolUse '{"session_id":"dup-s","tool_use_id":"dup-a","tool_name":"Bash"}'
+[ "$(grep -c '^dup-a ' "$PANE_DIR/recent-post" 2>/dev/null || true)" = "1" ] \
+    || { echo "FAIL: recent-post 同 id 应只有一条" >&2; exit 1; }
+
+# 8) 300s 修剪：旧记录在下次写入时移除
+reset_state
+run_event codex PostToolUse '{"session_id":"prune-s","tool_use_id":"seed","tool_name":"Bash"}'
+printf 'old-id %s\n' "$(( $(date +%s) - 400 ))" >> "$PANE_DIR/recent-post"
+run_event codex PostToolUse '{"session_id":"prune-s","tool_use_id":"prune-new","tool_name":"Bash"}'
+recent_has 'old-id' && { echo "FAIL: 过期 recent-post 应被修剪" >&2; exit 1; }
+recent_has 'prune-new' || { echo "FAIL: 新记录应写入 recent-post" >&2; exit 1; }
+
 printf 'status-machine tests passed\n'

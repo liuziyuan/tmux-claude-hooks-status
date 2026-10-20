@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { checkToolDetail, renderToolDetail, summarizeDetails } from '../src/check-detail.js';
+import { checkToolDetail, renderToolDetail, summarizeDetails, findDuplicateEvents } from '../src/check-detail.js';
 
 const TOOL = {
   id: 'claude',
@@ -182,4 +182,47 @@ test('renderToolDetail renders trust record / unknown states', () => {
     renderToolDetail(mk({ configFile: '/x', trusted: true, missingEvents: [], instances: [] })).join('\n'),
     /授信记录存在/
   );
+});
+
+test('findDuplicateEvents reports events with registered > 1', () => {
+  const dups = findDuplicateEvents({
+    events: {
+      PreToolUse: { registered: 2, alive: 2, scriptPaths: ['/a'] },
+      Stop: { registered: 1, alive: 1, scriptPaths: ['/a'] },
+    },
+  });
+  assert.deepEqual(dups, [{ event: 'PreToolUse', registered: 2 }]);
+});
+
+test('renderToolDetail warns on duplicate codex registrations without changing status', () => {
+  const base = {
+    ok: true, status: 'ok', tool: 'codex', label: 'Codex', mode: 'file', suppress: false,
+    events: { PreToolUse: { registered: 2, alive: 2, scriptPaths: ['/a'] } },
+    plugin: null, registeredPaths: ['/a'], drift: null, error: null,
+  };
+  const text = renderToolDetail(base).join('\n');
+  assert.match(text, /重复注册/);
+  assert.match(text, /PreToolUse×2/);
+  assert.match(text, /TMUX_AI_FORCE_INSTALL=1/);
+  assert.match(text, /Trust/);
+  assert.match(text, /hooks 完整/);
+});
+
+test('renderToolDetail warns on duplicates for missing status too', () => {
+  const text = renderToolDetail({
+    ok: false, status: 'missing', tool: 'codex', label: 'Codex', mode: 'file', suppress: false,
+    events: { PreToolUse: { registered: 2, alive: 0, scriptPaths: ['/dead'] } },
+    plugin: null, registeredPaths: [], drift: null, error: null,
+  }).join('\n');
+  assert.match(text, /缺失或损坏/);
+  assert.match(text, /重复注册/);
+});
+
+test('renderToolDetail does not show codex duplicate hint for other tools', () => {
+  const text = renderToolDetail({
+    ok: true, status: 'ok', tool: 'claude', label: 'Claude Code', mode: 'file', suppress: false,
+    events: { PreToolUse: { registered: 2, alive: 2, scriptPaths: ['/a'] } },
+    plugin: null, registeredPaths: ['/a'], drift: null, error: null,
+  }).join('\n');
+  assert.doesNotMatch(text, /重复注册/);
 });

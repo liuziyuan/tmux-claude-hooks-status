@@ -14,7 +14,7 @@ import { checkEnv, detectClis, interactiveShell } from '../src/detect.js';
 import { planBrewRemediation, runBrewAction } from '../src/env.js';
 import { installHooks, uninstallHooks, repairHooks } from '../src/hooks.js';
 import { checkSymlink, checkTmuxConf } from '../src/symlink.js';
-import { checkToolDetail, renderToolDetail, summarizeDetails } from '../src/check-detail.js';
+import { checkToolDetail, renderToolDetail, summarizeDetails, findDuplicateEvents } from '../src/check-detail.js';
 import { ensureTmuxIntegration, reloadTmux } from '../src/tmuxconf.js';
 import { stopMonitor, clearAggregateStatus, removeSymlinks } from '../src/purge.js';
 import {
@@ -165,26 +165,41 @@ async function detectCliMenu() {
   await offerDriftConvergence(details);
 }
 
-// 漂移收敛入口：检测（check --json 的 drift 字段 + .tmux.conf 的 pointsToCurrent）
-// 与收敛分离。收敛策略不对称——claude 无代价直接收敛；codex 重写即 trusted_hash
-// 失效，必须显式确认；opencode 重写无信任代价，确认一次即可。
+// 漂移/重复收敛入口：检测（check --json 的 drift 字段 + .tmux.conf 的 pointsToCurrent
+// + codex 的 registered>1）与收敛分离。收敛策略不对称——claude 无代价直接收敛；
+// codex 重写即 trusted_hash 失效，必须显式确认；opencode 重写无信任代价，确认一次即可。
 async function offerDriftConvergence(details) {
-  const driftTools = details.filter((d) => d.status !== 'unknown' && d.drift?.drifted);
+  const candidates = details.filter((d) => {
+    if (d.status === 'unknown') return false;
+    if (d.drift?.drifted) return true;
+    // codex 重复注册：drift 检测不到（同路径），但 force install 可收敛
+    return d.tool === 'codex' && findDuplicateEvents(d).length > 0;
+  });
   const conf = checkTmuxConf();
   const confStale = conf.exists && conf.referenced && !conf.pointsToCurrent;
 
-  const options = driftTools.map((d) => ({
-    value: `tool:${d.tool}`,
-    label: `${d.label} hooks 收敛到当前 source`,
-    hint: `旧路径 ${(d.drift.stale || []).join(', ')}`,
-  }));
+  const options = candidates.map((d) => {
+    const hints = [];
+    if (d.drift?.drifted) hints.push(`旧路径 ${(d.drift.stale || []).join(', ')}`);
+    if (d.tool === 'codex') {
+      const dups = findDuplicateEvents(d);
+      if (dups.length > 0) {
+        hints.push(`重复：${dups.map((x) => `${x.event}×${x.registered}`).join('、')}`);
+      }
+    }
+    return {
+      value: `tool:${d.tool}`,
+      label: `${d.label} hooks 收敛到当前 source`,
+      hint: hints.join('；'),
+    };
+  });
   if (confStale) {
     options.push({ value: 'tmuxconf', label: '.tmux.conf 加载声明更新为当前 source' });
   }
   if (options.length === 0) return;
 
   options.push({ value: '__skip__', label: '← 暂不处理' });
-  p.log.warn('检测到部分配置指向其他安装源（漂移）。功能仍可用，但新安装/自修复只会收敛当前 source。');
+  p.log.warn('检测到配置漂移或 codex hooks 重复注册。功能仍可用，但收敛会重写 hooks（codex 需重新 Trust）。');
   const sel = await p.select({
     message: '选择要收敛的项（Esc 跳过）',
     options,

@@ -150,10 +150,11 @@ Esc 键拒绝检测（tmux bind-key -n Escape）:
 
 ### Pending 集合机制
 
-per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/`）：
+per-pane 持久化两个集合 + 一个完成态 tombstone（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/`）：
 
-- `pending-pre`：已 PreToolUse 未 PostToolUse 的 `tool_use_id`
-- `pending-perm`：已 PermissionRequest 未配对的 `tool_use_id`（含 `!`/`?` 标记）
+- `pending-pre`：已 PreToolUse 未 PostToolUse 的 `tool_use_id`（行 `id tool ts`）
+- `pending-perm`：已 PermissionRequest 未配对的 `tool_use_id`（含 `!`/`?` 标记；行 `id mark tool ts`）
+- `recent-post`：PostToolUse/PostToolUseFailure 已处理的 `tool_use_id`（行 `id ts`）。60s 窗口内命中则迟到的 Pre 跳过写入（`_pending_pre_skipped`），状态保持已完成——修复 Post 先于 Pre 到达导致 `pending-pre` 永久残留、状态卡 `>`；300s 修剪，`_clear_pending` 刻意不清（turn/session 边界迟到的 Pre 仍需拦截）
 - `.lock/`：mkdir mutex（5s stale 强夺）保护并发写
 
 **铁律**：只要 `pending-perm` 非空，STATUS 必为 `!`/`?`，不受 PreToolUse/PostToolUse 乱序到达影响。
@@ -212,7 +213,7 @@ codex 0.163 managed app-server daemon 常驻（ppid=1），hooks 在 daemon 中�
 2. 权限对话框流程仍逐个串行，单次循环内不存在 PermReq 之间的真并发
 3. PostToolUse 配对清空 pending-pre → 派生 `>` 覆盖早写的 `!`
 
-**Parallel tool calls 已是现实**（官方："PostToolUse fires once per tool, which means it fires concurrently when Claude makes parallel tool calls"；2026-10-20 日志实证：PostToolUse 的 hook 先于同 id 的 PreToolUse 被记录——async hook 到达顺序无保证）。**当前未爆发的真实原因**：权限对话框流程本身仍逐个串行 + PreToolUse 的 LIVE_STATUS 兜底有效。触发条件部分满足（hook 交错已观察到；PermReq 之间真并发未观察到）。届时重新设计的锚点候选：`prompt_id`（turn 级，已在 input 中）、PostToolBatch 事件的 `tool_calls` 数组（批级权威清单，每项含 `tool_use_id`）、或 `tool_name + tool_input` 哈希作 surrogate id。
+**Parallel tool calls 已是现实**（官方："PostToolUse fires once per tool, which means it fires concurrently when Claude makes parallel tool calls"；2026-10-20 日志实证：PostToolUse 的 hook 先于同 id 的 PreToolUse 被记录——async hook 到达顺序无保证）。**当前未爆发的真实原因**：权限对话框流程本身仍逐个串行 + PreToolUse 的 LIVE_STATUS 兜底有效。触发条件部分满足（hook 交错已观察到；PermReq 之间真并发未观察到）。届时重新设计的锚点候选：`prompt_id`（turn 级，已在 input 中）、PostToolBatch 事件的 `tool_calls` 数组（批级权威清单，每项含 `tool_use_id`）、或 `tool_name + tool_input` 哈希作 surrogate id。**2026-10-20 补充**：Post 先于 Pre 的残留已由 `recent-post` tombstone 兜底（迟到的 Pre 不再重建 pending）；仍未解决的是 Claude 无 ID 的并行 PermissionRequest 绑定顺序。
 
 Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `PostToolUse` 提供且
 可配对。核心会把无 ID 的权限请求绑定到最近的同工具 pending PreToolUse ID，批准后的
@@ -360,7 +361,8 @@ bash tests/bindings.test.sh
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
 - **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
 - **多安装源收敛与卸载意图标记（2026-10-14）**：hooks 条目可由开发 repo 与 npm bundled 包两个「安装源」写入（TUI 走 bundled、自修复走 tmux 加载源），曾因 claude 剥离用 `startswith($hook_script)` 路径敏感匹配导致跨源卸载假成功（剥离零命中 → 报成功但真源未变 → 检测恒「已装」）。修复后的契约：
-    - **归属判定路径无关**：所有 strip/merge 清理/check 计数统一 `contains("tmux-ai-status")`（codex 用 `contains("tmux-ai-status codex")`），legacy 名（tmux-powerline-claude-status/tmux-claude-status）清理保留。跨源 install/卸载/修复在任意源组合下结果一致
+    - **归属判定路径无关**：所有 strip/merge 清理/check 计数统一 `contains("tmux-ai-status")`（codex 用常量 `_CODEX_MARKER="tmux-ai-status codex"`，count/integrity/detail/strip 同源），legacy 名（tmux-powerline-claude-status/tmux-claude-status）清理保留。跨源 install/卸载/修复在任意源组合下结果一致。**codex 命令级剥离（2026-10-20）**：逐 hook 删除含 marker 的 command（不看 `type`，缺 type 的条目也能清），同组第三方 command 保留；空 group/事件删除；无 `hooks` 键/null/非数组的 group 原样保留
+    - **codex 重复条目只提示不自动收敛（2026-10-20）**：同事件注册多条本插件 command 时 integrity 仍过、普通 install no-op（重写即 re-trust），`check-detail.js` 的 `findDuplicateEvents`（`events.registered > 1`）在 CLI/TUI 明细中渲染警告，exit code 不变；TUI 收敛入口把 codex 重复纳入候选，复用 re-trust 确认，force install 走命令级 strip 收敛
     - **check 三要素**：按事件计数（非扁平总数，防重复+缺失假阳性）+ 结构指纹 + **每事件至少一条条目脚本存活**（`test -x` command 首 token；死路径如 npm 卸载/volta 升级换路径 → missing → 重装收敛自愈）
     - **收敛策略不对称**：claude 无 trust 代价 → install 每次强收敛到执行者路径；codex/opencode **no-op if valid**（check 通过时不改写——codex 重写即 `trusted_hash` 失效需重新 Trust all，仅缺失/死路径才 strip+重写收敛）。**drift 收敛旁路（2026-10-17）**：`TMUX_AI_FORCE_INSTALL=1` 旁路 codex/opencode 的 no-op 门禁——hooks 指向其他安装源但脚本存活时 integrity 恒过，普通 install 永远收敛不了；TUI 漂移收敛入口对 codex 显式确认 re-trust 代价后经 execa env 传入
     - **卸载意图标记（suppression marker）**：`${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmuxclihook}/suppressed-<tool>`（持久，跨重启有效）。wrapper 显式 uninstall 成功 → 写；显式 install 成功 → 清；三条自动修复路径（`_maybe_repair_hooks`、SessionStart 重装、入口 `auto`）见标记一律跳过。`install-claude-hooks.sh auto` 供 tmux 入口加载时调用（被挡静默 exit 0）；用户恢复需显式安装（prefix+C-h / TUI）
