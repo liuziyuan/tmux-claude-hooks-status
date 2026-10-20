@@ -313,6 +313,7 @@ bash tests/suppress-cross-source.test.sh
 bash tests/status-machine.test.sh
 bash tests/pid-tree.test.sh
 bash tests/install-idempotency.test.sh
+bash tests/symlink-write.test.sh
 bash tests/bindings.test.sh
 ```
 
@@ -350,6 +351,7 @@ bash tests/bindings.test.sh
   - **语义不变跳写**：merge 输出与现值两边 `jq -S` 规范化对比，相同则不写（不触碰 mtime，避免 file watcher 无谓重载）
   - **auto 幂等（`adapter_check_converged`）**：integrity + 全部条目指向当前源（无漂移/死条目）+ 每事件条目 ≤1（无重复）→ tmux reload 不再全量重写真源；强收敛保留（任一异常仍重装收敛）。已知 trade-off：结构漂移（async/matcher 被外部改）auto 跳过，显式 install 仍强收敛。参照系仅限 wrapper 上下文（事件路径 `pwd` 逻辑路径 vs wrapper `pwd -P` 物理路径）
   - **suppress 标记双向告警**：write/clear 失败不再吞错（clear 失败会让残留标记把 auto 永久挡住）
+- **符号链接写穿（2026-10-20）**：`_install_atomic_write` 写入前用 `_install_real_target` 解析 symlink 链（相对链接基于链接所在目录、悬空链接同样解析、40 层上限失败回退原路径），临时文件与 `mv` 都作用于真实目标——`mv` 直接作用于链接路径只会替换链接本身（POSIX rename 语义），会让 cc-switch 的 codex 实例与 `~/.codex/hooks.json` 共享真源分叉（实例首次安装、target 尚不存在时即触发）。uninstall 清空改走 `_install_remove_target`（删真实目标、保留链接，下次 install 写穿即恢复共享）。回归测试 `tests/symlink-write.test.sh`
 - **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）。**reload 自愈（2026-10-20）**：绑定指向 `scripts/tmux-ai-reload`（按 `#{config_files}` 候选列表逐个 `[ -f ]` 过滤后 source，再重跑入口；**多文件重载需 tmux ≥3.2**——3.1 无 `config_files`，回落 `~/.tmux.conf`），且**每次加载都重绑**（旧一次性哨兵会让 source 配置内的用户 `bind r` 重置绑定后不再重装，纯 TPM 模式第二次重载起初始化静默停止）。原 `prefix+r` / 全局 `Escape` 绑定在覆盖前保存到 `@claude_hooks_saved_bind_r` / `@claude_hooks_saved_bind_escape`（供手动恢复；Escape 冲突一次性告警 `@claude_hooks_esc_warned`）。**Escape 检测必须用 `list-keys -T root Escape`**——`list-keys -n` 不是合法旗标（3.8 实测 `unknown flag -n`，会被 `2>/dev/null` 吞掉导致保存/告警永不发生）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身

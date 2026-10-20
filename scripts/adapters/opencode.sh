@@ -225,7 +225,8 @@ adapter_install_hooks() {
 adapter_uninstall_hooks() {
     if [ -f "$ADAPTER_HOOKS_FILE" ]; then
         if grep -q "$_OPENCODE_MARKER" "$ADAPTER_HOOKS_FILE" 2>/dev/null; then
-            rm -f "$ADAPTER_HOOKS_FILE"
+            # 符号链接只删真实目标，保留链接（与原子写一致）
+            _install_remove_target "$ADAPTER_HOOKS_FILE"
             echo "opencode plugin uninstalled (removed $ADAPTER_HOOKS_FILE)"
         else
             echo "opencode plugin: $ADAPTER_HOOKS_FILE 非本插件生成，跳过删除"

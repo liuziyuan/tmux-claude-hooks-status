@@ -219,7 +219,8 @@ adapter_uninstall_hooks() {
         local stripped
         stripped=$(_codex_read_existing | _codex_strip_managed)
         if [ "$(printf '%s' "$stripped" | jq -c .)" = "{}" ]; then
-            rm -f "$ADAPTER_HOOKS_FILE"
+            # 符号链接（cc-switch 实例共享真源）只删真实目标，保留链接
+            _install_remove_target "$ADAPTER_HOOKS_FILE"
             echo "Codex hooks uninstalled (removed empty $ADAPTER_HOOKS_FILE)"
         else
             _install_atomic_write "$stripped" "$ADAPTER_HOOKS_FILE"
