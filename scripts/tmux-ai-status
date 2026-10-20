@@ -262,11 +262,6 @@ case "$EVENT" in
     ;;
 esac
 
-# pane 解析失败时不写全局状态（避免把无归属事件当成有效状态）
-if [ -n "$TMUX_PANE" ]; then
-    tmux set-option -g @ai_status "$STATUS" 2>/dev/null || true
-fi
-
 # 构造事件块详情行：
 #   tool:  <tool_name>  id=<short tool_use_id>
 #   input: <精简 JSON，超 2000B 截断>
