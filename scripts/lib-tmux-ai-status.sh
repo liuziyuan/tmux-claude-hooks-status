@@ -94,7 +94,7 @@ _load_pane_snapshot() {
     _CURRENT_SERVER_PID=""
     command -v tmux >/dev/null 2>&1 || return 1
     _PANE_SNAPSHOT=$(tmux list-panes -a -F \
-        '#{pane_id}|#{pane_current_path}|#{pane_current_command}|#{pane_pid}|#{pid}|#{session_attached}|#{pane_title}' \
+        '#{pane_id}|#{s/[|]/_/:pane_current_path}|#{s/[|]/_/:pane_current_command}|#{pane_pid}|#{pid}|#{session_attached}|#{pane_title}' \
         2>/dev/null)
     [ -n "$_PANE_SNAPSHOT" ] || return 1
     _PANE_SNAPSHOT_OK=1
@@ -410,7 +410,10 @@ build_all_status() {
     _ai_names=$(_collect_ai_process_names)
     # 动态追加上 monitor 的 seen 标记（无 SessionEnd 工具的进程树探测结果）。
     # switch/volta-shim 启动的 pane 前台命令不是 codex，必须靠该标记补 idle `-`。
-    _fmt="#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{pane_current_command}|#{@ai_provider}|#{@ai_provider_id}"
+    # 自由文本字段就地消毒：tmux format 的 s/[|]/_/ 替换（`|` 是 ERE 交替符，
+    # 必须写成 [|] 或 \|；裸 s/|/…/ 不生效）。session 名/provider 名含 `|` 时
+    # 会劈裂字段——attached 位变状态字符使 $6>0 误判、该 session 整行消失。
+    _fmt="#{pane_id}|#{s/[|]/_/:session_name}|#{window_index}|#{pane_index}|#{@ai_pane_status}|#{session_attached}|#{session_created}|#{@ai_entered_time}|#{s/[|]/_/:pane_current_command}|#{s/[|]/_/:@ai_provider}|#{s/[|]/_/:@ai_provider_id}"
     for _n in $_ai_names; do
         _fmt="$_fmt|#{@ai_monitor_seen_$_n}"
     done

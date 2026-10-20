@@ -38,8 +38,12 @@ tmux() {
                 # pane 解析快照：pane|path|cmd|pane_pid|server_pid|attached|title
                 *'#{pane_title}'*)
                     : > "$FAKE_TMUX_DIR/snapshot-called"
+                    # 模拟 tmux 的 s/[|]/_/ 替换（仅在 format 带修饰符时）
+                    local _sp="$FAKE_PANE_PATH" _sc="$cmd"
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_path}'*) _sp=$(printf '%s' "$_sp" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_command}'*) _sc=$(printf '%s' "$_sc" | tr '|' '_') ;; esac
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
-                        "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
+                        "$_sp" "$_sc" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
                 # 孤儿清理查询（fmt 恰以 |#{@ai_pane_status} 结尾）：哨兵 + 两字段行
                 *'|#{@ai_pane_status}')
@@ -48,8 +52,14 @@ tmux() {
                     ;;
                 # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
                 *'@ai_pane_status'*)
-                    printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
-                        "$status" "$cmd" "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
+                    local _sess="${FAKE_SESSION_NAME:-test}" _cmd="$cmd" _prov="${FAKE_PROVIDER:-}" _provid="${FAKE_PROVIDER_ID:-}"
+                    case "$fmt" in *'#{s/[|]/_/:session_name}'*) _sess=$(printf '%s' "$_sess" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:pane_current_command}'*) _cmd=$(printf '%s' "$_cmd" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:@ai_provider}'*) _prov=$(printf '%s' "$_prov" | tr '|' '_') ;; esac
+                    case "$fmt" in *'#{s/[|]/_/:@ai_provider_id}'*) _provid=$(printf '%s' "$_provid" | tr '|' '_') ;; esac
+                    printf '%%1|%s|1|1|%s|1|1|1|%s|%s|%s|%s|%s|%s\n' \
+                        "$_sess" "$status" "$_cmd" "$_prov" "$_provid" \
+                        "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
                     ;;
                 # pane 前台命令 / 进程树查找
                 *'#{pane_current_command}'*) printf '%%1|%s\n' "$cmd" ;;
@@ -240,6 +250,32 @@ all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
 case "$all" in
     *'1.1'*) printf 'FAIL: 无 seen 标记不应显示 pane\n' >&2; exit 1 ;;
 esac
+
+# 聚合字段注入防护：session 名/provider 名含 `|` 不得劈裂字段
+# （旧实现：attached 位错位 → $6>0 误判 → 整行消失）
+reset_state
+rm -f "$FAKE_TMUX_DIR/ai_all_status"
+FAKE_SESSION_NAME='evil|sess' FAKE_PROVIDER='prov|name' FAKE_PROVIDER_ID='id|1' \
+    run_event claude PreToolUse '{"session_id":"inj","tool_use_id":"i1","tool_name":"Bash"}'
+all=$(command cat "$FAKE_TMUX_DIR/ai_all_status" 2>/dev/null || true)
+case "$all" in
+    *'evil_sess'*) ;;
+    *) printf 'FAIL: session 名未被消毒（got: %s）\n' "$all" >&2; exit 1 ;;
+esac
+case "$all" in
+    *'evil|sess'*)
+        printf 'FAIL: session 名仍含裸 |（字段会劈裂）\n' >&2; exit 1 ;;
+esac
+case "$all" in
+    *'[prov_name]'*) ;;
+    *) printf 'FAIL: provider 名未被消毒（got: %s）\n' "$all" >&2; exit 1 ;;
+esac
+case "$all" in
+    *'1.1'*) ;;
+    *) printf 'FAIL: 注入字段导致 pane 段落消失\n' >&2; exit 1 ;;
+esac
+
+reset_state
 
 # _refresh 只重建聚合，不应触发 pane 解析快照（避免每次生命周期 hook 做 BFS）
 reset_state
