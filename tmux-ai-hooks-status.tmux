@@ -85,7 +85,8 @@ tmux bind-key r run-shell "'${CURRENT_DIR}/scripts/tmux-ai-reload'" 2>/dev/null 
 # #{hook_client_name} 这个 format 变量——误用它恒展开为空，handler 的
 # [ -n "$3" ] 守卫静默跳过，entered_time 从不写入，排序退化为 created 序。
 tmux set-hook -g client-session-changed "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _session-switched #{hook_client}'" 2>/dev/null || true
-# 注：_refresh 与 TOOL_ID 无关（仅重建聚合 + 自修复 claude hooks），统一传 claude。
+# 注：_refresh 与 TOOL_ID 无关（重建聚合 + 自修复当前工具 hooks + 跨工具修复
+# 已显式安装的 codex/opencode），统一传 claude。
 tmux set-hook -g session-closed    "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 tmux set-hook -g client-detached   "run-shell '${CURRENT_DIR}/scripts/tmux-ai-status claude _refresh'"
 # （client-attached 不再注册：attach 场景由 client-session-changed 覆盖）

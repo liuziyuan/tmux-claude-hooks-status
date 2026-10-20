@@ -58,7 +58,7 @@ scripts/
 
 install 逻辑归并：公共骨架（依赖检查 `_install_require_jq` + 原子写 `_install_atomic_write`）在 `lib-install-hooks.sh`；工具特定的 jq 合并在各 adapter 的 install 函数；`install-<tool>-hooks.sh` 瘦成薄 wrapper（source 骨架 + adapter → dispatch，另含 `check` 模式输出 `ok`/`missing` 供 TUI 侦测）。加新 CLI 的 install 只需在其 adapter 加两个函数 + 5 行 wrapper。
 
-核心引擎不再写 `case "$TOOL_ID"`：`_check_hooks_integrity` 委托 `adapter_check_integrity`；`_maybe_repair_hooks` 用 `ADAPTER_INSTALLER`；`_pane_has_ai_process`/`build_all_status` 用 `_collect_ai_process_names`（扫所有 `adapters/*.sh` 汇总进程名，聚合/清理路径认全部工具）。
+核心引擎不再写 `case "$TOOL_ID"`：`_check_hooks_integrity` 委托 `adapter_check_integrity`；`_maybe_repair_hooks` 用 `ADAPTER_INSTALLER`（当前工具），`_maybe_repair_other_tools` 按 installed 标记跨工具调 wrapper；`_pane_has_ai_process`/`build_all_status` 用 `_collect_ai_process_names`（扫所有 `adapters/*.sh` 汇总进程名，聚合/清理路径认全部工具）。
 
 ### cc-switch 通用配置真源（claude adapter）
 
@@ -96,7 +96,7 @@ opencode 的 plugin 文件与 cc-switch 写入的 provider 条目同目录但不
 - **cc-switch provider 段（仅 codex）** — cc-switch（`switch` 命令）launch 时向 CLI 注入 `CC_SWITCH_PROVIDER`/`CC_SWITCH_PROVIDER_ID` 环境变量，CLI hooks 进程继承；**仅 `TOOL_ID=codex` 的事件捕获**并写入 pane option `@ai_provider`/`@ai_provider_id`——claude 的 provider 标签由 wrapper 在 CLI 内 statusline 显示，tmux 状态栏刻意不重复渲染，claude/opencode 的事件一律走清理分支（`set-option -u` × 2，顺带清同 pane 之前的残留），codex 无 env（非 switch 启动）同样清理。聚合行在状态符号后渲染彩色 `[provider]` 段。颜色真源 `~/.cc-switch/statusline-preferences.json`（claude/codex 桶按 providerId 合并查，显式 SGI 码映射 tmux colourN），缺省 auto = FNV-1a(name) 落在与 cc-switch wrapper 相同的 6 色 bright 调色板（64 位精确积 `& 0xFFFFFFFF` 复刻 JS `Math.imul` 的 32 位截断乘）。**非 switch 场景零存在感契约**：provider 能力本质是 switch 的需求，本插件只是承载方——无 env 时只做幂等清理，不产生任何输出（stdout 恒空满足 codex hook 契约）、不改变退出码（恒 0）、不渲染任何 provider 内容；该场景实测 exit 0 + stdout/stderr 0 字节。
   - **⚠️ 迁移备忘（2026-10-17）**：本段是过渡方案——Codex TUI 内无法显示 provider（原生 status_line 无外部命令渲染，openai/codex#17827）。**当该上游能力落地时，整体移除本段功能**：删掉 `tmux-ai-status` 入口的 env 捕获/清理块、`build_all_status` 的 provider 渲染、`_provider_prefs_lines`/`_provider_tag_colour` 与 list-panes format 中的 `#{@ai_provider}|#{@ai_provider_id}` 字段，由 cc-switch 直接在 Codex TUI 内注入标签（cc-switch-parallel 仓库 CLAUDE.md 有对应迁移条目）。迁移前保持现状。
 - **进程树检查** `_pane_has_ai_process()` — BFS 遍历 pane 进程树，匹配所有 adapter 汇总的进程名（前缀匹配）
-- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 委托当前 adapter 的 `adapter_check_integrity` / `ADAPTER_INSTALLER`
+- **Hooks 完整性** `_check_hooks_integrity()` / `_maybe_repair_hooks()` — 委托当前 adapter 的 `adapter_check_integrity` / `ADAPTER_INSTALLER`；`_maybe_repair_other_tools()` 在 `_run_refresh` 中遍历其余 adapter，仅对 `installed-<tool>` 已登记者 check/install（子进程调 wrapper，不 source adapter 以免 TOOL_ID 污染）
 
 ### 数据流
 
@@ -314,6 +314,7 @@ bash tests/status-machine.test.sh
 bash tests/pid-tree.test.sh
 bash tests/install-idempotency.test.sh
 bash tests/symlink-write.test.sh
+bash tests/cross-tool-repair.test.sh
 bash tests/bindings.test.sh
 ```
 
@@ -345,6 +346,7 @@ bash tests/bindings.test.sh
 - **set-hook 是 upsert**：改 hook 名或从入口删除 hook 行时，tmux server 里已注册的旧 hook 不会消失（prefix+r 重载不清），需手动 `tmux set-hook -ug <hook>` 清除，否则旧命令继续触发（case 无匹配时静默 no-op，但属脏状态）
 - **Pane 解析与 daemon 适配（2026-10-19）**：祖先链（`ps -o ppid` 向上匹配 pane_pid）是权威信号；**祖先链不通说明 hook 跑在脱离 pane 的常驻进程里（如 codex 0.163 managed app-server daemon，ppid=1），此时继承的 `$TMUX_PANE` 一律丢弃**——实测它可能指向当前 server 中真实存在但无关的 pane（不只是「指向不存在的 pane」）。兜底顺序：session 映射（`.pane-meta-*` 校验 tool/server_pid/pane_pid/cwd，防 server 重启后 pane id 复用）→ 当前工具的进程树候选 → `adapter_pane_hints`（codex: `thread_name` ↔ pane title）→ hook cwd 与 `pane_current_path`；只有唯一候选才采用，多候选保持空（monitor 补 idle `-`）。失败结果 5s 负缓存，避免 daemon 高频 hook 反复 BFS。`adapter_pane_hints` 只读、不调用 tmux（复用核心一次性 `_PANE_SNAPSHOT`）
 - **Codex server 级 monitor**：`tmux-ai-monitor` 每秒刷新聚合状态并只跟踪实际见过 Codex 的 pane；解决延迟 `SessionStart` 导致启动不显示，以及无 `SessionEnd` 导致 `/exit` 不清空；不改变 `/new` 的 `✓` 行为。**launcher 识别（2026-10-19）**：cc-switch 的 `switch` 启动时 `pane_current_command` 是 `switch`/`volta-shim`/`node` 而非 `codex`，原实现既补不出 idle `-`、`/exit` 后也不会清状态；现对 attached 的 launcher pane 每 tick 做一次进程树探测（每 tick 一次 `ps` 快照 + 一次 awk 批量 BFS），命中即写 `@ai_monitor_seen_<tool>`，`build_all_status` 用该标记补 `-`，退出时沿用既有清理分支。**性能（2026-10-19）**：旧实现逐 pane 调 `_pane_has_tool_process`（每个 pid 各起一次 `ps`/`pgrep`），launcher 多的环境单 tick 达 2.8s，叠加 5 tick 节流后新启动 codex 需 7-8s 才显示；改为一次进程快照 + 内存/awk BFS 后单 tick ~0.23s，探测也改为每 tick（新工具 ≤1 tick 显示）。**升级自重启（2026-10-19）**：monitor 启动时记录脚本目录内容指纹（`cksum`），每 60 tick 对比；npm 升级/重装替换文件后同 PID `exec` 自身重载新代码（保留 generation/server pid，`@ai_monitor_pid` 不变）。用内容指纹而非 mtime——npm 可能保留 tarball 旧 mtime。`TMUX_AI_MONITOR_RELOAD_DISABLE=1` 可关闭
+- **终态清理认 monitor seen（2026-10-20）**：`_cleanup_stale_panes` 的 `✓`/`-` 分支此前只做进程树 BFS；launcher（switch/volta-shim）或 daemon 场景工具进程脱离 pane 进程树时，正确的 `✓` 会被 60s 清理抹成 `-`。现在查询动态追加 `@ai_monitor_seen_<tool>` 字段，任一为 1 即保留（与 `build_all_status` 同一信任模型）。活跃态 `!`/`?`/`>` 不受影响——其判据是状态归属（pane 目录/session 映射）而非进程存活，认 seen 会让该清理的孤儿状态永不清理。边界：monitor 停摆而 option 残留时终态会保留更久（monitor 每 tick 主动清理 seen，入口保证其常驻）
 - **多行状态栏**：AI 状态占据独立 `status-format[N]` 行，不修改用户的 `status-right`
 - **写路径互斥与幂等（2026-10-20）**（PR-B）：
   - **wrapper 层 mkdir mutex**（`_install_acquire_lock`，macOS 无 flock(1)）：临界区覆盖 adapter 装/卸 + suppress 标记读-改-写，串行化 TUI/auto/SessionStart 修复/`_maybe_repair_hooks`/drift 收敛五方。锁目录建不出（ENOTDIR）→ 降级无锁 + 告警；持锁超时（~10s）→ 报错退出。边界：Claude Code 自身写 settings.json 不遵守锁（外部写者）
@@ -362,13 +364,14 @@ bash tests/bindings.test.sh
     - **check 三要素**：按事件计数（非扁平总数，防重复+缺失假阳性）+ 结构指纹 + **每事件至少一条条目脚本存活**（`test -x` command 首 token；死路径如 npm 卸载/volta 升级换路径 → missing → 重装收敛自愈）
     - **收敛策略不对称**：claude 无 trust 代价 → install 每次强收敛到执行者路径；codex/opencode **no-op if valid**（check 通过时不改写——codex 重写即 `trusted_hash` 失效需重新 Trust all，仅缺失/死路径才 strip+重写收敛）。**drift 收敛旁路（2026-10-17）**：`TMUX_AI_FORCE_INSTALL=1` 旁路 codex/opencode 的 no-op 门禁——hooks 指向其他安装源但脚本存活时 integrity 恒过，普通 install 永远收敛不了；TUI 漂移收敛入口对 codex 显式确认 re-trust 代价后经 execa env 传入
     - **卸载意图标记（suppression marker）**：`${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tmuxclihook}/suppressed-<tool>`（持久，跨重启有效）。wrapper 显式 uninstall 成功 → 写；显式 install 成功 → 清；三条自动修复路径（`_maybe_repair_hooks`、SessionStart 重装、入口 `auto`）见标记一律跳过。`install-claude-hooks.sh auto` 供 tmux 入口加载时调用（被挡静默 exit 0）；用户恢复需显式安装（prefix+C-h / TUI）
+    - **安装意图标记（installed marker）**：同目录 `installed-<tool>`（持久）。显式 install / claude `auto`（含已收敛跳过）→ 写；显式 uninstall → 删（**先删 installed 再写 suppressed**：suppress 写失败时 errexit 退出，此顺序避免标记残留、刚卸载的 hooks 被 `_refresh` 装回）。跨工具修复据此区分「用户装过」与「从未安装」：无标记时只对 check 通过的既存安装补登记，绝不自动安装；0.5.14 之前安装且 hooks 已损坏的老用户需显式重装一次才恢复自动修复能力
     - `_SUPPRESS_DIR` 在 `lib-install-hooks.sh` 与 `lib-tmux-ai-status.sh` 各定义一次（双上下文自包含，改动需两处同步）；adapter check 不得依赖 lib-install-hooks.sh（事件路径未 source 它）
 
 **check --json 健康明细与漂移检测（2026-10-17）**：解决「不知道是否要修 hooks / 不知道当前生效 source」两个可观测性问题。要点：
 - **默认 `check` 输出契约不变**（`ok`/`missing` + exit code，被 TUI `hooksInstalledAsync` 与 tmux 自修复依赖）；明细走 wrapper 第二参 `check --json`（单行 JSON：status/mode/events/plugin/suppress/drift），由 `lib-install-hooks.sh` 的 `_wrapper_check_json` 拼装。status 判定复用 `adapter_check_integrity` 本体 → 与 ok/missing 永不发散
 - **drift 参照系 = 执行中 wrapper 自身的 `_LIB_DIR`**：Node 经 execa 调的正是其解析出的 `SCRIPTS_DIR` 下的 wrapper，故 `_LIB_DIR` 即当前 source 的 scripts dir；手动用旧 source 的 wrapper 跑 check 得到「相对该 source 无漂移」也是正确语义（它正是那个源的收敛执行者）。Node 侧不二次计算（避免两处真源），只附加 bash 判不了的 `.tmux.conf` 全局信息
 - 消费方：`tmuxclihook check [tool]` 子命令与 TUI「侦测 AI CLI」共用 `installer/src/check-detail.js`（解析/渲染），漂移项在 TUI 内给收敛入口（收敛策略见上条）；check 子命令有缺失/漂移/无法判定时 exit 1
-- **自修复不再完全静默**：`_maybe_repair_hooks` 实际触发重装后 `tmux display-message` 浮出成功/失败（与 SessionStart 修复路径的既有提示对齐，全链路两个可见点）；自 2026-10-20 起该函数同时被 `_run_refresh`（tmux run-shell）与 SessionStart（AI CLI hook 进程，host 进程 errno 会计入首轮响应延迟，故有 60s 节流与失败退避）调用——SessionStart 原内联修复块已归并至此（顺带修掉「installer 不带 auto 参数绕过 suppress 标记」「失败也显示已修复」两个缺陷）
+- **自修复不再完全静默**：`_maybe_repair_hooks` 实际触发重装后 `tmux display-message` 浮出成功/失败（与 SessionStart 修复路径的既有提示对齐，全链路两个可见点）；自 2026-10-20 起该函数同时被 `_run_refresh`（tmux run-shell）与 SessionStart（AI CLI hook 进程，host 进程 errno 会计入首轮响应延迟，故有 60s 节流与失败退避）调用——SessionStart 原内联修复块已归并至此（顺带修掉「installer 不带 auto 参数绕过 suppress 标记」「失败也显示已修复」两个缺陷）；**跨工具闭环（2026-10-20）**：`_run_refresh` 同时调 `_maybe_repair_other_tools`——`_refresh` 固定以 claude 身份运行，codex/opencode 的 hooks 整体丢失后自身 SessionStart 不会再来，只能靠此兜底（仅 `installed-<tool>` 已登记者，每工具 60s 节流；未登记者只补登记健康既存安装）
 
 **Esc 导航（2026-10-17）**：clack 0.7 的 Prompt 仅把 `\x03`（ctrl+c）映射为 cancel，**Esc 默认无任何效果**——各子菜单「Esc 返回」此前只是文案承诺。`installer/src/esc.js` 挂全局 keypress 监听，看到 escape 就 `process.stdin.emit('keypress', '\x03', {name:'c', ctrl:true})` 合成取消（**必须 emit 而非 stdin.write**：raw mode 下向 fd 0 写入不回环成输入）。主菜单 Esc 退出 / 子菜单 Esc 返回 / confirm Esc 取消全部真实生效；spinner 期间不转译（clack `block()` 给 `\x03` 装了 `process.exit(0)`，转译会让 Esc 在 spinner 期间硬退出且不恢复 raw mode），`cli.js` 的 `spinner()` 包装负责联动。
 

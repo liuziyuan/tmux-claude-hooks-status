@@ -10,6 +10,17 @@ _STATUS_DIR="${TMUX_AI_STATUS_DIR:-/tmp/ai-status}"
 _SUPPRESS_DIR="${TMUX_AI_SUPPRESS_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/tmuxclihook}"
 STATUS_COLOR="#F1FA8C"
 
+# 安装意图标记路径（与 lib-install-hooks.sh 的 _hooks_installed_file 同构）。
+# 事件路径不 source 安装库，故此处独立实现；目录定义同 suppressed 两处同步。
+# 语义：用户显式装过该工具 → 跨工具自修复允许在其 hooks 丢失时自动重装。
+_installed_marker_path() { printf '%s/installed-%s' "$_SUPPRESS_DIR" "$1"; }
+_installed_marker_write() {
+    local f
+    f=$(_installed_marker_path "$1") || return 1
+    mkdir -p "$_SUPPRESS_DIR" 2>/dev/null || return 1
+    date +%s > "$f" 2>/dev/null
+}
+
 # --- 日志模块 ---
 source "${_LIB_DIR}/lib-tmux-ai-log.sh"
 
@@ -907,7 +918,15 @@ _cleanup_stale_panes() {
     local ps_snap
     ps_snap=$(_ps_process_snapshot)
 
-    while IFS='|' read -r pane_id pane_status; do
+    # 动态追加 monitor seen 字段（与 build_all_status 同一组名字，复用其收集器）。
+    # launcher/daemon 场景工具进程可能脱离 pane 进程树，进程树 BFS 看不到；
+    # seen=1 是 monitor 用 launcher 进程树探测得出的「工具确实存活」信号。
+    local seen_fmt="" _seen_name
+    for _seen_name in $(_collect_ai_process_names); do
+        seen_fmt="${seen_fmt}|#{@ai_monitor_seen_${_seen_name}}"
+    done
+
+    while IFS='|' read -r pane_id pane_status _seen_flags; do
         case "$pane_status" in
             "!"|"?"|">")
                 local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
@@ -923,13 +942,20 @@ _cleanup_stale_panes() {
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
-                    _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
-                    tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
-                fi
+                # 终态只认「进程存活」证据：seen=1 时保留（launcher/daemon 场景
+                # 进程树不可见）；活跃态 !/?/> 的判据是归属证据，不使用 seen。
+                case "$_seen_flags" in
+                    *1*) ;;
+                    *)
+                        if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
+                            _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
+                            tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
+                        fi
+                        ;;
+                esac
                 ;;
         esac
-    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}" 2>/dev/null)
+    done < <(tmux list-panes -a -F "#{pane_id}|#{@ai_pane_status}${seen_fmt}" 2>/dev/null)
 
     # 清理孤儿目录：目录存在但对应 pane 已不在 tmux 中
     local all_pane_ids
@@ -1038,4 +1064,48 @@ _maybe_repair_hooks() {
             tmux display-message "⚠ ${TOOL_ID:-claude} hooks 自动修复失败，请运行 tmuxclihook 检查" 2>/dev/null || true
         fi
     fi
+}
+
+# 跨工具自修复：tmux 入口所有 _refresh/_session-switched 固定传 TOOL_ID=claude，
+# codex/opencode 只有自身 SessionStart 能触发修复；hooks 文件被整体覆盖/删除后
+# 再无事件 → 永不自愈。本函数由 _run_refresh 调用，遍历其余 adapter，对
+# 「用户显式装过」（installed-<tool> 标记）的工具做 check → 缺失则 install。
+#
+# 不 source adapter：ADAPTER_* 与 adapter_* 会覆盖当前已加载的 adapter（TOOL_ID
+# 污染），一律子进程 exec wrapper（wrapper 自带 _LIB_DIR 与 adapter 加载）。
+# 未登记的工具只做「既存安装登记」：check 通过才补写标记，绝不自动安装——
+# 尊重 codex/opencode 非人人安装的现状。
+# 成本：每工具每 60s 至多 1 次 check；installed 存在且缺失时再加 1 次 install。
+_maybe_repair_other_tools() {
+    local current="${TOOL_ID:-claude}"
+    local f tool installer marker now last
+    for f in "${_ADAPTER_DIR}"/*.sh; do
+        [ -f "$f" ] || continue
+        tool=$(basename "$f" .sh)
+        [ "$tool" = "$current" ] && continue
+        [ -f "${_SUPPRESS_DIR}/suppressed-${tool}" ] && continue
+        installer="${_LIB_DIR}/install-${tool}-hooks.sh"
+        [ -x "$installer" ] || continue
+        marker="${_STATUS_DIR}/.hooks-repair-${tool}-ts"
+        now=$(date +%s)
+        [ -d "$_STATUS_DIR" ] || mkdir -p "$_STATUS_DIR" 2>/dev/null
+        if [ -f "$marker" ]; then
+            last=$(cat "$marker" 2>/dev/null)
+            [ $((now - ${last:-0})) -lt 60 ] && continue
+        fi
+        echo "$now" > "$marker" 2>/dev/null || true
+        if [ -f "$(_installed_marker_path "$tool")" ]; then
+            "$installer" check >/dev/null 2>&1 && continue
+            _ai_log "REPAIR: ${tool} hooks missing, reinstalling (cross-tool)"
+            if "$installer" >/dev/null 2>&1; then
+                tmux display-message "✓ ${tool} hooks 已自动修复（检测到缺失）" 2>/dev/null || true
+            else
+                tmux display-message "⚠ ${tool} hooks 自动修复失败，请运行 tmuxclihook 检查" 2>/dev/null || true
+            fi
+        elif "$installer" check >/dev/null 2>&1; then
+            # 未登记但健康：登记既存安装（老用户升级迁移），绝不安装
+            _installed_marker_write "$tool" 2>/dev/null || true
+            _ai_log "REPAIR: ${tool} hooks healthy, registered installed marker"
+        fi
+    done
 }
