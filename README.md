@@ -135,6 +135,19 @@ Start (or restart) tmux, then reload:
 prefix + r
 ```
 
+The plugin binds `prefix + r` to `scripts/tmux-ai-reload`, which sources the config
+files tmux actually loaded (`#{config_files}`, falling back to `~/.tmux.conf`) and then
+re-runs the plugin initialization. Your previous `prefix + r` binding is saved to
+`@claude_hooks_saved_bind_r` before being overridden — restore it with:
+
+```
+eval "$(tmux show-option -gv @claude_hooks_saved_bind_r)"
+```
+
+The plugin also uses the global `Escape` key for deny detection. A pre-existing binding
+is saved to `@claude_hooks_saved_bind_escape` (with a one-time warning); restore it the
+same way.
+
 (tmux's default prefix is `Ctrl+b`: press and release the prefix, then press the key. If you remapped your prefix to `Ctrl+a`, use that instead.)
 
 ### 5. Install Claude Code Hooks
@@ -264,4 +277,4 @@ tmux's default prefix is `Ctrl+b` (press and release, then press the key). If yo
 | `prefix + C-p` | Install opencode plugin |
 | `prefix + M-p` | Uninstall opencode plugin |
 | `prefix + I` | Open the interactive TUI installer |
-| `prefix + r` | Reload config |
+| `prefix + r` | Reload config (sources actual config files + re-runs plugin init; your previous binding is saved to `@claude_hooks_saved_bind_r`) |
