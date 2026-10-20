@@ -143,9 +143,6 @@ run_event codex PreToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool
 run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"other","tool_name":"Bash"}'
 assert_status '!' 'Other Codex tools cannot clear request_permissions state'
 run_event codex PostToolUse '{"session_id":"codex-rp","tool_use_id":"rp-1","tool_name":"request_permissions"}'
-echo "DEBUG status=[$(command cat "$FAKE_TMUX_DIR/pane-status" 2>/dev/null)]"
-echo "DEBUG perm=[$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-perm 2>/dev/null)]"
-echo "DEBUG pre=[$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-pre 2>/dev/null)]"
 assert_status '>' 'Matching request_permissions PostToolUse resumes processing'
 
 reset_state
@@ -260,5 +257,40 @@ run_event claude Stop '{}'   # 留下 ✓ 状态（pane-status=%1|✓）
 if _cleanup_stale_panes; then :; fi
 [ "$(wc -l < "$ps_count_file" | tr -d ' ')" = "1" ] \
     || { echo "FAIL: cleanup 应只取一次进程快照" >&2; exit 1; }
+
+# PermissionRequest 锁超时降级：事件锁被占用（owner 活着、锁新鲜）时，
+# PermReq 应无锁写 ! / ?，且不落 pending 文件、不写 pane 映射、不跑清理。
+# 其他事件（PreToolUse）超时丢弃、不写。
+# 注意：降级路径实测耗时 = 锁重试预算 ~2s，用例需容忍该延迟。
+permreq_downgrade() {  # $1=期望状态 $2=工具名
+    reset_state
+    local lock="$TMUX_AI_STATUS_DIR/_1/.event-lock"
+    mkdir -p "$lock"
+    echo "$$" > "$lock/owner"          # 活着的 owner（本测试进程）
+    permreq_downgrade_expected="$1"
+    if [ "$2" = "AskUserQuestion" ]; then
+        run_event claude PermissionRequest '{"session_id":"dg-s","tool_name":"AskUserQuestion"}'
+    else
+        run_event claude PermissionRequest "{\"session_id\":\"dg-s\",\"tool_name\":\"$2\"}"
+    fi
+    assert_status "$permreq_downgrade_expected" "PermReq downgrade writes $1 under lock contention"
+    [ ! -f "$TMUX_AI_STATUS_DIR/_1/pending-perm" ] \
+        || { echo "FAIL: 降级不应写 pending-perm" >&2; exit 1; }
+    [ ! -f "$TMUX_AI_STATUS_DIR/_1/pane-dg-s" ] \
+        || { echo "FAIL: 降级不应写 pane 映射（跳过 _save_pane_id）" >&2; exit 1; }
+    [ ! -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" ] \
+        || { echo "FAIL: 降级不应跑 _maybe_cleanup_stale" >&2; exit 1; }
+}
+permreq_downgrade '!' 'Bash'
+permreq_downgrade '?' 'AskUserQuestion'
+
+# 锁占用下非 PermReq 事件仍静默丢弃（无锁写 > 会覆盖并发审批态）
+reset_state
+mkdir -p "$TMUX_AI_STATUS_DIR/_1/.event-lock"
+echo "$$" > "$TMUX_AI_STATUS_DIR/_1/.event-lock/owner"
+rm -f "$FAKE_TMUX_DIR/pane-status"
+run_event claude PreToolUse '{"session_id":"dg-s","tool_use_id":"x","tool_name":"Bash"}'
+[ ! -f "$FAKE_TMUX_DIR/pane-status" ] \
+    || { echo "FAIL: 锁占用下 PreToolUse 不应写状态" >&2; exit 1; }
 
 printf 'status-machine tests passed\n'

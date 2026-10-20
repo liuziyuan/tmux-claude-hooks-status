@@ -28,8 +28,22 @@ case "$EVENT" in
 esac
 # 同 pane 的并发 hooks 必须完整串行化，否则一个事件可能用过期派生结果覆盖另一个
 # PermissionRequest 已写入的审批态。
+#
+# 锁超时（~2s 重试预算耗尽）时的降级原则——只有最强状态可无锁写：
+#   PermissionRequest 是 sync hook 且携带最高优先级审批态（!/?），丢失 = 状态栏
+#   在用户审批前失明，因此降级为无锁最小写入（_downgrade_permission_request）。
+#   其他事件（Pre/Post/Stop…）超时一律 exit 0 丢弃——无锁写弱状态（如 >）会
+#   覆盖并发 PermReq 已早写的 !，正是 7448847 修掉的竞态，绝不能对它们降级。
+#   降级最有价值的场景是「持锁者已死但未到 10s stale 强夺线」（此时无并发写入者，
+#   降级写存活）；反方向竞态（持锁者稍后的最终写入覆盖降级的 !）可接受——该
+#   场景现状（超时丢弃）同样不显示 !，降级只多一瞬正确闪烁，终态不劣化。
+#   恢复时间线：stale 强夺线(10s) > 重试预算(~2s)，跨过 10s 线后的第一个事件
+#   会强夺锁恢复正常路径。
 if [ -n "$TMUX_PANE" ]; then
-    _acquire_event_lock || exit 0
+    if ! _acquire_event_lock; then
+        [ "$EVENT" = "PermissionRequest" ] && _downgrade_permission_request "$INPUT"
+        exit 0
+    fi
     trap '_release_event_lock' EXIT
 fi
 

@@ -519,6 +519,25 @@ _release_event_lock() {
     rmdir "$(_event_lock_dir)" 2>/dev/null
 }
 
+# 事件锁超时时 PermissionRequest 的无锁降级写入（仅 !/? 这类最强状态可无锁写，
+# 调用点见 tmux-ai-status 锁段落的原则注释）。
+# 最小动作集：一次 jq 取 tool_name → AskUserQuestion ? / 其他 ! → set-option →
+# 日志标记 DOWNGRADE。刻意不碰 pending 文件（不加剧持锁者正在进行的文件竞争）、
+# 不跑 _save_pane_id（锁外写 pane 映射有复活已清映射的风险）、不做 build_all_status
+# （monitor 每秒重建聚合，降级值 ≤1s 内可见）。
+_downgrade_permission_request() {  # $1=原始 stdin JSON
+    local input="$1" tool status
+    tool=$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)
+    if [ "$tool" = "AskUserQuestion" ]; then
+        status="?"
+    else
+        status="!"
+    fi
+    tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$status" 2>/dev/null || true
+    _pane_loc=""
+    _ai_log "PermReq DOWNGRADE: event lock timeout, unlocked write '$status' (tool=${tool:-?})"
+}
+
 # Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
 # sleep 回落策略同 _acquire_event_lock（不支持小数 sleep 时无 sleep 自旋，不回落 sleep 1）。
 _acquire_lock() {
