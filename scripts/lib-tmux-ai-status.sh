@@ -113,26 +113,51 @@ _snapshot_has_pane() {  # $1=pane_id
 }
 
 # 从当前进程沿父链向上匹配 pane_pid；命中即返回该 pane（权威信号）。
+# $1 可选进程快照（_ps_process_snapshot 输出）：调用方（resolve_tmux_pane）
+# 传入以复用同一份快照（ancestry 与进程树候选共用，每事件一次 ps）；空参自取。
+# 一次 awk 同时建 ppid 映射与 pane_pid→pane_id 表，从 $$ 内存爬链——
+# depth<24 / pid>1 语义与旧逐层 `ps -o ppid=` 版一致；快照是瞬时一致视图，
+# 还消除了逐层实时 ps 的爬链中途进程死亡问题。
 _pane_from_ancestry() {
-    local pid=$$ depth=0 found
-    while [ "${pid:-0}" -gt 1 ] && [ "$depth" -lt 24 ]; do
-        found=$(printf '%s\n' "$_PANE_SNAPSHOT" | awk -F'|' -v p="$pid" '$4==p{print $1; exit}')
-        if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-        depth=$((depth + 1))
-    done
-    return 1
+    local snapshot="${1:-}"
+    [ -n "$snapshot" ] || snapshot=$(_ps_process_snapshot)
+    [ -n "$snapshot" ] || return 1
+    # ps 快照与 pane 快照均为变量内容（非文件），各经 process substitution 进 awk：
+    # 第一个文件（NR==FNR）建 ppid 映射，第二个建 pane_pid→pane_id 表，END 爬链。
+    # ⚠️ split 必须用单空格 " "（awk 特殊语义：忽略前导/尾部空白、折叠连续分隔），
+    # 不能用 /[ \t]+/——macOS ps 的 pid 列宽随快照最大 pid 位数浮动，4 位 pid 行
+    # 带前导空格，正则 split 的首字段会是空串（pid 全部错位/丢弃），爬链在低位
+    # pid 处断链——表现为偶发 PANE: unresolved（实测踩坑，2026-10-20）。
+    awk -F'|' -v self="$$" '
+        NR==FNR {
+            split($0, a, " ")
+            if (a[1] != "") ppid[a[1]] = a[2]
+            next
+        }
+        $4 != "" { pane_by_pid[$4] = $1 }
+        END {
+            pid = self
+            depth = 0
+            while (pid + 0 > 1 && depth < 24) {
+                if (pid in pane_by_pid) { print pane_by_pid[pid]; exit 0 }
+                if (!(pid in ppid)) exit 1
+                pid = ppid[pid] + 0
+                depth++
+            }
+            exit 1
+        }' <(printf '%s\n' "$snapshot") <(printf '%s\n' "${_PANE_SNAPSHOT:-}")
 }
 
 # 当前工具在 attached pane 中的候选集合（进程树含 ADAPTER_PROCESS_NAMES）。
+# $1 可选进程快照：透传给 _pid_tree_has_names，避免每个候选 pane 各起一次 ps。
 _pane_process_candidates() {
-    local names="${ADAPTER_PROCESS_NAMES:-}" id path cmd pid server attached title
+    local names="${ADAPTER_PROCESS_NAMES:-}" snapshot="${1:-}" id path cmd pid server attached title
     [ -n "$names" ] || return 1
     [ "$_PANE_SNAPSHOT_OK" = "1" ] || return 1
     while IFS='|' read -r id path cmd pid server attached title; do
         [ -n "$id" ] || continue
         [ "${attached:-0}" -gt 0 ] || continue
-        if _pid_tree_has_names "$pid" "$names"; then printf '%s\n' "$id"; fi
+        if _pid_tree_has_names "$pid" "$names" "$snapshot"; then printf '%s\n' "$id"; fi
     done <<EOF
 $_PANE_SNAPSHOT
 EOF
@@ -214,7 +239,10 @@ resolve_tmux_pane() {
 
     # 1) 祖先链是权威信号（普通启动 / 旧 cc-switch / Claude 的 pane 内 hook）
     _load_pane_snapshot || return 1
-    pane=$(_pane_from_ancestry)
+    # 进程快照取一次，ancestry 爬链与进程树候选共用（每事件 1 次 ps 而非 4-6 次）
+    local ps_snap
+    ps_snap=$(_ps_process_snapshot)
+    pane=$(_pane_from_ancestry "$ps_snap")
     if [ -n "$pane" ]; then
         TMUX_PANE="$pane"
         _TMUX_PANE_SOURCE="ancestry"
@@ -238,7 +266,7 @@ resolve_tmux_pane() {
     fi
 
     # 3) 同工具进程树候选 → adapter 提示 → hook cwd
-    candidates=$(_pane_process_candidates)
+    candidates=$(_pane_process_candidates "$ps_snap")
     if [ -n "$candidates" ]; then
         n=$(printf '%s\n' "$candidates" | grep -c .)
         if [ "$n" -gt 1 ]; then
@@ -456,8 +484,13 @@ _acquire_event_lock() {
     [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
     local lock; lock=$(_event_lock_dir)
+    # 重试预算 ~2s。sleep 0.01 不被支持时退化为无 sleep 自旋（mkdir+stat 系统调用，
+    # ~几百 ms 耗尽预算）——绝不能回落 sleep 1：200×1s 病态忙等，而 sync hook 的
+    # 上游 timeout 是 600s，不会打断它（实测 macOS/Linux sleep 均支持小数，此为
+    # 其他平台兜底）。时间基准用 $SECONDS（builtin，零 fork；date +%s 每迭代一次 fork）。
+    local _start=$SECONDS
     local i
-    for i in $(seq 1 200); do
+    for i in {1..200}; do
         if mkdir "$lock" 2>/dev/null; then
             echo "$$" > "$lock/owner"
             return 0
@@ -470,11 +503,11 @@ _acquire_event_lock() {
             continue
         fi
         mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
-        if [ -n "$mtime" ] && [ $(( $(date +%s) - mtime )) -ge 10 ]; then
+        if [ -n "$mtime" ] && [ $(( _start + SECONDS - mtime )) -ge 10 ]; then
             rm -f "$lock/owner" 2>/dev/null
             rmdir "$lock" 2>/dev/null
         fi
-        sleep 0.01 2>/dev/null || sleep 1
+        sleep 0.01 2>/dev/null || :
     done
     _ai_log "EVENT_LOCK: acquire timeout on $lock"
     return 1
@@ -486,13 +519,34 @@ _release_event_lock() {
     rmdir "$(_event_lock_dir)" 2>/dev/null
 }
 
+# 事件锁超时时 PermissionRequest 的无锁降级写入（仅 !/? 这类最强状态可无锁写，
+# 调用点见 tmux-ai-status 锁段落的原则注释）。
+# 最小动作集：一次 jq 取 tool_name → AskUserQuestion ? / 其他 ! → set-option →
+# 日志标记 DOWNGRADE。刻意不碰 pending 文件（不加剧持锁者正在进行的文件竞争）、
+# 不跑 _save_pane_id（锁外写 pane 映射有复活已清映射的风险）、不做 build_all_status
+# （monitor 每秒重建聚合，降级值 ≤1s 内可见）。
+_downgrade_permission_request() {  # $1=原始 stdin JSON
+    local input="$1" tool status
+    tool=$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)
+    if [ "$tool" = "AskUserQuestion" ]; then
+        status="?"
+    else
+        status="!"
+    fi
+    tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$status" 2>/dev/null || true
+    _pane_loc=""
+    _ai_log "PermReq DOWNGRADE: event lock timeout, unlocked write '$status' (tool=${tool:-?})"
+}
+
 # Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
+# sleep 回落策略同 _acquire_event_lock（不支持小数 sleep 时无 sleep 自旋，不回落 sleep 1）。
 _acquire_lock() {
     [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
     local lock; lock=$(_lock_dir)
+    local _start=$SECONDS
     local i
-    for i in $(seq 1 20); do
+    for i in {1..20}; do
         if mkdir "$lock" 2>/dev/null; then
             return 0
         fi
@@ -500,13 +554,13 @@ _acquire_lock() {
         local mtime
         mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)
         if [ -n "$mtime" ]; then
-            local age=$(( $(date +%s) - mtime ))
+            local age=$(( _start + SECONDS - mtime ))
             if [ "$age" -ge 5 ]; then
                 rmdir "$lock" 2>/dev/null
                 mkdir "$lock" 2>/dev/null && return 0
             fi
         fi
-        sleep 0.01 2>/dev/null || sleep 1
+        sleep 0.01 2>/dev/null || :
     done
     _ai_log "LOCK: acquire timeout on $lock"
     return 1
@@ -790,13 +844,15 @@ _pane_has_tool_process() {  # $1=pane_id $2=工具名 [$3=进程快照]
 }
 
 # 所有 adapter 汇总的 AI 进程名
-_pane_has_ai_process() {  # $1=pane_id
-    _pane_has_process_names "$1" "$(_collect_ai_process_names)"
+# $2 可选进程快照：调用方批量场景（_cleanup_stale_panes）传入以共用一次 ps
+_pane_has_ai_process() {  # $1=pane_id [$2=进程快照]
+    _pane_has_process_names "$1" "$(_collect_ai_process_names)" "${2:-}"
 }
 
 # 检查 pane 的所有 pane-id 文件是否过期（> 5 min），再验证进程树
+# $2 可选进程快照（批量调用方传入，避免逐 pane 一次 ps）
 _is_pane_session_dead() {
-    local pane_id="$1"
+    local pane_id="$1" snapshot="${2:-}"
     local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
     local pane_dir="${_STATUS_DIR}/${sanitized}"
     [ -d "$pane_dir" ] || return 0
@@ -809,7 +865,7 @@ _is_pane_session_dead() {
         local age=$(( $(date +%s) - mtime ))
         [ "$age" -lt 300 ] && return 1
     done
-    ! _pane_has_ai_process "$pane_id"
+    ! _pane_has_ai_process "$pane_id" "$snapshot"
 }
 
 # --- 孤儿状态清理（_refresh 用）---
@@ -825,6 +881,11 @@ _cleanup_stale_panes() {
         [ -n "$pane_id" ] && active_panes="$active_panes $pane_id"
     done
 
+    # 进程快照取一次循环共用：✓/- 分支与死会话判定逐 pane 调 _pane_has_ai_process
+    # 时，旧实现每个 pane 各起一次 ps（pane 多时放大明显）
+    local ps_snap
+    ps_snap=$(_ps_process_snapshot)
+
     while IFS='|' read -r pane_id pane_status; do
         case "$pane_status" in
             "!"|"?"|">")
@@ -834,14 +895,14 @@ _cleanup_stale_panes() {
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
-                elif _is_pane_session_dead "$pane_id"; then
+                elif _is_pane_session_dead "$pane_id" "$ps_snap"; then
                     _ai_log "STALE: clearing dead session '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null
                 fi
                 ;;
             "✓"|"-")
-                if ! _pane_has_ai_process "$pane_id"; then
+                if ! _pane_has_ai_process "$pane_id" "$ps_snap"; then
                     _ai_log "STALE: clearing terminal state '$pane_status' on $pane_id (no ai process)"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                 fi

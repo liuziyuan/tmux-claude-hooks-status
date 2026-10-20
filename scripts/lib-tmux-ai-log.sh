@@ -69,9 +69,12 @@ _ai_log_event() {
     [ "${fsize:-0}" -gt "$AI_LOG_MAX_SIZE" ] && _ai_log_rotate
 }
 
-# input 超长截断：>2000B 保留前 2000B 加 "…+Nbytes"
+# input 超长截断：默认 >2000B 保留前 2000B 加 "…+Nbytes"；$2 可传自定义上限。
+# PermissionRequest 的 full 日志路径传 16384（保留调试价值同时限制体积）。
+# 注意：即便 16384 也远超 PIPE_BUF（macOS 512 / Linux 4096），并发 hook 的
+# 大 input 日志行可能交错撕裂——接受（日志观测用途，非结构化数据）。
 _ai_log_truncate_input() {
-    local s="$1" max=2000
+    local s="$1" max="${2:-2000}"
     local n=${#s}
     if [ "$n" -gt "$max" ]; then
         printf '%s…+%dbytes' "${s:0:$max}" "$((n - max))"

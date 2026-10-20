@@ -28,8 +28,22 @@ case "$EVENT" in
 esac
 # 同 pane 的并发 hooks 必须完整串行化，否则一个事件可能用过期派生结果覆盖另一个
 # PermissionRequest 已写入的审批态。
+#
+# 锁超时（~2s 重试预算耗尽）时的降级原则——只有最强状态可无锁写：
+#   PermissionRequest 是 sync hook 且携带最高优先级审批态（!/?），丢失 = 状态栏
+#   在用户审批前失明，因此降级为无锁最小写入（_downgrade_permission_request）。
+#   其他事件（Pre/Post/Stop…）超时一律 exit 0 丢弃——无锁写弱状态（如 >）会
+#   覆盖并发 PermReq 已早写的 !，正是 7448847 修掉的竞态，绝不能对它们降级。
+#   降级最有价值的场景是「持锁者已死但未到 10s stale 强夺线」（此时无并发写入者，
+#   降级写存活）；反方向竞态（持锁者稍后的最终写入覆盖降级的 !）可接受——该
+#   场景现状（超时丢弃）同样不显示 !，降级只多一瞬正确闪烁，终态不劣化。
+#   恢复时间线：stale 强夺线(10s) > 重试预算(~2s)，跨过 10s 线后的第一个事件
+#   会强夺锁恢复正常路径。
 if [ -n "$TMUX_PANE" ]; then
-    _acquire_event_lock || exit 0
+    if ! _acquire_event_lock; then
+        [ "$EVENT" = "PermissionRequest" ] && _downgrade_permission_request "$INPUT"
+        exit 0
+    fi
     trap '_release_event_lock' EXIT
 fi
 
@@ -67,7 +81,10 @@ _current_pane_status() {
 # 重建聚合状态（_refresh / _entered 共用）
 _run_refresh() {
     _maybe_repair_hooks
-    _cleanup_stale_panes
+    # 节流版清理（60s）：tmux 生命周期 hook（pane-focus-in 等）高频触发，
+    # 全价 _cleanup_stale_panes 实测 ~455ms；卡死状态清理有 :37 的事件路径
+    # 节流兜底，此处无需每次全价。Stop/SessionEnd fallback 仍走全价精准清理。
+    _maybe_cleanup_stale
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true
 }
@@ -103,10 +120,12 @@ case "$EVENT" in
     esac
     ;;
   PermissionRequest)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.' 2>/dev/null)
-    _log_full_input=1
+    # 一次 @tsv 提取 tool_name/tool_use_id（digest 单独一次；stdin 只能读一次，
+    # 故从已缓存的 $INPUT 提取）。digest 只取 tool_name/tool_input——全量重序列化
+    # 会把 transcript_path 等无关字段落日志，且大 tool_input 全量展开拖慢 sync 路径。
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
+    INPUT_DIGEST=$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null)
     if [ "$TOOL" = "AskUserQuestion" ]; then
         STATUS="?"
     else
@@ -135,9 +154,9 @@ case "$EVENT" in
     fi
     ;;
   PreToolUse)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
-    INPUT_DIGEST=$(echo "$INPUT" | jq -c '.tool_input // null' 2>/dev/null)
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
+    INPUT_DIGEST=$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null)
     _add_pending_pre "$TOOL_USE_ID" "$TOOL"
     _permission_pre_tool=0
     for _permission_tool in ${ADAPTER_PERMISSION_PRE_TOOL_NAMES:-}; do
@@ -163,8 +182,8 @@ case "$EVENT" in
     fi
     ;;
   PostToolUse|PostToolUseFailure)
-    TOOL=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
-    TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // ""' 2>/dev/null)
+    _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
+    IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
     _remove_pending_id "$TOOL_USE_ID"
     # 只解除当前工具对应项；其他权限请求仍 pending 时必须保持 !/?。
     if _derive_status_from_pending; then
@@ -260,11 +279,6 @@ case "$EVENT" in
     ;;
 esac
 
-# pane 解析失败时不写全局状态（避免把无归属事件当成有效状态）
-if [ -n "$TMUX_PANE" ]; then
-    tmux set-option -g @ai_status "$STATUS" 2>/dev/null || true
-fi
-
 # 构造事件块详情行：
 #   tool:  <tool_name>  id=<short tool_use_id>
 #   input: <精简 JSON，超 2000B 截断>
@@ -274,8 +288,10 @@ if [ -n "$TOOL" ] || [ -n "$TOOL_USE_ID" ]; then
 fi
 _log_input_line=""
 if [ -n "$INPUT_DIGEST" ] && [ "$INPUT_DIGEST" != "null" ]; then
-    if [ "${_log_full_input:-0}" = "1" ]; then
-        _log_input_line="input: $INPUT_DIGEST"
+    # PermissionRequest 曾走完全不截断的 full 路径（9248967），实测大 tool_input
+    # （ExitPlanMode 的 plan、AUQ 的 questions）可达数 KB～数十 KB，改为 16KB 宽松上限。
+    if [ "$EVENT" = "PermissionRequest" ]; then
+        _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST" 16384)"
     else
         _log_input_line="input: $(_ai_log_truncate_input "$INPUT_DIGEST")"
     fi

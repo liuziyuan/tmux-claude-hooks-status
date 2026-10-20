@@ -41,6 +41,11 @@ tmux() {
                     printf '%%1|%s|%s|%s|%s|1|%s\n' \
                         "$FAKE_PANE_PATH" "$cmd" "$FAKE_PANE_PID" "$FAKE_SERVER_PID" "${FAKE_PANE_TITLE:-}"
                     ;;
+                # 孤儿清理查询（fmt 恰以 |#{@ai_pane_status} 结尾）：哨兵 + 两字段行
+                *'|#{@ai_pane_status}')
+                    : > "$FAKE_TMUX_DIR/full-cleanup-called"
+                    printf '%%1|%s\n' "$status"
+                    ;;
                 # 聚合：pane|sess|win|idx|status|attached|created|entered|cur_cmd|prov|prov_id|seen...
                 *'@ai_pane_status'*)
                     printf '%%1|test|1|1|%s|1|1|1|%s|||%s|%s|%s\n' \
@@ -78,6 +83,10 @@ assert_status() {
     [ -f "$FAKE_TMUX_DIR/pane-status" ] && actual=$(command cat "$FAKE_TMUX_DIR/pane-status")
     if [ "$actual" != "$expected" ]; then
         printf 'FAIL: %s: expected status %s, got %s\n' "$context" "$expected" "${actual:-<empty>}" >&2
+        printf '  pending-perm: [%s]\n' "$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-perm 2>/dev/null)" >&2
+        printf '  pending-pre:  [%s]\n' "$(command cat "$TMUX_AI_STATUS_DIR"/_1/pending-pre 2>/dev/null)" >&2
+        printf '  status dir:   [%s]\n' "$(ls "$TMUX_AI_STATUS_DIR"/_1/ 2>/dev/null | tr '\n' ' ')" >&2
+        printf '  log tail:     [%s]\n' "$(tail -3 /tmp/tmux-ai-status.log 2>/dev/null | tr '\n' '|')" >&2
         exit 1
     fi
 }
@@ -218,5 +227,70 @@ rm -f "$FAKE_TMUX_DIR/snapshot-called"
 run_event claude _refresh '{}'
 [ ! -f "$FAKE_TMUX_DIR/snapshot-called" ] \
     || { echo "FAIL: _refresh 不应解析 pane" >&2; exit 1; }
+
+# _run_refresh 的清理走 60s 节流版（_maybe_cleanup_stale）：
+# marker 新鲜时 _refresh 跳过全价清理（哨兵文件由 tmux stub 的清理分支触发）
+reset_state
+echo "$(( $(date +%s) + 3600 ))" > "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+rm -f "$FAKE_TMUX_DIR/full-cleanup-called"
+run_event claude _refresh '{}'
+[ ! -f "$FAKE_TMUX_DIR/full-cleanup-called" ] \
+    || { echo "FAIL: marker 新鲜时 _refresh 应跳过全价清理" >&2; exit 1; }
+# 无 marker → 全价清理执行一次
+reset_state
+rm -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts"
+run_event claude _refresh '{}'
+[ -f "$FAKE_TMUX_DIR/full-cleanup-called" ] \
+    || { echo "FAIL: 无 marker 时 _refresh 应跑全价清理" >&2; exit 1; }
+
+# _cleanup_stale_panes 批量快照：多个 pane 需要进程判定时 ps 只取一次。
+# run_event 是子进程、stub 传不进去，改为进程内 source lib 直接调用。
+reset_state
+TOOL_ID="claude"
+source "$ROOT/scripts/lib-tmux-ai-status.sh"
+ps_count_file="$TEST_TMP/ps-count"
+: > "$ps_count_file"
+_ps_process_snapshot() { echo x >> "$ps_count_file"; printf '%s\n' "$$ 1 zsh"; }
+run_event claude Stop '{}'   # 留下 ✓ 状态（pane-status=%1|✓）
+# if 条件上下文豁免 set -e：_ai_log 末行 `[ size -gt MAX ] && rotate` 在
+# 日志未超限时短路返回 1，会让进程内直接调用炸掉 set -e
+if _cleanup_stale_panes; then :; fi
+[ "$(wc -l < "$ps_count_file" | tr -d ' ')" = "1" ] \
+    || { echo "FAIL: cleanup 应只取一次进程快照" >&2; exit 1; }
+
+# PermissionRequest 锁超时降级：事件锁被占用（owner 活着、锁新鲜）时，
+# PermReq 应无锁写 ! / ?，且不落 pending 文件、不写 pane 映射、不跑清理。
+# 其他事件（PreToolUse）超时丢弃、不写。
+# 注意：降级路径实测耗时 = 锁重试预算 ~2s，用例需容忍该延迟。
+permreq_downgrade() {  # $1=期望状态 $2=工具名
+    reset_state
+    local lock="$TMUX_AI_STATUS_DIR/_1/.event-lock"
+    mkdir -p "$lock"
+    echo "$$" > "$lock/owner"          # 活着的 owner（本测试进程）
+    permreq_downgrade_expected="$1"
+    if [ "$2" = "AskUserQuestion" ]; then
+        run_event claude PermissionRequest '{"session_id":"dg-s","tool_name":"AskUserQuestion"}'
+    else
+        run_event claude PermissionRequest "{\"session_id\":\"dg-s\",\"tool_name\":\"$2\"}"
+    fi
+    assert_status "$permreq_downgrade_expected" "PermReq downgrade writes $1 under lock contention"
+    [ ! -f "$TMUX_AI_STATUS_DIR/_1/pending-perm" ] \
+        || { echo "FAIL: 降级不应写 pending-perm" >&2; exit 1; }
+    [ ! -f "$TMUX_AI_STATUS_DIR/_1/pane-dg-s" ] \
+        || { echo "FAIL: 降级不应写 pane 映射（跳过 _save_pane_id）" >&2; exit 1; }
+    [ ! -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" ] \
+        || { echo "FAIL: 降级不应跑 _maybe_cleanup_stale" >&2; exit 1; }
+}
+permreq_downgrade '!' 'Bash'
+permreq_downgrade '?' 'AskUserQuestion'
+
+# 锁占用下非 PermReq 事件仍静默丢弃（无锁写 > 会覆盖并发审批态）
+reset_state
+mkdir -p "$TMUX_AI_STATUS_DIR/_1/.event-lock"
+echo "$$" > "$TMUX_AI_STATUS_DIR/_1/.event-lock/owner"
+rm -f "$FAKE_TMUX_DIR/pane-status"
+run_event claude PreToolUse '{"session_id":"dg-s","tool_use_id":"x","tool_name":"Bash"}'
+[ ! -f "$FAKE_TMUX_DIR/pane-status" ] \
+    || { echo "FAIL: 锁占用下 PreToolUse 不应写状态" >&2; exit 1; }
 
 printf 'status-machine tests passed\n'
