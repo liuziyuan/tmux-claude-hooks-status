@@ -666,6 +666,23 @@ _clear_pending() {
     _release_lock
 }
 
+# pending 集合中是否有 N 秒内的条目（每行 "id tool ts"）。用于区分「工具确实在
+# 跑」与「泄漏/中断残留的旧条目」——并发 hook 抢锁超时会让 _remove_pending_id
+# 静默放弃，集合可能长期残留陈旧 id（实测存在），不能只按非空判定活跃。
+_pending_recent() {  # $1=秒数 → 0=有新鲜条目
+    local max="${1:-10}" now f
+    now=$(date +%s)
+    for f in "$(_pending_pre_path)" "$(_pending_perm_path)"; do
+        [ -s "$f" ] || continue
+        if awk -v now="$now" -v max="$max" '
+            $3 ~ /^[0-9]+$/ && now - $3 <= max { found = 1; exit }
+            END { exit !found }' "$f" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # 根据当前 pending-perm / pending-pre 派生 STATUS。结果写入全局 DERIVED
 # return 0 = 派生出非空 STATUS, return 1 = 都空（事件需自行决定）
 _derive_status_from_pending() {

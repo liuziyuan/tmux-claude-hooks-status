@@ -350,7 +350,7 @@ bash tests/bindings.test.sh
   - **语义不变跳写**：merge 输出与现值两边 `jq -S` 规范化对比，相同则不写（不触碰 mtime，避免 file watcher 无谓重载）
   - **auto 幂等（`adapter_check_converged`）**：integrity + 全部条目指向当前源（无漂移/死条目）+ 每事件条目 ≤1（无重复）→ tmux reload 不再全量重写真源；强收敛保留（任一异常仍重装收敛）。已知 trade-off：结构漂移（async/matcher 被外部改）auto 跳过，显式 install 仍强收敛。参照系仅限 wrapper 上下文（事件路径 `pwd` 逻辑路径 vs wrapper `pwd -P` 物理路径）
   - **suppress 标记双向告警**：write/clear 失败不再吞错（clear 失败会让残留标记把 auto 永久挡住）
-- **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）。**reload 自愈（2026-10-20）**：绑定指向 `scripts/tmux-ai-reload`（按 `#{config_files}` 候选列表逐个 `[ -f ]` 过滤后 source，再重跑入口），且**每次加载都重绑**（旧一次性哨兵会让 source 配置内的用户 `bind r` 重置绑定后不再重装，纯 TPM 模式第二次重载起初始化静默停止）。原 `prefix+r` / 全局 `Escape` 绑定在覆盖前保存到 `@claude_hooks_saved_bind_r` / `@claude_hooks_saved_bind_escape`（供手动恢复；Escape 冲突一次性告警 `@claude_hooks_esc_warned`）
+- **幂等初始化**：`prefix+r` 重载无副作用（检测已占行、hook 已存在则跳过）。**reload 自愈（2026-10-20）**：绑定指向 `scripts/tmux-ai-reload`（按 `#{config_files}` 候选列表逐个 `[ -f ]` 过滤后 source，再重跑入口；**多文件重载需 tmux ≥3.2**——3.1 无 `config_files`，回落 `~/.tmux.conf`），且**每次加载都重绑**（旧一次性哨兵会让 source 配置内的用户 `bind r` 重置绑定后不再重装，纯 TPM 模式第二次重载起初始化静默停止）。原 `prefix+r` / 全局 `Escape` 绑定在覆盖前保存到 `@claude_hooks_saved_bind_r` / `@claude_hooks_saved_bind_escape`（供手动恢复；Escape 冲突一次性告警 `@claude_hooks_esc_warned`）。**Escape 检测必须用 `list-keys -T root Escape`**——`list-keys -n` 不是合法旗标（3.8 实测 `unknown flag -n`，会被 `2>/dev/null` 吞掉导致保存/告警永不发生）
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机

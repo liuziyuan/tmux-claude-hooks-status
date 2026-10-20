@@ -128,7 +128,7 @@ fi
 # 全局 root 表绑定会覆盖用户既有 Escape 绑定——覆盖前保存 + 一次性告警
 # （无法安全链式调用任意已有绑定，恢复需手动）：
 #   tmux show-option -gv @claude_hooks_saved_bind_escape
-_prev_esc=$(tmux list-keys -n Escape 2>/dev/null || true)
+_prev_esc=$(tmux list-keys -T root Escape 2>/dev/null || true)
 case "$_prev_esc" in
     ""|*tmux-ai-esc*) ;;
     *)

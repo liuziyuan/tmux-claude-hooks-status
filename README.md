@@ -136,9 +136,10 @@ prefix + r
 ```
 
 The plugin binds `prefix + r` to `scripts/tmux-ai-reload`, which sources the config
-files tmux actually loaded (`#{config_files}`, falling back to `~/.tmux.conf`) and then
-re-runs the plugin initialization. Your previous `prefix + r` binding is saved to
-`@claude_hooks_saved_bind_r` before being overridden — restore it with:
+files tmux actually loaded (`#{config_files}` — requires tmux ≥ 3.2; on tmux 3.1 it
+falls back to `~/.tmux.conf`) and then re-runs the plugin initialization. Your previous
+`prefix + r` binding is saved to `@claude_hooks_saved_bind_r` before being overridden —
+restore it with:
 
 ```
 eval "$(tmux show-option -gv @claude_hooks_saved_bind_r)"

@@ -69,6 +69,9 @@ tmux() {
                         "$_sess" "$status" "$_cmd" "$_prov" "$_provid" \
                         "${FAKE_SEEN_CLAUDE:-}" "${FAKE_SEEN_CODEX:-}" "${FAKE_SEEN_OPENCODE:-}"
                     ;;
+                # 孤儿目录清理的 pane 列表查询（format 恰为 #{pane_id}）：必须精确匹配，
+                # 否则落到 default 返回聚合行 → 所有 pane 目录被误判孤儿删除
+                '#{pane_id}') printf '%%1\n' ;;
                 # pane 前台命令 / 进程树查找
                 *'#{pane_current_command}'*) printf '%%1|%s\n' "$cmd" ;;
                 *'#{pane_pid}'*)
@@ -190,6 +193,23 @@ reset_state
 printf '!' > "$FAKE_TMUX_DIR/pane-status"
 run_event claude Notification '{"session_id":"ntf","notification_type":"permission_prompt","message":"Permission denied by user"}'
 assert_status '-' 'Explicit denial message resets to idle'
+
+# 4) 审批等待期间 pending-pre 非空（PreToolUse 先于 PermissionRequest）：
+#    idle_prompt 不得把 live '!' 降级为 '>'（derive-first 会犯此错）
+reset_state
+printf '!' > "$FAKE_TMUX_DIR/pane-status"
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf 'call_perm Bash %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '!' 'Idle prompt must not downgrade live permission state via pending-pre'
+
+# 5) 陈旧 pending（泄漏）不应把 idle 抬成 '>'：条目时间戳超出新鲜窗口
+reset_state
+rm -f "$FAKE_TMUX_DIR/pane-status"
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf 'call_stale Bash %s\n' "$(( $(date +%s) - 3600 ))" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+run_event claude Notification '{"session_id":"ntf","notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+assert_status '-' 'Stale pending entry must not keep busy state on idle prompt'
 
 reset_state
 
