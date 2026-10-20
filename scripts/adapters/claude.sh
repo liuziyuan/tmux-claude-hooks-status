@@ -255,6 +255,51 @@ adapter_check_integrity() {
     return 0
 }
 
+# 已收敛判定（仅供 wrapper 的 auto 分支使用——⚠️ 不得被事件路径复用）。
+# 四条件全过 = auto 可安全跳过重装：integrity 过 + 全部条目指向当前源（无漂移/
+# 死条目）+ 每事件本插件条目 ≤1（无重复）。
+# 参照系：wrapper 的 _LIB_DIR 是 pwd -P 物理路径；写入（install/auto/修复全部经
+# wrapper）与比较同参照系自洽。事件路径的 _LIB_DIR 是 pwd 逻辑路径（软链场景
+# 两者不等），事件路径复用会误判漂移。
+# 取源逻辑与 adapter_check_integrity 的三模式 case 保持同步（不抽共享以控制
+# integrity 的回归面）。
+adapter_check_converged() {
+    adapter_check_integrity || return 1
+    local mode src="" tmp="" stats
+    mode=$(_ccswitch_mode)
+    case "$mode" in
+        live)
+            src=$(_ccswitch_live_file)
+            [ -f "$src" ] || return 1
+            ;;
+        legacy)
+            _ccswitch_dump_common tmp || return 1
+            src="$tmp"
+            ;;
+        *)
+            [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
+            src="$ADAPTER_HOOKS_FILE"
+            ;;
+    esac
+    # 一次 jq 同时产出漂移计数（≠ 当前源，含死路径）与重复计数（每事件条目 >1）
+    stats=$(jq -r --arg cur "${_LIB_DIR}/tmux-ai-status" '
+        .hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
+        [$events[] as $e |
+            [$h[$e][]?.hooks[]?.command // empty
+             | select(contains("tmux-ai-status")) | split(" ")[0]] as $scripts |
+            select(($scripts | length) > 0) |
+            {bad: ([$scripts[] | select(. != $cur)] | length),
+             n: ($scripts | length)}]
+        | "bad=\([.[].bad] | add // 0) dup=\([.[].n | select(. > 1)] | length)"' "$src" 2>/dev/null)
+    [ -z "$tmp" ] || rm -f "$tmp"
+    case "$stats" in
+        "bad=0 dup=0") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 明细检查（仅 install wrapper 的 check --json 调用；事件热路径不触达）。
 # stdout 输出单行紧凑 JSON 片段 {"mode":...,"events":{...},"plugin":null,"registeredPaths":[...]}，
 # 由 lib-install-hooks.sh 的 _wrapper_check_json 拼装 tool/status/suppress/drift。

@@ -52,6 +52,14 @@ case "${1:-install}" in
         if [ -f "$(_hooks_suppress_file claude)" ]; then
             exit 0
         fi
+        # 已收敛（integrity + 无漂移/死条目/重复）→ 跳过重装：tmux 每次 reload
+        # 不再全量重写真源。强收敛保留——漂移/死条目/缺失/重复任一存在都走
+        # install 收敛。结构漂移（async/matcher 被外部改）不在判定内，auto 跳过
+        # 不修复，显式 install 仍强收敛。
+        if adapter_check_converged; then
+            echo "claude hooks already converged (skip install)"
+            exit 0
+        fi
         adapter_install_hooks
         _hooks_suppress_clear claude || true
         ;;
