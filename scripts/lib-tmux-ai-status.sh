@@ -959,13 +959,17 @@ _cleanup_stale_panes() {
 # （tr -c 'A-Za-z0-9._-' '_'），无法从 key 反推 client → 反向枚举存活集比对。
 # 实测关注：长期运行的 server 会累积已 detach 的 client 键（8 option / 4 存活）。
 _prune_prev_sess_options() {
-    local alive=" " name key opt
+    local alive=" " name key opt clients opts
+    # 两次 tmux 查询都必须成功才剪枝：tmux 抖动（server 重启/连接失败）时
+    # list-clients 返回空会被误判为「无存活 client」→ 把全部键删光。
+    clients=$(tmux list-clients -F '#{client_name}' 2>/dev/null) || return 0
+    opts=$(tmux show-options -g 2>/dev/null) || return 0
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         key=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
         alive="$alive$key "
-    done < <(tmux list-clients -F '#{client_name}' 2>/dev/null)
-    for opt in $(tmux show-options -g 2>/dev/null | awk '/^@ai_prev_sess_/{print $1}'); do
+    done <<< "$clients"
+    for opt in $(printf '%s\n' "$opts" | awk '/^@ai_prev_sess_/{print $1}'); do
         key="${opt#@ai_prev_sess_}"
         case "$alive" in
             *" $key "*) ;;
