@@ -163,8 +163,13 @@ per-pane 持久化两个集合（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/
 ### Claude Code 特有
 
 - **Hooks 完整性校验**：SessionStart 时 `_check_hooks_integrity()` 检测 10 个事件是否都注册了本插件的 hook，缺失则自动修复
+- **SessionStart `source` 五值**（官方，2026-10 核实）：`startup`（新会话）/ `resume`（--resume 等）/ `clear`（/clear）/ `compact`（压缩后）/ `fork`（--fork-session 等）——每次 resume/clear/fork 都会重新触发 SessionStart（含其 integrity 校验路径）
+- **Stop 触发语义**：Claude 完成响应即触发（"not only at task completion"）；**用户 interrupt 不触发**
 - **Hooks 合并式安装**：`install-claude-hooks.sh` 仅清理 stale tmux-ai-status 条目并追加本插件命令，保留其他工具（masko-desktop 等）注册的 hook
 - **Notification 事件细分**：idle_prompt / waiting for input → `-`；denied/cancelled → `-`
+  - `idle_prompt`：Claude 完成响应约 60 秒且用户未输入时触发；`permission_prompt`：权限提示**已等待约 6 秒**后才触发（官方 "the prompt has waited about six seconds"，每次按键会推迟计时器）——它到达时 `!` 已经由 sync PermissionRequest 写好，handler 走 PREV 保持分支（安全）
+  - 官方明确指引："To run a hook immediately when Claude asks for permission to use a tool, use PermissionRequest instead."——佐证 PermissionRequest 必须保持 sync 的设计
+  - `denied/cancelled` 文案匹配是防御性死分支：2026-10 实测（claude 2.1.304）Notification 只有 `idle_prompt`/`permission_prompt` 两类，匹配从未命中（与「点 No 完全静默」记载一致），保留作上游行为变化的哨兵
 - **竞态最终保护**：PreToolUse/PostToolUse/PermissionResolved 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
@@ -194,16 +199,16 @@ cc-switch 为每个 codex provider 创建独立 `CODEX_HOME`（`~/.cc-switch/ins
 
 codex 0.163 managed app-server daemon 常驻（ppid=1），hooks 在 daemon 中执行，继承的 `TMUX_PANE` 不可信（可能是当前 server 中无关的 pane）。插件用「同工具进程树候选 → thread title → cwd」收敛，只有唯一候选才采用；同名 thread 且 cwd 相同的多个 pane 会故意保持 idle `-`，不猜。根治需上游：codex 在 hook 事件中携带 pane/客户端上下文，或 cc-switch 为每个 pane 启动独立 daemon。**升级 monitor 无需手动重载**（内容指纹自检 + exec），但 hook 脚本本身仍随 npm 包路径生效。
 
-**PermissionRequest hook JSON 不携带 `tool_use_id`**（截至 2026-05）。
-当前实现 `_add_pending_perm` 因 id 为空直接 return，**`pending-perm` 文件实际从未写入数据**。
+**Claude 的 PermissionRequest hook JSON 不携带 `tool_use_id`**（官方设计，非遗漏）。
+官方文档原文："PermissionRequest hooks receive `tool_name` and `tool_input` fields like PreToolUse hooks, **but without `tool_use_id`**"——且无任何「计划添加」说明，**等上游补 ID 的路线不存在**。2026-10 实测（claude 2.1.304）仍无 `tool_use_id`，但携带 `prompt_id`（turn 级 UUID）。
+
+因此（仅 claude；codex/opencode 见下段，它们的 pending-perm 会真实写入）`_add_pending_perm` 因 id 为空直接 return，**claude 的 `pending-perm` 文件实际从未写入数据**。
 状态机仍能正确显示 `!`/`?` 是因为：
 1. PermissionRequest 早写 tmux option 立刻生效
-2. Claude Code 当前 serial 执行工具调用，单次循环内不存在 PermReq 之间的真并发
+2. 权限对话框流程仍逐个串行，单次循环内不存在 PermReq 之间的真并发
 3. PostToolUse 配对清空 pending-pre → 派生 `>` 覆盖早写的 `!`
 
-**Claude Code 未来若改为 parallel 工具调用**，pending-perm 守门机制仍会因缺少 ID 失效。
-届时需重新设计：等 Claude Code 在 PermReq input 中补 `tool_use_id` 字段（最可能），或用 `tool_name + tool_input` 哈希作 surrogate id。
-**触发条件**：日志中观察到 `[PermissionRequest] '>' → '!'` 与 `[PostToolUse] '!' → '>'` 之间夹有其他工具的 `[PreToolUse]` 事件即说明并发已开始。
+**Parallel tool calls 已是现实**（官方："PostToolUse fires once per tool, which means it fires concurrently when Claude makes parallel tool calls"；2026-10-20 日志实证：PostToolUse 的 hook 先于同 id 的 PreToolUse 被记录——async hook 到达顺序无保证）。**当前未爆发的真实原因**：权限对话框流程本身仍逐个串行 + PreToolUse 的 LIVE_STATUS 兜底有效。触发条件部分满足（hook 交错已观察到；PermReq 之间真并发未观察到）。届时重新设计的锚点候选：`prompt_id`（turn 级，已在 input 中）、PostToolBatch 事件的 `tool_calls` 数组（批级权威清单，每项含 `tool_use_id`）、或 `tool_name + tool_input` 哈希作 surrogate id。
 
 Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `PostToolUse` 提供且
 可配对。核心会把无 ID 的权限请求绑定到最近的同工具 pending PreToolUse ID，批准后的
@@ -218,14 +223,14 @@ Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `Post
 用户在 Claude Code TUI 中选择 No 拒绝权限时，Claude Code 完全静默：
 - 不发 Notification（无 `denied`/`rejected` 消息）
 - 不发 PostToolUseFailure
-- 不发 Stop
+- 不发 Stop（官方文档确认 Stop "Does not run if the stoppage occurred due to a user interrupt"——用户 interrupt/Esc 中断同样无 Stop 兜底，佐证 tmux 端 Esc 检测路径的必要性）
 - 后续 batch 中尚未发起的工具也不再发 PreToolUse
 
 本插件因此无任何 signal 可监听，状态保持 `!` 直到下次 `UserPromptSubmit`（用户输入新提示）。
 
 ESC 拒绝能转 `-` 是因为 tmux 端 `bind-key -n Escape` 拦截了键流；No 是 TUI 选项选择，不经过 tmux 键事件，无法捕获。
 
-**已知此行为，不实现自动恢复**。`!` 语义仍准确（等待人类下一步动作），下次输入自然清。若 Claude Code 未来为 No 操作补 hook 事件（如 PostToolUseFailure），届时再启用 Notification/PTUF handler 兜底。
+**已知此行为，不实现自动恢复**。`!` 语义仍准确（等待人类下一步动作），下次输入自然清。上游补充事实（2026-10）：claude 2.1.89 新增了 `PermissionDenied` 事件，但它只在 **auto mode classifier 拒绝**后触发，不覆盖用户点 No 的场景；PostToolBatch 事件（批级 `tool_calls` 数组）是否携带被拒绝的调用**文档未写**——若实测确认携带，它是比盲超时更可靠的拒绝对账信号（历史上 `!` 超时自动重置方案已被 revert，教训是不可用盲超时）。届时再评估接入。
 
 ## 状态符号
 
@@ -364,6 +369,8 @@ bash tests/status-machine.test.sh
 SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, Stop, StopFailure
 
 全部 async=true，PermissionRequest 例外（async=false 用于立即阻塞）。命令格式：`<abs>/scripts/tmux-ai-status claude <Event>`。
+
+**Claude hook timeout（官方默认，2026-10 核实）**：command 类 hook 默认 **600 秒**；SessionEnd 全体 hook 共享 **1.5 秒**预算（per-hook timeout 可抬升至多 60s）；`async: true` 的 hook **完全不受 timeout 保护**（挂起会常驻，直到 `claude -p` 模式 teardown 才被 kill）。含义：本插件脚本内的任何同步等待（如事件锁重试）若失控，最长可阻塞 sync PermissionRequest 路径达 600s——锁等待上限设计必须自限（事件锁重试预算 ~2s），不能依赖上游超时兜底。
 
 **Codex CLI**（6 个事件，注册到 `~/.codex/hooks.json`，需 codex ≥ v0.144）：
 SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop
