@@ -255,6 +255,51 @@ adapter_check_integrity() {
     return 0
 }
 
+# 已收敛判定（仅供 wrapper 的 auto 分支使用——⚠️ 不得被事件路径复用）。
+# 四条件全过 = auto 可安全跳过重装：integrity 过 + 全部条目指向当前源（无漂移/
+# 死条目）+ 每事件本插件条目 ≤1（无重复）。
+# 参照系：wrapper 的 _LIB_DIR 是 pwd -P 物理路径；写入（install/auto/修复全部经
+# wrapper）与比较同参照系自洽。事件路径的 _LIB_DIR 是 pwd 逻辑路径（软链场景
+# 两者不等），事件路径复用会误判漂移。
+# 取源逻辑与 adapter_check_integrity 的三模式 case 保持同步（不抽共享以控制
+# integrity 的回归面）。
+adapter_check_converged() {
+    adapter_check_integrity || return 1
+    local mode src="" tmp="" stats
+    mode=$(_ccswitch_mode)
+    case "$mode" in
+        live)
+            src=$(_ccswitch_live_file)
+            [ -f "$src" ] || return 1
+            ;;
+        legacy)
+            _ccswitch_dump_common tmp || return 1
+            src="$tmp"
+            ;;
+        *)
+            [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
+            src="$ADAPTER_HOOKS_FILE"
+            ;;
+    esac
+    # 一次 jq 同时产出漂移计数（≠ 当前源，含死路径）与重复计数（每事件条目 >1）
+    stats=$(jq -r --arg cur "${_LIB_DIR}/tmux-ai-status" '
+        .hooks as $h |
+        ["SessionStart","SessionEnd","UserPromptSubmit","PreToolUse","PostToolUse",
+         "PostToolUseFailure","PermissionRequest","Notification","Stop","StopFailure"] as $events |
+        [$events[] as $e |
+            [$h[$e][]?.hooks[]?.command // empty
+             | select(contains("tmux-ai-status")) | split(" ")[0]] as $scripts |
+            select(($scripts | length) > 0) |
+            {bad: ([$scripts[] | select(. != $cur)] | length),
+             n: ($scripts | length)}]
+        | "bad=\([.[].bad] | add // 0) dup=\([.[].n | select(. > 1)] | length)"' "$src" 2>/dev/null)
+    [ -z "$tmp" ] || rm -f "$tmp"
+    case "$stats" in
+        "bad=0 dup=0") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 明细检查（仅 install wrapper 的 check --json 调用；事件热路径不触达）。
 # stdout 输出单行紧凑 JSON 片段 {"mode":...,"events":{...},"plugin":null,"registeredPaths":[...]}，
 # 由 lib-install-hooks.sh 的 _wrapper_check_json 拼装 tool/status/suppress/drift。
@@ -342,6 +387,16 @@ adapter_install_hooks() {
             _ccswitch_warn_gui
             _ccswitch_dump_common tmp || return 1
             merged=$(_claude_apply_merge "$tmp")
+            # 语义不变跳写：merge 只动 .hooks，顶层其他字段天然继承 tmp——
+            # 两边 jq -S 规范化对比，相同则跳过 upsert（GUI 冲掉 hooks 时
+            # 库内现值 ≠ merged，恒不跳，对抗不弱化；行缺失时 tmp={}，
+            # merged 恒含 10 事件，同样恒不跳）
+            if [ "$(jq -S . "$tmp" 2>/dev/null)" = "$(jq -S . <<<"$merged" 2>/dev/null)" ]; then
+                rm -f "$tmp"
+                echo "Claude hooks already up to date in cc-switch common config (skip write)"
+                echo "Events: $_CLAUDE_EVENTS"
+                return 0
+            fi
             rm -f "$tmp"
             hooks_patch=$(jq -c '{hooks: (.hooks // {})}' <<<"$merged")
             full_doc=$(jq -c . <<<"$merged")
@@ -360,6 +415,14 @@ adapter_install_hooks() {
     esac
     [ -f "$target" ] || _install_atomic_write '{}' "$target"
     updated=$(_claude_apply_merge "$target")
+    # 语义不变跳写：jq 输出格式与手写文件不同，字节 cmp 不可用——两边 jq -S
+    # 规范化后比较（命令替换对称剥尾换行）。跳写不触碰 mtime，避免触发 Claude
+    # Code file watcher 的无谓 hooks 重载。
+    if [ "$(jq -S . "$target" 2>/dev/null)" = "$(jq -S . <<<"$updated" 2>/dev/null)" ]; then
+        echo "Claude hooks already up to date at $target (skip write)"
+        echo "Events: $_CLAUDE_EVENTS"
+        return 0
+    fi
     _install_atomic_write "$updated" "$target"
     echo "Claude hooks installed to $target"
     echo "Events: $_CLAUDE_EVENTS"
@@ -412,6 +475,11 @@ adapter_uninstall_hooks() {
     esac
     [ -f "$target" ] || { echo "Claude hooks: nothing to uninstall"; return 0; }
     updated=$(_claude_apply_strip "$target")
+    # 无本插件条目时 strip 无变化 → 跳写（不触碰 mtime）
+    if [ "$(jq -S . "$target" 2>/dev/null)" = "$(jq -S . <<<"$updated" 2>/dev/null)" ]; then
+        echo "Claude hooks: nothing to uninstall from $target (skip write)"
+        return 0
+    fi
     _install_atomic_write "$updated" "$target"
     echo "Claude hooks uninstalled from $target"
 }

@@ -15,6 +15,19 @@ _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "${_LIB_DIR}/lib-install-hooks.sh"
 source "${_LIB_DIR}/adapters/opencode.sh"
 
+# 写路径互斥（check 只读不锁）：见 _install_acquire_lock 头注释。
+case "${1:-install}" in
+    check) ;;
+    *)
+        _lock_rc=0
+        _install_acquire_lock opencode || _lock_rc=$?
+        if [ "$_lock_rc" = 1 ]; then exit 1; fi
+        if [ "$_lock_rc" = 0 ]; then
+            trap '_install_release_lock opencode' EXIT
+        fi
+        ;;
+esac
+
 case "${1:-install}" in
     uninstall)
         adapter_uninstall_hooks
@@ -32,6 +45,6 @@ case "${1:-install}" in
         ;;
     *)
         adapter_install_hooks
-        _hooks_suppress_clear opencode
+        _hooks_suppress_clear opencode || true
         ;;
 esac

@@ -18,6 +18,21 @@ _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "${_LIB_DIR}/lib-install-hooks.sh"
 source "${_LIB_DIR}/adapters/claude.sh"
 
+# 写路径互斥（check 只读不锁）：临界区覆盖 adapter 调用 + suppress 标记读-改-写，
+# 串行化 auto 与显式 uninstall 的标记 TOCTOU。失败语义见 _install_acquire_lock：
+# 降级无锁（rc=2）继续；等待超时（rc=1）退出。
+case "${1:-install}" in
+    check) ;;
+    *)
+        _lock_rc=0
+        _install_acquire_lock claude || _lock_rc=$?
+        if [ "$_lock_rc" = 1 ]; then exit 1; fi
+        if [ "$_lock_rc" = 0 ]; then
+            trap '_install_release_lock claude' EXIT
+        fi
+        ;;
+esac
+
 case "${1:-install}" in
     uninstall)
         adapter_uninstall_hooks
@@ -37,11 +52,19 @@ case "${1:-install}" in
         if [ -f "$(_hooks_suppress_file claude)" ]; then
             exit 0
         fi
+        # 已收敛（integrity + 无漂移/死条目/重复）→ 跳过重装：tmux 每次 reload
+        # 不再全量重写真源。强收敛保留——漂移/死条目/缺失/重复任一存在都走
+        # install 收敛。结构漂移（async/matcher 被外部改）不在判定内，auto 跳过
+        # 不修复，显式 install 仍强收敛。
+        if adapter_check_converged; then
+            echo "claude hooks already converged (skip install)"
+            exit 0
+        fi
         adapter_install_hooks
-        _hooks_suppress_clear claude
+        _hooks_suppress_clear claude || true
         ;;
     *)
         adapter_install_hooks
-        _hooks_suppress_clear claude
+        _hooks_suppress_clear claude || true
         ;;
 esac
