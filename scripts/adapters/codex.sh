@@ -36,12 +36,17 @@ ADAPTER_PERMISSION_PRE_TOOL_NAMES="request_permissions"
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-codex-hooks.sh"
 
-# 完整性计数：6 个事件中注册了含 tmux-ai-status codex 的 command 的事件数（按事件，
+# 本插件条目的唯一 marker（归属判定路径无关：contains 子串匹配）。
+# 统一用于 count/integrity/detail/strip——避免历史实现里 strip 用宽串
+# `tmux-ai-status`、check 用 `tmux-ai-status codex` 的发散。
+_CODEX_MARKER="tmux-ai-status codex"
+
+# 完整性计数：6 个事件中注册了含 _CODEX_MARKER 的 command 的事件数（按事件，
 # 非扁平总数——重复+缺失的组合在扁平计数下会假阳性）。
 _CODEX_JQ_COUNT='
     .hooks as $h |
     ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"]
-    | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains("tmux-ai-status codex"))))
+    | map(select([$h[.][]?.hooks[]?.command // empty] | any(contains($marker))))
     | length
 '
 
@@ -51,17 +56,17 @@ _CODEX_JQ_COUNT='
 adapter_check_integrity() {
     [ -f "$ADAPTER_HOOKS_FILE" ] || return 1
     local n ev p ok_events=""
-    n=$(jq "$_CODEX_JQ_COUNT" "$ADAPTER_HOOKS_FILE" 2>/dev/null)
+    n=$(jq --arg marker "$_CODEX_MARKER" "$_CODEX_JQ_COUNT" "$ADAPTER_HOOKS_FILE" 2>/dev/null)
     [ "${n:-0}" -ge 6 ] || return 1
     while IFS=$'\t' read -r ev p; do
         if [ -n "$ev" ] && [ -x "$p" ]; then
             case ",$ok_events," in *",$ev,"*) ;; *) ok_events="$ok_events,$ev" ;; esac
         fi
-    done < <(jq -r '.hooks as $h |
+    done < <(jq -r --arg marker "$_CODEX_MARKER" '.hooks as $h |
         ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"] as $events |
         $events[] as $e |
         [$h[$e][]?.hooks[]?.command // empty
-         | select(contains("tmux-ai-status codex")) | split(" ")[0]] as $scripts |
+         | select(contains($marker)) | split(" ")[0]] as $scripts |
         select(($scripts | length) > 0) |
         $scripts[] | "\($e)\t\(.)"' "$ADAPTER_HOOKS_FILE" 2>/dev/null)
     for ev in SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse Stop; do
@@ -135,11 +140,11 @@ adapter_check_detail() {
         printf '{"mode":"file","events":{},"plugin":null,"registeredPaths":[],"trust":%s}\n' "$trust_json"
         return 0
     fi
-    pairs=$(jq -r '.hooks as $h |
+    pairs=$(jq -r --arg marker "$_CODEX_MARKER" '.hooks as $h |
         ["SessionStart","UserPromptSubmit","PreToolUse","PermissionRequest","PostToolUse","Stop"] as $events |
         $events[] as $e |
         $h[$e][]?.hooks[]?.command // empty |
-        select(contains("tmux-ai-status codex")) | split(" ")[0] | "\($e)\t\(.)"' "$src" 2>/dev/null)
+        select(contains($marker)) | split(" ")[0] | "\($e)\t\(.)"' "$src" 2>/dev/null)
     rows=""
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -208,17 +213,22 @@ EOF
     printf '%s\n' "${out# }" | tr ' ' '\n'
 }
 
-# 从每个事件数组剔除本插件 group（command 含 tmux-ai-status），事件/hooks 清空后删键。
+# 命令级剥离：逐 hook 删除含 _CODEX_MARKER 的 command（不看 type，缺 type 的
+# 本插件条目同样清除）；group 仍有剩余 hook 则保留，空 group/事件删除。
+# 与 claude 的 _CLAUDE_JQ_STRIP 同构；防御缺 hooks 键 / null / 非数组的 group。
 _codex_strip_managed() {
-    jq '
-      def clean_event:
-        map(select(
-          (.hooks // []) | any(.type == "command" and (.command // "" | contains("tmux-ai-status"))) | not
-        ));
-      if .hooks then
-        .hooks |= (with_entries(.value |= clean_event) | with_entries(select(.value | length > 0)))
+    jq --arg marker "$_CODEX_MARKER" '
+      def trim_group:
+        if (.hooks | type) == "array" then
+          .hooks |= [ .[] | select(((.command // "") | tostring | contains($marker)) | not) ]
+          | select((.hooks | length) > 0)
+        else . end;
+      def trim_event:
+        if type == "array" then [ .[] | trim_group ] else . end;
+      if (.hooks | type) == "object" then
+        .hooks |= (with_entries(.value |= trim_event) | with_entries(select((.value | length) > 0)))
       else . end
-      | if (.hooks // {}) == {} then del(.hooks) else . end
+      | if (.hooks | type) == "object" and ((.hooks | length) == 0) then del(.hooks) else . end
     '
 }
 
