@@ -187,6 +187,28 @@ assert_status '>' 'Claude serial permission resumes after tool completion'
 
 reset_state
 
+# Claude async hook 乱序：PermissionRequest 先于 PreToolUse 到达。
+# 写入前的 re-derive 只有 pending-perm 派生的 !/? 才可覆写；pending-pre 派生的 '>'
+# 不得推翻 live 审批态（AskUserQuestion 的 PreToolUse 项会挂到用户答完才清除）。
+run_event claude PermissionRequest '{"session_id":"claude-auq","tool_name":"AskUserQuestion"}'
+assert_status '?' 'AskUserQuestion permission enters question state'
+run_event claude PreToolUse '{"session_id":"claude-auq","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
+assert_status '?' 'Late AskUserQuestion PreToolUse keeps ? state'
+run_event claude PostToolUse '{"session_id":"claude-auq","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
+assert_status '>' 'Completing AskUserQuestion resumes processing'
+
+reset_state
+
+# 同形态的普通工具：晚到的 PreToolUse 不得把 ! 降级为 >。
+run_event claude PermissionRequest '{"session_id":"claude-async","tool_name":"Bash"}'
+assert_status '!' 'Late Claude permission enters ! state'
+run_event claude PreToolUse '{"session_id":"claude-async","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '!' 'Late PreToolUse keeps ! state'
+run_event claude PostToolUse '{"session_id":"claude-async","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '>' 'Approved Bash resumes processing'
+
+reset_state
+
 # Notification 隐式路径不得降级活跃状态（async 通知可能乱序晚到）
 # 1) 工具有 pending：idle_prompt 迟到 → 保持 '>'
 run_event claude PreToolUse '{"session_id":"ntf","tool_use_id":"t1","tool_name":"Bash"}'

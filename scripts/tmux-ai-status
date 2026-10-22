@@ -345,13 +345,18 @@ if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; th
     # 写入前重新读取 pending，避免并发事件用过期结果覆盖仍有效的审批态。
     case "$EVENT" in
         PreToolUse)
-            if _derive_status_from_pending; then
+            # 只有 pending-perm 派生的真实审批态（codex/opencode 有 ID）才有覆写权。
+            # pending-pre 派生的 '>' 不得推翻 live 的 !/?：Claude 的 PermissionRequest
+            # 没有 tool_use_id，审批态只存在于 live；AskUserQuestion/普通工具的
+            # PreToolUse 因 async 乱序晚于 PermissionRequest 到达时，其 pending-pre
+            # 项会长期遮挡审批态（AskUserQuestion 要等用户答完才有 PostToolUse）。
+            if _derive_status_from_pending && { [ "$DERIVED" = "!" ] || [ "$DERIVED" = "?" ]; }; then
                 STATUS="$DERIVED"
             else
-                # Claude PermissionRequest 没有 ID，继续用 live 状态保护串行审批窗口。
                 _live_final=$(tmux display-message -pt "$TMUX_PANE" -p '#{@ai_pane_status}' 2>/dev/null)
                 case "$_live_final" in
                     "!"|"?") STATUS="$_live_final" ;;
+                    *) if [ -n "$DERIVED" ]; then STATUS="$DERIVED"; fi ;;
                 esac
             fi
             ;;

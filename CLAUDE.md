@@ -171,7 +171,7 @@ per-pane 持久化两个集合 + 一个完成态 tombstone（文件落在 `${_ST
   - `idle_prompt`：Claude 完成响应约 60 秒且用户未输入时触发；`permission_prompt`：权限提示**已等待约 6 秒**后才触发（官方 "the prompt has waited about six seconds"，每次按键会推迟计时器）——它到达时 `!` 已经由 sync PermissionRequest 写好，handler 走 PREV 保持分支（安全）
   - 官方明确指引："To run a hook immediately when Claude asks for permission to use a tool, use PermissionRequest instead."——佐证 PermissionRequest 必须保持 sync 的设计
   - `denied/cancelled` 文案匹配是防御性死分支：2026-10 实测（claude 2.1.304）Notification 只有 `idle_prompt`/`permission_prompt` 两类，匹配从未命中（与「点 No 完全静默」记载一致），保留作上游行为变化的哨兵
-- **竞态最终保护**：PreToolUse/PostToolUse/PermissionResolved 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态
+- **竞态最终保护**：PreToolUse/PostToolUse/PermissionResolved 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态。**PreToolUse 的覆写权仅限 `pending-perm` 派生的 `!`/`?`**：pending-pre 派生的 `>` 不得推翻 live 的 `!`/`?`（claude 无 `tool_use_id`，审批态只存在于 live；async 乱序下 AskUserQuestion/普通工具的 PreToolUse 晚于 PermissionRequest 到达时，其 pending-pre 项会长期遮挡审批态——AskUserQuestion 要等用户答完才有 PostToolUse。2026-10-22 修复）
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
 ### ⚠️ 已知限制 / 备忘
