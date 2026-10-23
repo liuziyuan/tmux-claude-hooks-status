@@ -3,9 +3,10 @@
 # 被 lib-tmux-ai-status.sh source
 # 调用方需设置: TOOL_ID ("claude")、EVENT、_pane_loc
 
-AI_LOG_FILE="/tmp/tmux-ai-status.log"
+AI_LOG_FILE="${TMUX_AI_LOG_FILE:-/tmp/tmux-ai-status.log}"
 AI_LOG_MAX_SIZE=524288   # 512KB 触发轮转
 AI_LOG_KEEP_SIZE=262144   # 轮转后保留尾部 256KB
+AI_LOG_BACKUP_FILE="${AI_LOG_FILE}.1"   # 轮转前完整现场（覆盖式，≤512KB）
 AI_LOG_LOCK_DIR="${AI_LOG_FILE}.lock"
 
 # 原子轮转（mkdir 作为互斥锁，多进程安全）
@@ -14,6 +15,10 @@ _ai_log_rotate() {
     local cur_size
     cur_size=$(wc -c < "$AI_LOG_FILE" 2>/dev/null || echo 0)
     if [ "${cur_size:-0}" -gt "$AI_LOG_MAX_SIZE" ]; then
+        # 先整份备份轮转前现场：主文件截断后只剩尾部，排查历史问题（状态漂移、
+        # 事件丢失）需要完整上下文时只能靠这份 —— 直接截断曾导致现场永久丢失。
+        (umask 077; cp "$AI_LOG_FILE" "${AI_LOG_BACKUP_FILE}.tmp.$$" 2>/dev/null &&
+            mv "${AI_LOG_BACKUP_FILE}.tmp.$$" "$AI_LOG_BACKUP_FILE" 2>/dev/null) || true
         local tmp="${AI_LOG_FILE}.tmp.$$"
         if tail -c "$AI_LOG_KEEP_SIZE" "$AI_LOG_FILE" > "$tmp" 2>/dev/null; then
             cat "$tmp" > "$AI_LOG_FILE"
