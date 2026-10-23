@@ -105,6 +105,29 @@ _notification_implicit_status() {
     printf '%s' "-"
 }
 
+# 状态漂移诊断（只记录、不改写）：审批态被降级为运行态时留证，供下次复现时
+# 直接从日志定位是哪条事件改的。判据刻意保守，避免正常路径刷屏：
+#   - prev 必须是 !/?，curr 必须是 >/-/空
+#   - PostToolUse(Failure) 解除自身审批态属正常路径，只有 pending-pre 仍有
+#     AskUserQuestion（问题还没答完）才算可疑
+_audit_status_downgrade() {
+    local prev="$1" curr="$2"
+    case "$prev" in "!"|"?") ;; *) return 0 ;; esac
+    case "$curr" in ">"|"-"|"") ;; *) return 0 ;; esac
+    [ -n "$TMUX_PANE" ] || return 0
+    local pre auq=0
+    pre=$(_pending_pre_path)
+    if [ -s "$pre" ] && awk '$2=="AskUserQuestion"{f=1; exit} END{exit !f}' "$pre" 2>/dev/null; then
+        auq=1
+    fi
+    case "$EVENT" in
+        PreToolUse|PermissionResolved) ;;
+        PostToolUse|PostToolUseFailure) [ "$auq" = "1" ] || return 0 ;;
+        *) return 0 ;;
+    esac
+    _ai_log "SUSPECT: downgrade '${prev}' → '${curr:-·}' (auq_pending=${auq})"
+}
+
 # 重建聚合状态（_refresh / _entered 共用）
 _run_refresh() {
     _maybe_repair_hooks
@@ -364,6 +387,17 @@ if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; th
             if _derive_status_from_pending; then
                 STATUS="$DERIVED"
             fi
+            ;;
+    esac
+    # 诊断（只记录、不改写状态）：审批态被降级为运行态时留证。
+    # claude 的 PermissionRequest 无 tool_use_id，审批态只存在于 pane option，
+    # 任何把它写成 > / - / 空的事件都可能是回归（2026-10-22 的 PreToolUse 覆写
+    # 正是此形态，当时无埋点只能靠推演定位）。正常路径排除：PostToolUse 解除自身
+    # 审批态时 pending-pre 里不会再有 AskUserQuestion；Stop/Notification/会话边界
+    # 的降级属设计行为（不在本 case 内）。
+    case "$EVENT" in
+        PreToolUse|PostToolUse|PostToolUseFailure|PermissionResolved)
+            _audit_status_downgrade "$PREV_STATUS" "$STATUS"
             ;;
     esac
     tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$STATUS" 2>/dev/null || true
