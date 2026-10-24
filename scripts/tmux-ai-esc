@@ -12,12 +12,24 @@ case "$STATUS" in
         TOOL_ID="ai"
         TMUX_PANE="$PANE_ID"
         source "${SCRIPT_DIR}/lib-tmux-ai-status.sh"
-        _clear_pending
-        tmux set-option -pt "$PANE_ID" @ai_pane_status "-"
-        build_all_status
-        tmux set-option -g @ai_all_status "$ALL"
-        tmux refresh-client -S
-        _ai_log "ESC: denied (status was '$STATUS'), → '-', pending cleared"
+        # 与 hook 事件串行化：抢锁失败说明有事件正在写状态，直接透传 Esc，
+        # 不清理、不写 '-'（否则可能与新的 PermissionRequest 交错，误清审批态）。
+        if ! _acquire_event_lock 20; then
+            _ai_log "ESC: event lock timeout, pass-through without reset (status '$STATUS')"
+        else
+            trap '_release_event_lock' EXIT
+            STATUS=$(tmux display-message -pt "$PANE_ID" -p '#{@ai_pane_status}' 2>/dev/null)
+            case "$STATUS" in
+                "!"|"?"|">")
+                    _clear_pending
+                    tmux set-option -pt "$PANE_ID" @ai_pane_status "-"
+                    build_all_status
+                    tmux set-option -g @ai_all_status "$ALL"
+                    tmux refresh-client -S
+                    _ai_log "ESC: denied (status was '$STATUS'), → '-', pending cleared"
+                    ;;
+            esac
+        fi
         ;;
 esac
 

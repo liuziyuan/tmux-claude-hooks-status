@@ -50,6 +50,8 @@ scripts/
 - `ADAPTER_HOOKS_FILE` — hooks 配置绝对路径
 - `ADAPTER_HAS_SESSION_END` — 是否有 SessionEnd（codex 无 → 退出由 `tmux-ai-monitor` 检测进程消失）
 - `ADAPTER_SESSION_START_TIMING` — `immediate`（claude）/`deferred`（codex 延迟到首个 turn）
+- `ADAPTER_HOLD_UNMATCHED_PERMISSION` — 无请求 ID 的 PermissionRequest 是否进入 pending 集合（`true`=claude/codex，`false`=opencode 有 request ID）
+- `ADAPTER_PERMISSION_HASH_BINDING` — 无 ID 审批是否按 `tool_name+tool_input` 哈希精确绑定（`true`=claude；`false`=codex/opencode 保持同工具 LIFO）
 - `ADAPTER_INSTALLER` — install 脚本路径（自修复/TUI 调用）
 - `adapter_check_integrity()` — hooks 是否完整注册本插件（返回 0=完整）
 - `adapter_check_detail()` — `check --json` 明细 JSON 片段（可选实现；仅 install wrapper 的 check --json 上下文调用，失败输出降级片段不报错；不得依赖 lib-install-hooks.sh——status/suppress/drift 由 wrapper 层 `_wrapper_check_json` 拼装）。codex 额外输出 `trust` 维度：`{configFile, trusted:true|false|null, missingEvents, instances[]}`，只判各实例 `config.toml` 的 `[hooks.state."<hooks路径>:<下划线事件>:<组>:<hook>"]` 键是否存在（不重算 trusted_hash），汇总 `$HOME/.codex` 与所有 cc-switch 实例；`trusted:null` = config.toml 不存在
@@ -91,7 +93,7 @@ opencode 的 plugin 文件与 cc-switch 写入的 provider 条目同目录但不
 被 `tmux-ai-status` 通过 `source` 引入。调用方需设置 `TOOL_ID`（`"claude"`/`"codex"`）、`SESSION_ID`。source 后自动 `_load_adapter` 载入对应适配器。提供：
 
 - **日志** `_ai_log()` — 写入 `/tmp/tmux-ai-status.log`（`TMUX_AI_LOG_FILE` 可覆盖，供测试隔离），自动轮转（>512KB 截断至 256KB）；**轮转前完整备份到 `.log.1`**（覆盖式，≤512KB），排查历史状态漂移时必须看这份——主文件只剩尾部，2026-10-23 曾因直接截断丢失现场
-- **状态漂移诊断（SUSPECT）** `_audit_status_downgrade` — 写盘前发现 live 为 `!`/`?` 而本次要写 `>`/`-`/空时记一条 `SUSPECT: downgrade '<prev>' → '<curr>' (auq_pending=N)`。排除正常路径：PostToolUse(Failure) 解除自身审批态（仅当 pending-pre 仍有 AskUserQuestion 才算可疑）、Stop/Notification/会话边界。只记录不改状态，用于定位「实际在等用户却显示 `>`」这类回归（2026-10-22 的 PreToolUse 覆写当时无埋点，只能靠推演）
+- **状态漂移诊断（SUSPECT）** `_audit_status_downgrade` — 写盘前发现 live 为 `!`/`?` 而本次要写 `>`/`-`/空时记一条 `SUSPECT: downgrade '<prev>' → '<curr>' (auq_pending=N)`。排除正常路径：PostToolUse(Failure) 解除自身审批态（仅当 pending-pre 仍有 AskUserQuestion 才算可疑）、显式重置事件（Stop/UserPromptSubmit/Session*/Notification denied，调用点传 `_explicit_reset`）。其他事件一律记录。正常保存审批态时另记 `GUARD: preserved '<mark>' (event=... evidence=pending-perm|auq-pre)`，测试可断言守卫实际生效。只记录不改状态
 - **TMUX_PANE 解析** `resolve_tmux_pane()` — 先看祖先链（hook 进程向上能否命中 pane_pid，权威）；祖先链不通 = daemon/脱离上下文，**继承的 TMUX_PANE 一律丢弃**（它可能指向当前 server 中真实存在但无关的 pane），再按 `pane-${SESSION_ID}` 映射 → 同工具进程树候选 → `adapter_pane_hints` → hook cwd 逐级收敛；唯一才采用，多候选不猜（保留 monitor 的 idle `-`）。失败 5s 负缓存避免高频 BFS
 - **状态聚合** `build_all_status()` — 扫描 attached session 的所有 pane，读取 `@ai_pane_status`，写入 `@ai_all_status`。无显式状态时补 idle `-`：前台命令是 AI 进程，或该 pane 的 `@ai_monitor_seen_<tool>` 为 1（monitor 进程树探测，覆盖 `switch`/launcher 启动场景）
 - **cc-switch provider 段（仅 codex）** — cc-switch（`switch` 命令）launch 时向 CLI 注入 `CC_SWITCH_PROVIDER`/`CC_SWITCH_PROVIDER_ID` 环境变量，CLI hooks 进程继承；**仅 `TOOL_ID=codex` 的事件捕获**并写入 pane option `@ai_provider`/`@ai_provider_id`——claude 的 provider 标签由 wrapper 在 CLI 内 statusline 显示，tmux 状态栏刻意不重复渲染，claude/opencode 的事件一律走清理分支（`set-option -u` × 2，顺带清同 pane 之前的残留），codex 无 env（非 switch 启动）同样清理。聚合行在状态符号后渲染彩色 `[provider]` 段。颜色真源 `~/.cc-switch/statusline-preferences.json`（claude/codex 桶按 providerId 合并查，显式 SGI 码映射 tmux colourN），缺省 auto = FNV-1a(name) 落在与 cc-switch wrapper 相同的 6 色 bright 调色板（64 位精确积 `& 0xFFFFFFFF` 复刻 JS `Math.imul` 的 32 位截断乘）。**非 switch 场景零存在感契约**：provider 能力本质是 switch 的需求，本插件只是承载方——无 env 时只做幂等清理，不产生任何输出（stdout 恒空满足 codex hook 契约）、不改变退出码（恒 0）、不渲染任何 provider 内容；该场景实测 exit 0 + stdout/stderr 0 字节。
@@ -112,12 +114,15 @@ tmux-ai-status <TOOL_ID> <EVENT> 脚本
     │   _refresh / _session-switched 伪事件跳过解析（只重建聚合）
     │   解析失败：不写任何 per-pane 状态，日志记录 PANE: unresolved
     ├─ case "$EVENT" → 维护 pending 集合 + 派生 STATUS 符号
-    │   PreToolUse:        pending-pre += id
-    │   PermissionRequest: 早写 !/? + pending-perm += "id !/?" (优先级最高)
+    │   PreToolUse:        pending-pre += "id tool hash ts"
+    │   PermissionRequest: 早写 !/? + pending-perm += "id !/? tool hash ts"
+    │                       无 tool_use_id（Claude/Codex）→ 按 hash 绑定 pending-pre；
+    │                       失败写唯一 sentinel；Pre 迟到时反向绑定为真实 id
     │   PermissionResolved: pending-perm -= request_id（OpenCode）
     │   PostToolUse/Failure: pending-pre/perm -= tool_use_id
     │   UserPromptSubmit/Stop/Session*: _clear_pending
-    ├─ _derive_status_from_pending → STATUS
+    ├─ 写盘总闸：pending 派生的 !/? 优先；否则 live !/? + 审批证据 → 保持
+    │   （显式重置事件豁免）；记录 GUARD / SUSPECT
     ├─ 写入 per-pane 状态（@ai_pane_status）
     ├─ build_all_status() → @ai_all_status
     └─ tmux refresh-client
@@ -127,6 +132,9 @@ tmux-ai-status <TOOL_ID> <EVENT> 脚本
     含 ?              → STATUS=?
     pending-pre 非空  → STATUS=>
     都空              → 事件自决（>/✓/-/空）
+    写盘前另有 live 守卫：live 为 !/? 且存在审批证据（pending-perm 非空，
+    或 pending-pre 里有未完成的 AskUserQuestion）→ 任何非显式重置事件
+    （Pre/Post/PostFailure/PermResolved/Notification 隐式）都不得把它降级为 >/-/空
 
 tmux session/client 生命周期 hook
     session-closed / client-detached / pane-exited / after-kill-pane / pane-focus-in
@@ -145,7 +153,8 @@ Codex 生命周期 monitor（每秒）
 
 Esc 键拒绝检测（tmux bind-key -n Escape）:
     ├─ 全局拦截 Esc，读取 active pane 的 @ai_pane_status
-    ├─ 状态为 ! / ? → 设为 -，rebuild，透传 Esc
+    ├─ 抢事件锁（~200ms 预算）；失败仅透传 Esc，不清理、不写 -
+    ├─ 状态为 ! / ? / > → 清 pending + 设为 -，rebuild，透传 Esc
     └─ 其余状态 → 直接透传 Esc（~15ms 开销）
 ```
 
@@ -153,12 +162,13 @@ Esc 键拒绝检测（tmux bind-key -n Escape）:
 
 per-pane 持久化两个集合 + 一个完成态 tombstone（文件落在 `${_STATUS_DIR}/${PANE_SANITIZED}/`）：
 
-- `pending-pre`：已 PreToolUse 未 PostToolUse 的 `tool_use_id`（行 `id tool ts`）
-- `pending-perm`：已 PermissionRequest 未配对的 `tool_use_id`（含 `!`/`?` 标记；行 `id mark tool ts`）
+- `pending-pre`：已 PreToolUse 未 PostToolUse 的 `tool_use_id`（行 `id tool hash ts`；旧 3 列行读作 hash=`-`）
+- `pending-perm`：已 PermissionRequest 未配对的 `tool_use_id`（含 `!`/`?` 标记；行 `id mark tool hash ts`；旧 4 列行读作 hash=`-`）
+- `hash`：`tool_name + 规范化 tool_input` 的 16 hex 指纹（`jq -S` 排序后取哈希）。Claude/Codex 的 `PermissionRequest` 无 `tool_use_id`，用它把审批精确绑定到对应 `PreToolUse`；hash 缺失/不等时严格模式（`ADAPTER_PERMISSION_HASH_BINDING=true`）不误绑，写唯一 sentinel `__unmatched_permission__.<hash>.<epoch>.<pid>-<rand>` 保守保持到显式重置。Pre 迟到时 `_rebind_sentinel_to_pre` 反向绑定为真实 id，使 PostToolUse 能精确解除
 - `recent-post`：PostToolUse/PostToolUseFailure 已处理的 `tool_use_id`（行 `id ts`）。60s 窗口内命中则迟到的 Pre 跳过写入（`_pending_pre_skipped`），状态保持已完成——修复 Post 先于 Pre 到达导致 `pending-pre` 永久残留、状态卡 `>`；300s 修剪，`_clear_pending` 刻意不清（turn/session 边界迟到的 Pre 仍需拦截）
 - `.lock/`：mkdir mutex（5s stale 强夺）保护并发写
 
-**铁律**：只要 `pending-perm` 非空，STATUS 必为 `!`/`?`，不受 PreToolUse/PostToolUse 乱序到达影响。
+**铁律**：只要 `pending-perm` 非空（含绑定成功与 sentinel），STATUS 必为 `!`/`?`，不受 PreToolUse/PostToolUse 乱序到达影响。写盘总闸另有 live 守卫：即使 pending 集合因锁竞争丢写，live 的 `!`/`?` 只要存在审批证据（perm 非空或未答完的 AskUserQuestion）就不会被非显式重置事件降级。
 
 **Stop 拒绝推断**：Stop 时检查 `pending-perm` 文件是否非空 → `-`；否则按 `$PREV_STATUS` 推断 → `✓`。
 
@@ -172,7 +182,7 @@ per-pane 持久化两个集合 + 一个完成态 tombstone（文件落在 `${_ST
   - `idle_prompt`：Claude 完成响应约 60 秒且用户未输入时触发；`permission_prompt`：权限提示**已等待约 6 秒**后才触发（官方 "the prompt has waited about six seconds"，每次按键会推迟计时器）——它到达时 `!` 已经由 sync PermissionRequest 写好，handler 走 PREV 保持分支（安全）
   - 官方明确指引："To run a hook immediately when Claude asks for permission to use a tool, use PermissionRequest instead."——佐证 PermissionRequest 必须保持 sync 的设计
   - `denied/cancelled` 文案匹配是防御性死分支：2026-10 实测（claude 2.1.304）Notification 只有 `idle_prompt`/`permission_prompt` 两类，匹配从未命中（与「点 No 完全静默」记载一致），保留作上游行为变化的哨兵
-- **竞态最终保护**：PreToolUse/PostToolUse/PermissionResolved 写入前 re-derive，若 `pending-perm` 已落盘则改写为 `!`/`?`，永不覆盖审批态。**PreToolUse 的覆写权仅限 `pending-perm` 派生的 `!`/`?`**：pending-pre 派生的 `>` 不得推翻 live 的 `!`/`?`（claude 无 `tool_use_id`，审批态只存在于 live；async 乱序下 AskUserQuestion/普通工具的 PreToolUse 晚于 PermissionRequest 到达时，其 pending-pre 项会长期遮挡审批态——AskUserQuestion 要等用户答完才有 PostToolUse。2026-10-22 修复）
+- **写盘统一守卫**：写盘总闸先看 pending 派生的 `!`/`?`（精确配对）；否则若 live 为 `!`/`?`、本次要写 `>`/`-`/空、且存在审批证据（`pending-perm` 非空，或 `pending-pre` 里仍有未完成的 AskUserQuestion），则保持 live 并记 `GUARD: preserved`。显式重置事件（Stop/UserPromptSubmit/SessionStart/SessionEnd/Notification denied）豁免。这条替代了旧版只在 PreToolUse 分支做的局部保护——2026-10-24 的 `?`→`>` 降级正是 PostToolUse 分支缺少该保护导致（并行 Bash 收尾覆盖了 AUQ 审批态）
 - **Fallback 清理**：TMUX_PANE 未解析时，Stop/SessionEnd 遍历所有 pane 清理残留活跃状态
 
 ### ⚠️ 已知限制 / 备忘
@@ -208,16 +218,19 @@ codex 0.163 managed app-server daemon 常驻（ppid=1），hooks 在 daemon 中�
 **Claude 的 PermissionRequest hook JSON 不携带 `tool_use_id`**（官方设计，非遗漏）。
 官方文档原文："PermissionRequest hooks receive `tool_name` and `tool_input` fields like PreToolUse hooks, **but without `tool_use_id`**"——且无任何「计划添加」说明，**等上游补 ID 的路线不存在**。2026-10 实测（claude 2.1.304）仍无 `tool_use_id`，但携带 `prompt_id`（turn 级 UUID）。
 
-因此（仅 claude；codex/opencode 见下段，它们的 pending-perm 会真实写入）`_add_pending_perm` 因 id 为空直接 return，**claude 的 `pending-perm` 文件实际从未写入数据**。
-状态机仍能正确显示 `!`/`?` 是因为：
-1. PermissionRequest 早写 tmux option 立刻生效
-2. 权限对话框流程仍逐个串行，单次循环内不存在 PermReq 之间的真并发
-3. PostToolUse 配对清空 pending-pre → 派生 `>` 覆盖早写的 `!`
+因此 claude 的 PermissionRequest 无法像 Codex/OpenCode 那样直接用请求 ID 配对。2026-10-24（v0.5.20）起改为「`tool_name + 规范化 tool_input` 哈希」绑定：
+- PermissionRequest 到达时计算指纹，在 `pending-pre` 里找同指纹的 PreToolUse；成功则把审批写入 `pending-perm`（首列为该 Pre 的 `tool_use_id`），批准/回答后的 PostToolUse 精确解除；
+- 指纹缺失/不等时写唯一 sentinel（`__unmatched_permission__.<hash>.<epoch>.<pid>-<rand>`），由写盘总闸保持到显式重置；
+- PreToolUse 迟到（PermReq 先到）时 `_rebind_sentinel_to_pre` 反向绑定；
+- 即便绑定完全失败，写盘总闸也会用「pending-pre 里的 AskUserQuestion 证据」守住 live `?`。
 
-**Parallel tool calls 已是现实**（官方："PostToolUse fires once per tool, which means it fires concurrently when Claude makes parallel tool calls"；2026-10-20 日志实证：PostToolUse 的 hook 先于同 id 的 PreToolUse 被记录——async hook 到达顺序无保证）。**当前未爆发的真实原因**：权限对话框流程本身仍逐个串行 + PreToolUse 的 LIVE_STATUS 兜底有效。触发条件部分满足（hook 交错已观察到；PermReq 之间真并发未观察到）。届时重新设计的锚点候选：`prompt_id`（turn 级，已在 input 中）、PostToolBatch 事件的 `tool_calls` 数组（批级权威清单，每项含 `tool_use_id`）、或 `tool_name + tool_input` 哈希作 surrogate id。**2026-10-20 补充**：Post 先于 Pre 的残留已由 `recent-post` tombstone 兜底（迟到的 Pre 不再重建 pending）；仍未解决的是 Claude 无 ID 的并行 PermissionRequest 绑定顺序。
+此前（v0.5.19 及以前）claude 的 `pending-perm` 从不写入，审批态只存在于 pane option——这正是 2026-10-24 并行 Bash 的 PostToolUse 把 `?` 降级为 `>` 的根因（现已由绑定 + 统一守卫修复）。
+
+**Parallel tool calls 已是现实**（官方："PostToolUse fires once per tool, which means it fires concurrently when Claude makes parallel tool calls"；2026-10-20 日志实证：PostToolUse 的 hook 先于同 id 的 PreToolUse 被记录——async hook 到达顺序无保证）。v0.5.20 的哈希绑定 + 写盘守卫已覆盖并行工具在审批等待期间收尾的降级路径（回归用例见 `tests/status-machine.test.sh` 的 `par-auq` / `par-bash`）。仍未覆盖的是「迟到的 turn 边界事件」（Stop/UserPromptSubmit/SessionStart 错 turn 误伤），候选锚点为 `prompt_id`（turn 级 UUID，PermissionRequest 已携带）；当前先靠扩展后的 `SUSPECT` 留证，出现真实样本再设计。
 
 Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `PostToolUse` 提供且
-可配对。核心会把无 ID 的权限请求绑定到最近的同工具 pending PreToolUse ID，批准后的
+可配对。核心会把无 ID 的权限请求绑定到最近的同工具 pending PreToolUse ID（`hash` 列照常写入，但
+Codex 的 `ADAPTER_PERMISSION_HASH_BINDING=false`，绑定策略保持 LIFO，不改变既有语义），批准后的
 `PostToolUse` 因而能精确清理并恢复 `>`；无法绑定时才写 sentinel，保守保持 `!` 到
 `Stop`、`UserPromptSubmit` 或 `SessionStart` 清理。OpenCode 的 `permission.asked.id` 与
 `permission.replied.requestID` 则会精确维护多个 pending 请求。
@@ -232,7 +245,7 @@ Codex 的 `PermissionRequest` 不提供 `tool_use_id`，但 `PreToolUse` / `Post
 - 不发 Stop（官方文档确认 Stop "Does not run if the stoppage occurred due to a user interrupt"——用户 interrupt/Esc 中断同样无 Stop 兜底，佐证 tmux 端 Esc 检测路径的必要性）
 - 后续 batch 中尚未发起的工具也不再发 PreToolUse
 
-本插件因此无任何 signal 可监听，状态保持 `!` 直到下次 `UserPromptSubmit`（用户输入新提示）。
+本插件因此无任何 signal 可监听，状态保持 `!` 直到下次 `UserPromptSubmit`（用户输入新提示）。AUQ 被点 No/超时拒绝且没有 PostToolUse 时同理：`?` 保持到下次 `UserPromptSubmit`（v0.5.20 起 pending-pre 的 AUQ 证据会阻止并行事件把它降级为 `>`；这是设计行为，不是回归）。
 
 ESC 拒绝能转 `-` 是因为 tmux 端 `bind-key -n Escape` 拦截了键流；No 是 TUI 选项选择，不经过 tmux 键事件，无法捕获。
 
@@ -360,7 +373,7 @@ bash tests/bindings.test.sh
 - **Stale hook 清理**：安装时清理指向不存在脚本的旧 hook 和重复路径
 - **`!` 和 `?` 对等原则**：两者本质相同——都需要人类审批。对 `!`（PermissionRequest）的任何逻辑变更（竞态保护、Stop 推断、清理路径）必须同步应用到 `?`（AskUserQuestion），反之亦然。差异仅限显示优先级（`!` > `?`）和符号本身
 - **Pane title 作为 ground truth**：用 Claude Code 的 pane title 变化（`✳` ↔ 盲文）检测用户批准，替代复杂的 toolmap/flag 状态机
-- **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截，仅在 `!`/`?` 状态时设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
+- **Esc 键拒绝检测**：`bind-key -n Escape` 全局拦截；先抢事件锁（~200ms），失败只透传、不清理不写 `-`；成功且 live 为 `!`/`?`/`>` 时清 pending + 设 `-` 并透传 Esc，其余直接透传。Poll 检测到状态变 `-` 后自动退出，无需显式 stop
 - **多安装源收敛与卸载意图标记（2026-10-14）**：hooks 条目可由开发 repo 与 npm bundled 包两个「安装源」写入（TUI 走 bundled、自修复走 tmux 加载源），曾因 claude 剥离用 `startswith($hook_script)` 路径敏感匹配导致跨源卸载假成功（剥离零命中 → 报成功但真源未变 → 检测恒「已装」）。修复后的契约：
     - **归属判定路径无关**：所有 strip/merge 清理/check 计数统一 `contains("tmux-ai-status")`（codex 用常量 `_CODEX_MARKER="tmux-ai-status codex"`，count/integrity/detail/strip 同源），legacy 名（tmux-powerline-claude-status/tmux-claude-status）清理保留。跨源 install/卸载/修复在任意源组合下结果一致。**codex 命令级剥离（2026-10-20）**：逐 hook 删除含 marker 的 command（不看 `type`，缺 type 的条目也能清），同组第三方 command 保留；空 group/事件删除；无 `hooks` 键/null/非数组的 group 原样保留
     - **codex 重复条目只提示不自动收敛（2026-10-20）**：同事件注册多条本插件 command 时 integrity 仍过、普通 install no-op（重写即 re-trust），`check-detail.js` 的 `findDuplicateEvents`（`events.registered > 1`）在 CLI/TUI 明细中渲染警告，exit code 不变；TUI 收敛入口把 codex 重复纳入候选，复用 re-trust 确认，force install 走命令级 strip 收敛

@@ -62,6 +62,8 @@ ADAPTER_HAS_SESSION_END="false"
 ADAPTER_SESSION_START_TIMING="immediate"
 # permission.asked / question.asked 均携带请求 ID（.id），不需要无 ID sentinel。
 ADAPTER_HOLD_UNMATCHED_PERMISSION="false"
+# opencode 的请求都带 ID，不走哈希绑定。
+ADAPTER_PERMISSION_HASH_BINDING="false"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-opencode-hooks.sh"

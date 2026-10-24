@@ -28,10 +28,13 @@ tmux() {
     local command="${1:-}"
     case "$command" in
         display-message)
-            local format="${5:-}"
+            # 两种调用形态：display-message -pt <pane> -p '<fmt>'（fmt 在 $5）与
+            # display-message -p '<fmt>'（fmt 在 $3，tmux-ai-esc 用）
+            local format="${5:-${3:-}}"
             case "$format" in
                 *'@ai_pane_status'*) [ -f "$FAKE_TMUX_DIR/pane-status" ] && command cat "$FAKE_TMUX_DIR/pane-status" ;;
                 *'session_name'*) printf '%s\n' 'test:1.1' ;;
+                '#{pane_id}') printf '%%1\n' ;;
             esac
             ;;
         set-option)
@@ -98,6 +101,9 @@ tmux() {
             esac
             ;;
         refresh-client)
+            ;;
+        send-keys)
+            # tmux-ai-esc 透传 Esc 用；测试不关心按键
             ;;
         *)
             printf 'unexpected tmux command: %s\n' "$*" >&2
@@ -231,9 +237,8 @@ assert_status '>' 'Approved Bash resumes processing'
 
 reset_state
 
-# 状态漂移诊断：审批态被降级为运行态时必须留 SUSPECT，供下次复现时定位事件。
-# 构造：两个 AskUserQuestion 并存，完成其一后另一个仍在等 → '?' 被降级为 '>'
-# （Post 侧当前未做 live 保护，此用例固定该行为的可观测性）。
+# 两个 AskUserQuestion 并存：完成其一后另一个仍在等 → 必须保持 '?'。
+# PermissionRequest 绑定到最近的同工具 Pre（q2）；q1 完成不能解除 q2 的审批态。
 : > "$TMUX_AI_LOG_FILE"
 run_event claude PreToolUse '{"session_id":"drift","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
 run_event claude PreToolUse '{"session_id":"drift","tool_use_id":"q2","tool_name":"AskUserQuestion"}'
@@ -241,8 +246,10 @@ run_event claude PermissionRequest '{"session_id":"drift","tool_name":"AskUserQu
 assert_status '?' 'Drift case: AskUserQuestion enters ? state'
 assert_log_absent 'SUSPECT' 'Entering ? state raises no SUSPECT'
 run_event claude PostToolUse '{"session_id":"drift","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
-assert_status '>' 'Drift case: completing one question downgrades ? (current behavior)'
-assert_log_contains 'SUSPECT: downgrade' 'Downgrade with another AskUserQuestion pending is logged'
+assert_status '?' 'Completing one question keeps the other pending ? state'
+assert_log_absent 'SUSPECT' 'Preserving ? for the remaining question raises no SUSPECT'
+run_event claude PostToolUse '{"session_id":"drift","tool_use_id":"q2","tool_name":"AskUserQuestion"}'
+assert_status '>' 'Completing all questions resumes processing'
 
 # 正常路径不误报：唯一的 AskUserQuestion 完成后降级属设计行为
 reset_state
@@ -252,6 +259,133 @@ run_event claude PermissionRequest '{"session_id":"drift-ok","tool_name":"AskUse
 run_event claude PostToolUse '{"session_id":"drift-ok","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
 assert_status '>' 'Normal AskUserQuestion completion resumes processing'
 assert_log_absent 'SUSPECT' 'Normal completion raises no SUSPECT'
+
+reset_state
+
+# 本次回归（2026-10-24）：AUQ 等待期间并行 Bash 的 PostToolUse 不得把 ? 降级为 >。
+# PermissionRequest 与 PreToolUse 的 tool_input 键序不同，验证 jq -S 规范化后仍精确绑定。
+: > "$TMUX_AI_LOG_FILE"
+run_event claude PreToolUse '{"session_id":"par-auq","tool_use_id":"q1","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q1","header":"h"}]}}'
+run_event claude PermissionRequest '{"session_id":"par-auq","tool_name":"AskUserQuestion","tool_input":{"questions":[{"header":"h","question":"Q1"}]}}'
+assert_status '?' 'AUQ permission enters ? state'
+run_event claude PreToolUse '{"session_id":"par-auq","tool_use_id":"b1","tool_name":"Bash","tool_input":{"command":"ls"}}'
+run_event claude PostToolUse '{"session_id":"par-auq","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '?' 'Parallel Bash PostToolUse must not downgrade ?'
+assert_log_absent 'SUSPECT' 'No SUSPECT while AUQ still pending'
+run_event claude PostToolUse '{"session_id":"par-auq","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
+assert_status '>' 'Completing AUQ resumes processing'
+
+reset_state
+
+# 并行同工具不同参数：哈希精确绑定，完成另一个调用不能解除审批态。
+run_event claude PreToolUse '{"session_id":"par-bash","tool_use_id":"a","tool_name":"Bash","tool_input":{"command":"cmd1"}}'
+run_event claude PreToolUse '{"session_id":"par-bash","tool_use_id":"b","tool_name":"Bash","tool_input":{"command":"cmd2"}}'
+run_event claude PermissionRequest '{"session_id":"par-bash","tool_name":"Bash","tool_input":{"command":"cmd2"}}'
+assert_status '!' 'Bash permission enters ! state'
+run_event claude PostToolUse '{"session_id":"par-bash","tool_use_id":"a","tool_name":"Bash"}'
+assert_status '!' 'Completing the other Bash call keeps !'
+run_event claude PostToolUse '{"session_id":"par-bash","tool_use_id":"b","tool_name":"Bash"}'
+assert_status '>' 'Completing the approved Bash call resumes processing'
+
+reset_state
+
+# PermReq 先于 PreToolUse（async 乱序）：sentinel 在 Pre 到达时反向绑定为真实 id。
+run_event claude PermissionRequest '{"session_id":"rev","tool_name":"AskUserQuestion","tool_input":{"questions":[{"q":1}]}}'
+assert_status '?' 'Permission before Pre enters ?'
+run_event claude PreToolUse '{"session_id":"rev","tool_use_id":"q1","tool_name":"AskUserQuestion","tool_input":{"questions":[{"q":1}]}}'
+assert_status '?' 'Late AUQ Pre keeps ?'
+grep -q '^q1 ? AskUserQuestion' "$TMUX_AI_STATUS_DIR/_1/pending-perm" || {
+    printf 'FAIL: reverse binding did not rewrite sentinel\n' >&2
+    printf '  pending-perm: [%s]\n' "$(cat "$TMUX_AI_STATUS_DIR"/_1/pending-perm 2>/dev/null)" >&2
+    exit 1
+}
+run_event claude PostToolUse '{"session_id":"rev","tool_use_id":"q1","tool_name":"AskUserQuestion"}'
+assert_status '>' 'Reverse-bound AUQ completion resumes processing'
+
+reset_state
+
+# 反向绑定歧义：hash 不等的 Pre 不得误绑 sentinel，审批态保守保持到 Stop。
+run_event claude PermissionRequest '{"session_id":"rev2","tool_name":"Bash","tool_input":{"command":"cmd1"}}'
+assert_status '!' 'Permission before Pre enters !'
+run_event claude PreToolUse '{"session_id":"rev2","tool_use_id":"b1","tool_name":"Bash","tool_input":{"command":"cmd2"}}'
+assert_status '!' 'Mismatched hash keeps ! without binding'
+run_event claude PostToolUse '{"session_id":"rev2","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '!' 'Completing unrelated tool keeps !'
+run_event claude Stop '{"session_id":"rev2"}'
+assert_status '-' 'Stop clears conservative sentinel'
+
+reset_state
+
+# 统一守卫独立生效：live ? + pending-pre 里的 AUQ 证据，无关 Post 不得降级。
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf '%s' '?' > "$FAKE_TMUX_DIR/pane-status"
+printf 'q1 AskUserQuestion - %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+: > "$TMUX_AI_LOG_FILE"
+run_event claude PostToolUse '{"session_id":"guard","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '?' 'Guard preserves live ? with AUQ evidence'
+assert_log_contains 'GUARD: preserved' 'Guard preservation is logged'
+
+reset_state
+
+# 旧格式兼容：3 列 pending-pre / 4 列 pending-perm 仍可作为审批证据。
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf 'old1 AskUserQuestion %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+printf 'old1 ? AskUserQuestion %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-perm"
+printf '%s' '?' > "$FAKE_TMUX_DIR/pane-status"
+: > "$TMUX_AI_LOG_FILE"
+run_event claude PostToolUse '{"session_id":"compat","tool_use_id":"b1","tool_name":"Bash"}'
+assert_status '?' 'Legacy 3/4-column pending files still preserve ?'
+assert_log_absent 'SUSPECT' 'Legacy evidence path raises no SUSPECT'
+
+reset_state
+
+# Notification denied 是显式重置：写 '-' 并清掉审批证据。
+run_event claude PermissionRequest '{"session_id":"deny","tool_name":"Bash","tool_input":{"command":"x"}}'
+assert_status '!' 'Permission enters ! state'
+run_event claude Notification '{"session_id":"deny","notification_type":"permission_prompt","message":"Permission denied by user"}'
+assert_status '-' 'Denied notification clears !'
+[ -s "$TMUX_AI_STATUS_DIR/_1/pending-perm" ] && {
+    printf 'FAIL: denied notification must clear pending-perm\n' >&2
+    exit 1
+}
+
+reset_state
+
+# 清理保护：审批证据 + monitor seen 时，缺少 pane 映射也不能清掉 ?。
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf '%s' '?' > "$FAKE_TMUX_DIR/pane-status"
+printf 'q1 AskUserQuestion - %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+: > "$TMUX_AI_LOG_FILE"
+FAKE_SEEN_CLAUDE=1 run_event claude _refresh '{}'
+assert_status '?' 'Cleanup preserves ? with evidence and monitor seen'
+assert_log_contains 'STALE: preserved' 'Cleanup preservation is logged'
+
+reset_state
+
+# 进程确实不存在时仍允许清理（审批不可能继续等待）。
+mkdir -p "$TMUX_AI_STATUS_DIR/_1"
+printf '%s' '?' > "$FAKE_TMUX_DIR/pane-status"
+printf 'q1 AskUserQuestion - %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+run_event claude _refresh '{}'
+assert_status '' 'Cleanup clears ? when no process and no mapping'
+
+reset_state
+
+# Esc 与事件串行化：事件锁被占用时不写 '-'、不清 pending（仅透传 Esc）。
+printf '%s' '?' > "$FAKE_TMUX_DIR/pane-status"
+mkdir -p "$TMUX_AI_STATUS_DIR/_1/.event-lock"
+printf '%s' "$$" > "$TMUX_AI_STATUS_DIR/_1/.event-lock/owner"
+printf 'q1 AskUserQuestion - %s\n' "$(date +%s)" > "$TMUX_AI_STATUS_DIR/_1/pending-pre"
+: > "$TMUX_AI_LOG_FILE"
+TMUX_PANE='%1' TMUX='test' bash "$ROOT/scripts/tmux-ai-esc"
+assert_status '?' 'Esc with locked event keeps ? state'
+[ -s "$TMUX_AI_STATUS_DIR/_1/pending-pre" ] || {
+    printf 'FAIL: Esc under lock contention must not clear pending\n' >&2
+    exit 1
+}
+assert_log_contains 'ESC: event lock timeout' 'Esc lock skip is logged'
+# 清掉测试构造的锁，避免影响后续用例（真实场景由持锁进程退出释放）
+rm -rf "$TMUX_AI_STATUS_DIR/_1/.event-lock"
 
 reset_state
 
@@ -472,7 +606,8 @@ if _cleanup_stale_panes; then :; fi
     || { echo "FAIL: cleanup 应只取一次进程快照" >&2; exit 1; }
 
 # PermissionRequest 锁超时降级：事件锁被占用（owner 活着、锁新鲜）时，
-# PermReq 应无锁写 ! / ?，且不落 pending 文件、不写 pane 映射、不跑清理。
+# PermReq 应无锁写 ! / ?，并追加一条 sentinel 作为审批证据（供写盘总闸守护），
+# 但不得写 pane 映射、不得跑清理。
 # 其他事件（PreToolUse）超时丢弃、不写。
 # 注意：降级路径实测耗时 = 锁重试预算 ~2s，用例需容忍该延迟。
 permreq_downgrade() {  # $1=期望状态 $2=工具名
@@ -487,8 +622,10 @@ permreq_downgrade() {  # $1=期望状态 $2=工具名
         run_event claude PermissionRequest "{\"session_id\":\"dg-s\",\"tool_name\":\"$2\"}"
     fi
     assert_status "$permreq_downgrade_expected" "PermReq downgrade writes $1 under lock contention"
-    [ ! -f "$TMUX_AI_STATUS_DIR/_1/pending-perm" ] \
-        || { echo "FAIL: 降级不应写 pending-perm" >&2; exit 1; }
+    if [ -f "$TMUX_AI_STATUS_DIR/_1/pending-perm" ]; then
+        grep -q '^__unmatched_permission__' "$TMUX_AI_STATUS_DIR/_1/pending-perm" \
+            || { echo "FAIL: 降级只应写 sentinel 审批证据" >&2; exit 1; }
+    fi
     [ ! -f "$TMUX_AI_STATUS_DIR/_1/pane-dg-s" ] \
         || { echo "FAIL: 降级不应写 pane 映射（跳过 _save_pane_id）" >&2; exit 1; }
     [ ! -f "$TMUX_AI_STATUS_DIR/.stale-cleanup-ts" ] \

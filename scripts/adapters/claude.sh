@@ -11,6 +11,8 @@
 #   ADAPTER_HAS_SESSION_END   "true"|"false" 是否有 SessionEnd 事件
 #   ADAPTER_SESSION_START_TIMING  "immediate"|"deferred" SessionStart 时机
 #   ADAPTER_HOLD_UNMATCHED_PERMISSION "true"|"false" 无请求 ID 时是否保守保持审批态
+#   ADAPTER_PERMISSION_HASH_BINDING "true"|"false" 无 ID 审批是否按 tool_input 哈希精确绑定
+#                             （true 时 hash 已知且不等不误绑；false 时沿用同工具 LIFO）
 #   ADAPTER_INSTALLER         install 脚本绝对路径（供自修复/TUI 调用）
 #   adapter_check_integrity() hooks 是否完整注册本插件（返回 0=完整）
 #   adapter_check_detail()    check --json 明细 JSON 片段（可选实现；仅 install wrapper
@@ -35,8 +37,11 @@ ADAPTER_HOOKS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 ADAPTER_HAS_SESSION_END="true"
 # SessionStart 在 CLI 启动时立即触发（对比 codex 延迟到首个 turn）。
 ADAPTER_SESSION_START_TIMING="immediate"
-# Claude 当前串行执行工具，完成事件可解除无 ID 的审批态。
-ADAPTER_HOLD_UNMATCHED_PERMISSION="false"
+# Claude 的 PermissionRequest 不带 tool_use_id，但 PreToolUse/PostToolUse 都带
+# tool_name + 一致的 tool_input。核心用该指纹把它精确绑定到对应 PreToolUse，
+# 使 PostToolUse 能解除审批态；哈希缺失/不等时不误绑，写 sentinel 保守保持。
+ADAPTER_HOLD_UNMATCHED_PERMISSION="true"
+ADAPTER_PERMISSION_HASH_BINDING="true"
 
 # 自修复/TUI 调用的安装脚本
 ADAPTER_INSTALLER="${_LIB_DIR}/install-claude-hooks.sh"
