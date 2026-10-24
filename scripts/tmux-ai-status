@@ -110,8 +110,10 @@ _notification_implicit_status() {
 #   - prev 必须是 !/?，curr 必须是 >/-/空
 #   - PostToolUse(Failure) 解除自身审批态属正常路径，只有 pending-pre 仍有
 #     AskUserQuestion（问题还没答完）才算可疑
+#   - 显式重置事件（$3=1：Stop/UserPromptSubmit/Session*/Notification denied）
+#     的降级属设计行为，不记录；其余事件一律记录（含迟到通知/未知事件）
 _audit_status_downgrade() {
-    local prev="$1" curr="$2"
+    local prev="$1" curr="$2" explicit="${3:-0}"
     case "$prev" in "!"|"?") ;; *) return 0 ;; esac
     case "$curr" in ">"|"-"|"") ;; *) return 0 ;; esac
     [ -n "$TMUX_PANE" ] || return 0
@@ -123,7 +125,7 @@ _audit_status_downgrade() {
     case "$EVENT" in
         PreToolUse|PermissionResolved) ;;
         PostToolUse|PostToolUseFailure) [ "$auq" = "1" ] || return 0 ;;
-        *) return 0 ;;
+        *) [ "$explicit" = "1" ] && return 0 ;;
     esac
     _ai_log "SUSPECT: downgrade '${prev}' → '${curr:-·}' (auq_pending=${auq})"
 }
@@ -148,6 +150,9 @@ TOOL=""
 TOOL_USE_ID=""
 INPUT_DIGEST=""
 _log_flags=""
+# 显式重置事件（Stop/UserPromptSubmit/Session*/Notification denied）：允许降级
+# 审批态，写盘总闸不对它们做审批态守护。
+_explicit_reset=0
 
 case "$EVENT" in
   Notification)
@@ -164,7 +169,10 @@ case "$EVENT" in
             STATUS=$(_notification_implicit_status)
             ;;
           *"denied"*|*"cancelled"*|*"canceled"*|*"rejected"*)
-            # 显式重置：denial 表示等待已结束，无条件 idle（即便有 pending 残项）
+            # 显式重置：denial 表示等待已结束，无条件 idle（即便有 pending 残项）。
+            # 同时清掉审批证据，否则后续 re-derive 会把 !/? 拉回来。
+            _clear_pending
+            _explicit_reset=1
             STATUS="-"
             ;;
           *)
@@ -191,13 +199,16 @@ case "$EVENT" in
     # 铁律: PermissionRequest 立即写入,优先级最高。同时记入 pending-perm,
     # 保证后续乱序到达的 PreToolUse/PostToolUse 派生时仍守住 !/?
     [ -n "$TMUX_PANE" ] && tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$STATUS" 2>/dev/null || true
+    _perm_hash=$(_permission_input_hash "$TOOL" "$INPUT")
     if [ -n "$TOOL_USE_ID" ]; then
-        _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
+        _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL" "$_perm_hash"
     elif [ "${ADAPTER_HOLD_UNMATCHED_PERMISSION:-false}" = "true" ]; then
-        # Codex 的 PermissionRequest 无请求 ID，但紧邻的 Pre/PostToolUse 有同一个 ID。
-        # 优先绑定该 ID，让批准后的 PostToolUse 恢复处理中；无匹配项时才保守兜底。
-        _bind_pending_perm_to_pre "$STATUS" "$TOOL" || \
-            _add_pending_perm "__unmatched_permission__" "$STATUS" "$TOOL"
+        # 无请求 ID（Claude/Codex）：优先按 tool_name+tool_input 指纹精确绑定到
+        # 对应 PreToolUse，让批准后的 PostToolUse 精确解除；hash 缺失/不等时
+        # 严格模式不误绑，写唯一 sentinel 由写盘总闸保守保持到显式重置。
+        _bind_pending_perm_to_pre "$STATUS" "$TOOL" "$_perm_hash" || \
+            _add_pending_perm "__unmatched_permission__.$_perm_hash.$(date +%s).$$-$RANDOM" \
+                "$STATUS" "$TOOL" "$_perm_hash"
     fi
     ;;
   PermissionResolved)
@@ -214,7 +225,8 @@ case "$EVENT" in
     _tool_fields=$(printf '%s' "$INPUT" | jq -r '[(.tool_name // ""), (.tool_use_id // "")] | @tsv' 2>/dev/null)
     IFS=$'\t' read -r TOOL TOOL_USE_ID <<< "$_tool_fields"
     INPUT_DIGEST=$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null)
-    _add_pending_pre "$TOOL_USE_ID" "$TOOL"
+    _pre_hash=$(_permission_input_hash "$TOOL" "$INPUT")
+    _add_pending_pre "$TOOL_USE_ID" "$TOOL" "$_pre_hash"
     if [ "$_pending_pre_skipped" = "1" ]; then
         # Post/PostToolUseFailure 已处理同 id（乱序到达）：不重建 pending、不进入
         # 审批态（尤其 codex request_permissions 不得复活 !），保持已完成状态。
@@ -227,8 +239,12 @@ case "$EVENT" in
         done
         if [ "$_permission_pre_tool" = "1" ]; then
             STATUS="!"
-            _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL"
+            _add_pending_perm "$TOOL_USE_ID" "$STATUS" "$TOOL" "$_pre_hash"
         else
+            # PermReq 先于 Pre 到达时（async 乱序），按哈希/sentinel 反向绑定，
+            # 让后续 PostToolUse 能精确解除审批态。
+            _rebind_sentinel_to_pre "$TOOL_USE_ID" "$TOOL" "$_pre_hash" \
+                && _log_flags="BIND=reverse"
             # Claude 的 PermReq 不带 tool_use_id，派生看不到审批态；用 LIVE_STATUS 兜底。
             # Codex sentinel 和 OpenCode request ID 则会直接从 pending 集合派生。
             LIVE_STATUS=$(_current_pane_status)
@@ -257,10 +273,12 @@ case "$EVENT" in
     fi
     ;;
   UserPromptSubmit)
+    _explicit_reset=1
     _clear_pending
     STATUS=">"
     ;;
   Stop|StopFailure)
+    _explicit_reset=1
     # 判定: pending-perm 还有项 = 用户未批准被打断 → "-"; 否则 "✓"
     HAS_PERM=0
     if [ -n "$TMUX_PANE" ]; then
@@ -286,6 +304,7 @@ case "$EVENT" in
     fi
     ;;
   SessionStart)
+    _explicit_reset=1
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{source, model}' 2>/dev/null)
     STATUS="-"
     _clear_pending
@@ -297,6 +316,7 @@ case "$EVENT" in
     _maybe_repair_hooks
     ;;
   SessionEnd)
+    _explicit_reset=1
     INPUT_DIGEST=$(echo "$INPUT" | jq -c '{reason}' 2>/dev/null)
     if [ -z "$TMUX_PANE" ]; then
         _load_pane_id
@@ -365,41 +385,29 @@ fi
 _ai_log_event "$PREV_STATUS" "$STATUS" "$_log_flags" "$_log_tool_line" "$_log_input_line"
 
 if [ -n "$TMUX_PANE" ] && { [ -n "$TMUX" ] || command -v tmux &>/dev/null; }; then
-    # 写入前重新读取 pending，避免并发事件用过期结果覆盖仍有效的审批态。
-    case "$EVENT" in
-        PreToolUse)
-            # 只有 pending-perm 派生的真实审批态（codex/opencode 有 ID）才有覆写权。
-            # pending-pre 派生的 '>' 不得推翻 live 的 !/?：Claude 的 PermissionRequest
-            # 没有 tool_use_id，审批态只存在于 live；AskUserQuestion/普通工具的
-            # PreToolUse 因 async 乱序晚于 PermissionRequest 到达时，其 pending-pre
-            # 项会长期遮挡审批态（AskUserQuestion 要等用户答完才有 PostToolUse）。
-            if _derive_status_from_pending && { [ "$DERIVED" = "!" ] || [ "$DERIVED" = "?" ]; }; then
-                STATUS="$DERIVED"
-            else
-                _live_final=$(tmux display-message -pt "$TMUX_PANE" -p '#{@ai_pane_status}' 2>/dev/null)
-                case "$_live_final" in
-                    "!"|"?") STATUS="$_live_final" ;;
-                    *) if [ -n "$DERIVED" ]; then STATUS="$DERIVED"; fi ;;
-                esac
-            fi
-            ;;
-        PostToolUse|PostToolUseFailure|PermissionResolved)
-            if _derive_status_from_pending; then
-                STATUS="$DERIVED"
-            fi
-            ;;
-    esac
+    # 写入前重新读取 pending + live，统一守卫审批态：
+    #   1) pending 派生出的 !/?（精确配对）优先级最高；
+    #   2) live 为 !/?、本次要写 >/-/空、且存在审批证据 → 保持 live。这样
+    #      Pre/Post/PostFailure/PermResolved/Notification 的任意乱序都不会把
+    #      「正在等用户」降级；Claude 的 PermissionRequest 没有 tool_use_id，
+    #      审批态只能靠 live + 证据（pending-perm / 未答完的 AskUserQuestion）。
+    #   3) 显式重置事件（Stop/UserPromptSubmit/Session*/Notification denied）豁免。
+    # 批准/回答后的恢复路径不受影响：PostToolUse 先清掉同 id 的 pre+perm，
+    # 证据随之消失，守卫不再触发，状态正常回落为 >。
+    _live_final=$(tmux display-message -pt "$TMUX_PANE" -p '#{@ai_pane_status}' 2>/dev/null)
+    if _derive_status_from_pending && { [ "$DERIVED" = "!" ] || [ "$DERIVED" = "?" ]; }; then
+        STATUS="$DERIVED"
+    elif [ "$_explicit_reset" != "1" ] \
+         && { [ "$_live_final" = "!" ] || [ "$_live_final" = "?" ]; } \
+         && { [ -z "$STATUS" ] || [ "$STATUS" = ">" ] || [ "$STATUS" = "-" ]; } \
+         && _has_pending_approval_evidence "$_live_final"; then
+        _ai_log "GUARD: preserved '$_live_final' (event=$EVENT evidence=$EVIDENCE_SRC)"
+        STATUS="$_live_final"
+        _log_flags="${_log_flags:+$_log_flags }GUARD=preserved"
+    fi
     # 诊断（只记录、不改写状态）：审批态被降级为运行态时留证。
-    # claude 的 PermissionRequest 无 tool_use_id，审批态只存在于 pane option，
-    # 任何把它写成 > / - / 空的事件都可能是回归（2026-10-22 的 PreToolUse 覆写
-    # 正是此形态，当时无埋点只能靠推演定位）。正常路径排除：PostToolUse 解除自身
-    # 审批态时 pending-pre 里不会再有 AskUserQuestion；Stop/Notification/会话边界
-    # 的降级属设计行为（不在本 case 内）。
-    case "$EVENT" in
-        PreToolUse|PostToolUse|PostToolUseFailure|PermissionResolved)
-            _audit_status_downgrade "$PREV_STATUS" "$STATUS"
-            ;;
-    esac
+    # 显式重置事件的降级属设计行为，调用点通过 $3 豁免。
+    _audit_status_downgrade "$PREV_STATUS" "$STATUS" "$_explicit_reset"
     tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$STATUS" 2>/dev/null || true
     build_all_status
     tmux set-option -g @ai_all_status "$ALL" 2>/dev/null || true

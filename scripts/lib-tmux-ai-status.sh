@@ -480,10 +480,12 @@ build_all_status() {
 
 # --- Pending 集合管理（PreToolUse / PermissionRequest 配对）---
 # 状态判定基于两个 per-pane 集合（另有一个乱序辅助集合）:
-#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id（行 "id tool ts"）
-#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id（行 "id mark tool ts"）
+#   pending-pre   : 已 PreToolUse 未 PostToolUse 的 tool_use_id（行 "id tool hash ts"）
+#   pending-perm  : 已 PermissionRequest 未配对的 tool_use_id（行 "id mark tool hash ts"）
 #   recent-post   : 已 PostToolUse 完成的 tool_use_id（行 "id ts"）
 #                   Post 先于 Pre 到达时，迟到的 Pre 据此跳过写入，避免状态卡 ">"
+# hash = tool_name + 规范化 tool_input 的指纹，用于把 Claude 无 tool_use_id 的
+# PermissionRequest 精确绑定到对应的 PreToolUse；旧格式行没有 hash 列时读作 "-"。
 # 派生规则:
 #   perm 含 "!"   → STATUS=!
 #   perm 含 "?"   → STATUS=?
@@ -499,19 +501,72 @@ _pending_done_path() { echo "$(_pane_dir)/recent-post"; }
 _lock_dir()          { echo "$(_pane_dir)/.lock"; }
 _event_lock_dir()    { echo "$(_pane_dir)/.event-lock"; }
 
+# 按 pane_id 推导状态目录/文件路径（_cleanup_stale_panes 等跨 pane 场景用）。
+_pane_dir_by_id()       { printf '%s/%s' "$_STATUS_DIR" "${1//[^a-zA-Z0-9]/_}"; }
+_pending_pre_path_for() { printf '%s/pending-pre' "$(_pane_dir_by_id "$1")"; }
+_pending_perm_path_for(){ printf '%s/pending-perm' "$(_pane_dir_by_id "$1")"; }
+
+# tool_name + 规范化 tool_input 的短指纹（16 hex）。PermissionRequest 与
+# PreToolUse 的 tool_input 是同一个对象，规范化后应逐字节一致；任一侧缺失时
+# 返回 "-"，调用方退化为同工具 LIFO 绑定。哈希命令按 shasum → sha256sum →
+# md5 → md5sum → sha1sum 探测，全缺时恒返回 "-"（绑定仍可用）。
+_HASH_CMD=""
+_HASH_CMD_DONE=""
+_permission_input_hash() {  # $1=tool_name $2=原始 hook JSON
+    local tool="$1" canon
+    canon=$(printf '%s' "$2" | jq -S -c 'if (.tool_input? != null) then .tool_input else empty end' 2>/dev/null)
+    [ -n "$canon" ] || { printf '%s' "-"; return; }
+    if [ -z "$_HASH_CMD_DONE" ]; then
+        if command -v shasum >/dev/null 2>&1; then _HASH_CMD="shasum -a 256"
+        elif command -v sha256sum >/dev/null 2>&1; then _HASH_CMD="sha256sum"
+        elif command -v md5 >/dev/null 2>&1; then _HASH_CMD="md5 -q"
+        elif command -v md5sum >/dev/null 2>&1; then _HASH_CMD="md5sum"
+        elif command -v sha1sum >/dev/null 2>&1; then _HASH_CMD="sha1sum"
+        fi
+        _HASH_CMD_DONE=1
+    fi
+    [ -n "$_HASH_CMD" ] || { printf '%s' "-"; return; }
+    # shellcheck disable=SC2086  # 命令可能带参数（shasum -a 256 / md5 -q）
+    printf '%s\n%s' "$tool" "$canon" | $_HASH_CMD 2>/dev/null | awk '{print $1}' | cut -c1-16
+}
+
+# 审批证据：写盘总闸/清理路径用。$1=live 标记（!/?），$2=可选 pane_id。
+#   1) pending-perm 非空 → 仍有未解除的审批
+#   2) live 为 '?' 且 pending-pre 里有 AskUserQuestion 项 → 问题还没收到 Post
+# 命中时设置 EVIDENCE_SRC 供日志/测试断言。
+_has_pending_approval_evidence() {  # $1=mark [$2=pane_id]
+    local mark="$1" pane="${2:-}" perm pre
+    if [ -n "$pane" ]; then
+        perm=$(_pending_perm_path_for "$pane")
+        pre=$(_pending_pre_path_for "$pane")
+    else
+        perm=$(_pending_perm_path)
+        pre=$(_pending_pre_path)
+    fi
+    [ -s "$perm" ] && { EVIDENCE_SRC="pending-perm"; return 0; }
+    case "$mark" in
+        "?") awk '$2=="AskUserQuestion"{f=1;exit} END{exit !f}' "$pre" 2>/dev/null \
+                 && { EVIDENCE_SRC="auq-pre"; return 0; } ;;
+    esac
+    return 1
+}
+
 # 串行化同 pane 的完整事件处理，避免 pending 变更后、tmux option 写入前被其他 hook
 # 插入，导致较晚写入的过期派生结果覆盖审批态。使用独立锁，允许事件内部继续使用 .lock。
+# $1 可选最大重试次数（默认 200 ≈ 2s）；Esc 等交互路径用短预算。
 _acquire_event_lock() {
     [ -n "$TMUX_PANE" ] || return 1
     _ensure_pane_dir
+    local max="${1:-200}"
     local lock; lock=$(_event_lock_dir)
     # 重试预算 ~2s。sleep 0.01 不被支持时退化为无 sleep 自旋（mkdir+stat 系统调用，
     # ~几百 ms 耗尽预算）——绝不能回落 sleep 1：200×1s 病态忙等，而 sync hook 的
     # 上游 timeout 是 600s，不会打断它（实测 macOS/Linux sleep 均支持小数，此为
     # 其他平台兜底）。时间基准用 $SECONDS（builtin，零 fork；date +%s 每迭代一次 fork）。
     local _start=$SECONDS
-    local i
-    for i in {1..200}; do
+    local i=0
+    while [ "$i" -lt "$max" ]; do
+        i=$((i + 1))
         if mkdir "$lock" 2>/dev/null; then
             echo "$$" > "$lock/owner"
             return 0
@@ -543,11 +598,12 @@ _release_event_lock() {
 # 事件锁超时时 PermissionRequest 的无锁降级写入（仅 !/? 这类最强状态可无锁写，
 # 调用点见 tmux-ai-status 锁段落的原则注释）。
 # 最小动作集：一次 jq 取 tool_name → AskUserQuestion ? / 其他 ! → set-option →
-# 日志标记 DOWNGRADE。刻意不碰 pending 文件（不加剧持锁者正在进行的文件竞争）、
+# 日志标记 DOWNGRADE。随后无锁 append 一条审批证据（pending-perm）：锁已被其他
+# 事件持有，_acquire_lock 必然超时；单行 append 是 O_APPEND 原子写，不竞争 .lock。
 # 不跑 _save_pane_id（锁外写 pane 映射有复活已清映射的风险）、不做 build_all_status
 # （monitor 每秒重建聚合，降级值 ≤1s 内可见）。
 _downgrade_permission_request() {  # $1=原始 stdin JSON
-    local input="$1" tool status
+    local input="$1" tool status hash
     tool=$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)
     if [ "$tool" = "AskUserQuestion" ]; then
         status="?"
@@ -555,8 +611,13 @@ _downgrade_permission_request() {  # $1=原始 stdin JSON
         status="!"
     fi
     tmux set-option -pt "$TMUX_PANE" @ai_pane_status "$status" 2>/dev/null || true
+    hash=$(_permission_input_hash "$tool" "$input")
+    printf '%s.%s.%s.%s-%s %s %s %s %s\n' \
+        "__unmatched_permission__" "$hash" "$(date +%s)" "$$" "$RANDOM" \
+        "$status" "${tool:-?}" "$hash" "$(date +%s)" \
+        >> "$(_pending_perm_path)" 2>/dev/null || true
     _pane_loc=""
-    _ai_log "PermReq DOWNGRADE: event lock timeout, unlocked write '$status' (tool=${tool:-?})"
+    _ai_log "PermReq DOWNGRADE: event lock timeout, unlocked write '$status' (tool=${tool:-?} hash=${hash})"
 }
 
 # Per-pane mkdir mutex。5s stale 强夺。retry 20 × 10ms ≈ 200ms 上限。
@@ -638,12 +699,12 @@ _remove_pending_id_locked() {  # $1=id
     fi
 }
 
-# 在锁内追加一行到 pending-pre。$1=tool_use_id $2=tool_name
+# 在锁内追加一行到 pending-pre。$1=tool_use_id $2=tool_name [$3=hash]
 # Post 已先到达的同 id（recent-post 窗口内）→ 跳过并置 _pending_pre_skipped=1，
 # 调用方据此保持已完成状态（不能把迟到的 Pre 重新抬成处理中/审批态）。
 _pending_pre_skipped=0
 _add_pending_pre() {
-    local id="$1" tool="$2" pre
+    local id="$1" tool="$2" hash="${3:--}" pre
     _pending_pre_skipped=0
     [ -z "$id" ] && return 0
     _acquire_lock || return 0
@@ -653,7 +714,7 @@ _add_pending_pre() {
         # 防御：Post 的清理曾因 IO/锁失败残留同 id 时，顺手清掉
         _remove_pending_id_locked "$id"
     elif ! awk -v id="$id" '$1 == id { found = 1; exit } END { exit !found }' "$pre" 2>/dev/null; then
-        printf '%s %s %s\n' "$id" "${tool:-?}" "$(date +%s)" >> "$pre"
+        printf '%s %s %s %s\n' "$id" "${tool:-?}" "$hash" "$(date +%s)" >> "$pre"
     fi
     _release_lock
     if [ "$_pending_pre_skipped" = "1" ]; then
@@ -661,42 +722,113 @@ _add_pending_pre() {
     fi
 }
 
-# 在锁内追加一行到 pending-perm。$1=tool_use_id $2=! 或 ? $3=tool_name
+# 在锁内追加一行到 pending-perm。$1=id $2=! 或 ? $3=tool_name [$4=hash]
+# 同 id 已存在不重复（并行审批的 id 各不相同，不能按 tool/hash 合并）。
 _add_pending_perm() {
-    local id="$1" mark="$2" tool="$3"
+    local id="$1" mark="$2" tool="$3" hash="${4:--}"
     [ -z "$id" ] && return
     _acquire_lock || return
     local f; f=$(_pending_perm_path)
     # 首列精确比较（id 可能含 BRE 元字符）
     if ! awk -v id="$id" '$1 == id { found = 1; exit } END { exit !found }' "$f" 2>/dev/null; then
-        printf '%s %s %s %s\n' "$id" "$mark" "${tool:-?}" "$(date +%s)" >> "$f"
+        printf '%s %s %s %s %s\n' "$id" "$mark" "${tool:-?}" "$hash" "$(date +%s)" >> "$f"
     fi
     _release_lock
 }
 
-# PermissionRequest 缺少 ID 时，将它绑定到最近的同工具、尚未绑定权限的 PreToolUse。
-# Codex 的 Pre/PostToolUse 仍携带同一个 tool_use_id，因此批准后的 PostToolUse 可精确清除。
+# PermissionRequest 缺少 ID 时绑定到候选 PreToolUse。
+#   $1=mark $2=tool [$3=请求侧 hash]
+# 严格模式（ADAPTER_PERMISSION_HASH_BINDING=true，Claude）：
+#   - 同 tool、未绑定、300s 内的 Pre 中，hash 完全相等的优先（取最新）；
+#   - 请求或候选 hash 为 "-"（缺失）时允许同工具 LIFO 兜底；
+#   - 双方 hash 已知且不等 → 不绑定（交给唯一 sentinel 保守保持）。
+# 非严格模式（Codex/OpenCode）：保持原有同工具 LIFO 语义。
+# 成功时 BOUND_PERMISSION_ID=真实 tool_use_id，并追加 5 列 perm 行。
 _bind_pending_perm_to_pre() {
-    local mark="$1" tool="$2"
+    local mark="$1" tool="$2" req_hash="${3:--}"
+    local strict="${ADAPTER_PERMISSION_HASH_BINDING:-false}"
     BOUND_PERMISSION_ID=""
     _acquire_lock || return 1
     local pre; pre=$(_pending_pre_path)
     local perm; perm=$(_pending_perm_path)
-    local id pending_tool rest
-    if [ -f "$pre" ]; then
-        while read -r id pending_tool rest; do
-            [ -n "$id" ] || continue
-            [ "$pending_tool" = "${tool:-?}" ] || continue
-            if ! awk -v id="$id" '$1 == id { found=1; exit } END { exit !found }' "$perm" 2>/dev/null; then
-                BOUND_PERMISSION_ID="$id"
-            fi
-        done < "$pre"
-    fi
-    if [ -n "$BOUND_PERMISSION_ID" ]; then
-        echo "${BOUND_PERMISSION_ID} ${mark} ${tool:-?} $(date +%s)" >> "$perm"
+    local choice
+    choice=$(awk -v perm="$perm" -v tool="${tool:-?}" -v req_hash="$req_hash" \
+                -v strict="$strict" -v now="$(date +%s)" '
+        BEGIN { while ((getline line < perm) > 0) { split(line, p, " "); bound[p[1]] = 1 } }
+        {
+            id = $1
+            if (id == "" || $2 != tool || (id in bound)) next
+            if (NF >= 4) { h = $3; ts = $NF } else { h = "-"; ts = $3 }
+            if (ts ~ /^[0-9]+$/ && (now - ts) > 300) next
+            if (req_hash != "-" && h != "-" && h == req_hash) {
+                if (exact == "" || (ts + 0) >= exact_ts) { exact = id; exact_ts = ts + 0 }
+            } else if (h == "-") {
+                if (unk == "" || (ts + 0) >= unk_ts) { unk = id; unk_ts = ts + 0 }
+            }
+            if (any == "" || (ts + 0) >= any_ts) { any = id; any_ts = ts + 0 }
+        }
+        END {
+            if (exact != "") { print "exact " exact; exit }
+            if (strict == "true") {
+                if (req_hash == "-") { if (any != "") print "tool-lifo " any }
+                else if (unk != "") print "tool-lifo " unk
+            } else if (any != "") {
+                print "tool-lifo " any
+            }
+        }' "$pre" 2>/dev/null)
+    if [ -n "$choice" ]; then
+        BOUND_PERMISSION_ID="${choice#* }"
+        printf '%s %s %s %s %s\n' "$BOUND_PERMISSION_ID" "$mark" "${tool:-?}" "$req_hash" "$(date +%s)" >> "$perm"
+        _ai_log "BIND: ${choice%% *} id=${BOUND_PERMISSION_ID} tool=${tool:-?} hash=${req_hash}"
+    else
+        _ai_log "BIND: none tool=${tool:-?} hash=${req_hash} (sentinel)"
     fi
     _release_lock
     [ -n "$BOUND_PERMISSION_ID" ]
+}
+
+# PreToolUse 迟到（PermissionRequest 已写 sentinel）时反向绑定：把同 tool 的
+# sentinel 行首列替换为真实 tool_use_id，使之后的 PostToolUse 能精确解除。
+#   $1=id $2=tool [$3=hash]
+# hash 已知：只替换 hash 相等的 sentinel；hash 未知：仅当同 tool sentinel 唯一。
+# 替换失败返回 1，sentinel 保守保持到显式重置。
+_rebind_sentinel_to_pre() {
+    local id="$1" tool="$2" req_hash="${3:--}"
+    [ -n "$id" ] || return 1
+    _acquire_lock || return 1
+    local perm; perm=$(_pending_perm_path)
+    local hit=1
+    if [ -f "$perm" ]; then
+        local lineno
+        lineno=$(awk -v tool="${tool:-?}" -v req_hash="$req_hash" '
+            BEGIN { count = 0; pick = 0; pick_exact = 0 }
+            index($1, "__unmatched_permission__") == 1 && $3 == tool {
+                count++
+                h = (NF >= 5 ? $4 : "-")
+                if (req_hash != "-" && h == req_hash) {
+                    if (pick_exact == 0) { pick = NR; pick_exact = 1 }
+                } else if (req_hash == "-" && pick == 0) {
+                    pick = NR
+                }
+            }
+            END {
+                if (req_hash != "-") { if (pick_exact == 1) print pick }
+                else if (count == 1) print pick
+            }' "$perm" 2>/dev/null)
+        if [ -n "$lineno" ]; then
+            if awk -v line="$lineno" -v id="$id" '
+                    NR == line { $1 = id; print; next } { print }' "$perm" > "${perm}.tmp" 2>/dev/null \
+               && mv -f "${perm}.tmp" "$perm" 2>/dev/null; then
+                hit=0
+                _ai_log "BIND: reverse-ok id=$id tool=${tool:-?} hash=$req_hash"
+            else
+                rm -f "${perm}.tmp" 2>/dev/null
+            fi
+        fi
+    fi
+    [ "$hit" = "0" ] || _ai_log "BIND: reverse-none id=$id tool=${tool:-?} hash=$req_hash"
+    _release_lock
+    return "$hit"
 }
 
 # 从 pending-pre 和 pending-perm 同时移除 id（配对清除）。
@@ -993,6 +1125,15 @@ _cleanup_stale_panes() {
                 local sanitized="${pane_id//[^a-zA-Z0-9]/_}"
                 local pane_dir="${_STATUS_DIR}/${sanitized}"
                 if ! echo " $active_panes " | grep -q " $pane_id "; then
+                    # 审批态（!/?）有 pending 证据且工具进程仍存活/被 monitor 见过：
+                    # 不能因为 pane 映射缺失就清掉「正在等用户」的状态。
+                    if { [ "$pane_status" = "!" ] || [ "$pane_status" = "?" ]; } \
+                       && _has_pending_approval_evidence "$pane_status" "$pane_id" \
+                       && { _pane_has_ai_process "$pane_id" "$ps_snap" \
+                            || case "$_seen_flags" in *1*) true ;; *) false ;; esac; }; then
+                        _ai_log "STALE: preserved '$pane_status' on $pane_id (evidence=$EVIDENCE_SRC, no pane mapping)"
+                        continue
+                    fi
                     _ai_log "STALE: clearing orphaned '$pane_status' on $pane_id"
                     tmux set-option -pt "$pane_id" @ai_pane_status "" 2>/dev/null || true
                     rm -rf "$pane_dir" 2>/dev/null

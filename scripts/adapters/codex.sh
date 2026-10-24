@@ -29,6 +29,8 @@ ADAPTER_SESSION_START_TIMING="deferred"
 # PermissionRequest 不含 tool_use_id，而 Codex 支持并行工具。核心会将请求绑定到同工具的
 # pending PreToolUse ID；无法绑定时用 sentinel 保持 `!` 到 turn/session 边界。
 ADAPTER_HOLD_UNMATCHED_PERMISSION="true"
+# Codex 的审批不按 tool_input 哈希绑定（保持同工具 LIFO），避免改变既有语义。
+ADAPTER_PERMISSION_HASH_BINDING="false"
 # request_permissions 直接弹出 Codex 权限 UI，但上游不会发送 PermissionRequest hook。
 # 它仍发送可配对的 PreToolUse/PostToolUse，因此可在 PreToolUse 阶段精确进入审批态。
 ADAPTER_PERMISSION_PRE_TOOL_NAMES="request_permissions"
