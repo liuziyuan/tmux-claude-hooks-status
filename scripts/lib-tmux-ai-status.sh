@@ -799,8 +799,9 @@ _rebind_sentinel_to_pre() {
     local perm; perm=$(_pending_perm_path)
     local hit=1
     if [ -f "$perm" ]; then
-        local lineno
-        lineno=$(awk -v tool="${tool:-?}" -v req_hash="$req_hash" '
+        local out lineno
+        # 输出三态：ok <line> / none（有同 tool sentinel 但 hash 不匹配）/ 空（无 sentinel）
+        out=$(awk -v tool="${tool:-?}" -v req_hash="$req_hash" '
             BEGIN { count = 0; pick = 0; pick_exact = 0 }
             index($1, "__unmatched_permission__") == 1 && $3 == tool {
                 count++
@@ -812,21 +813,27 @@ _rebind_sentinel_to_pre() {
                 }
             }
             END {
-                if (req_hash != "-") { if (pick_exact == 1) print pick }
-                else if (count == 1) print pick
+                if (req_hash != "-") { if (pick_exact == 1) { print "ok " pick; exit } }
+                else if (count == 1) { print "ok " pick; exit }
+                if (count > 0) print "none"
             }' "$perm" 2>/dev/null)
-        if [ -n "$lineno" ]; then
-            if awk -v line="$lineno" -v id="$id" '
-                    NR == line { $1 = id; print; next } { print }' "$perm" > "${perm}.tmp" 2>/dev/null \
-               && mv -f "${perm}.tmp" "$perm" 2>/dev/null; then
-                hit=0
-                _ai_log "BIND: reverse-ok id=$id tool=${tool:-?} hash=$req_hash"
-            else
-                rm -f "${perm}.tmp" 2>/dev/null
-            fi
-        fi
+        case "$out" in
+            "ok "*)
+                lineno=${out#ok }
+                if awk -v line="$lineno" -v id="$id" '
+                        NR == line { $1 = id; print; next } { print }' "$perm" > "${perm}.tmp" 2>/dev/null \
+                   && mv -f "${perm}.tmp" "$perm" 2>/dev/null; then
+                    hit=0
+                    _ai_log "BIND: reverse-ok id=$id tool=${tool:-?} hash=$req_hash"
+                else
+                    rm -f "${perm}.tmp" 2>/dev/null
+                fi
+                ;;
+            none)
+                _ai_log "BIND: reverse-none id=$id tool=${tool:-?} hash=$req_hash"
+                ;;
+        esac
     fi
-    [ "$hit" = "0" ] || _ai_log "BIND: reverse-none id=$id tool=${tool:-?} hash=$req_hash"
     _release_lock
     return "$hit"
 }
